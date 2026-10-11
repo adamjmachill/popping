@@ -6,6 +6,9 @@ ENV PIP_NO_CACHE_DIR=1 \
 
 RUN python -m venv /venv
 ENV PATH=/venv/bin:$PATH
+# Own directory: ``pip install .`` from / makes setuptools scan the whole
+# filesystem (including /proc) for packages and never finishes.
+WORKDIR /build
 
 # CPU-only torch (the PyPI build bundles ~2 GB of CUDA libraries). Kept out
 # of requirements.lock because it comes from the PyTorch index; bump it
