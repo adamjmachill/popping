@@ -10,8 +10,9 @@ import os
 import re
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
-from pydantic import field_validator
+from pydantic import ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,6 +53,11 @@ def _is_placeholder(value: str) -> bool:
     return bool(_PLACEHOLDER_RE.match(value))
 
 
+_PLACEHOLDER_EXEMPT = frozenset(
+    {"postgres_user", "postgres_password", "postgres_db", "postgres_host"}
+)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=_readable_env_file,
@@ -61,11 +67,17 @@ class Settings(BaseSettings):
 
     @field_validator("*", mode="before")
     @classmethod
-    def _strip_placeholders(cls, value):
+    def _strip_placeholders(cls, value, info: ValidationInfo):
         """Normalise obvious .env placeholders to empty strings so the
         LLM router's truthy-key check doesn't pick them up. Real keys
         (Anthropic ``sk-ant-…``, OpenAI ``sk-…``, Groq ``gsk_…``) are
-        opaque enough that they won't match ``_PLACEHOLDER_RE``."""
+        opaque enough that they won't match ``_PLACEHOLDER_RE``.
+
+        Database credentials are exempt: compose hands the literal value
+        to the postgres container, so blanking it here would make the
+        backend log in with an empty password."""
+        if info.field_name in _PLACEHOLDER_EXEMPT:
+            return value
         if isinstance(value, str) and _is_placeholder(value):
             return ""
         return value
@@ -84,7 +96,6 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model_scoring: str = "llama3.1:8b"
     ollama_model_brief: str = "llama3.1:8b"
-    ollama_model_embedding: str = "all-minilm"
 
     # Ollama Cloud (https://ollama.com) — paid SaaS that fronts the same
     # /api/generate endpoint as local Ollama. Select via OLLAMA_CLOUD_API_KEY;
@@ -104,17 +115,14 @@ class Settings(BaseSettings):
     openai_model_brief: str = "gpt-4o"
 
     groq_api_key: str = ""
-    groq_model_scoring: str = "llama-3.1-8b-instant"
-    groq_model_brief: str = "llama-3.1-70b-versatile"
+    groq_model_scoring: str = "openai/gpt-oss-20b"
+    groq_model_brief: str = "openai/gpt-oss-120b"
     # Also gates app.podcast_asr — real speech-to-text (Groq's hosted
     # Whisper) for podcast episodes whose feed doesn't publish a
     # Podcasting 2.0 transcript tag. Reuses this same key; no
     # separate ASR credential.
 
     # --- Source API keys (phase 2+) ----------------------------------------
-    keepa_api_key: str = ""
-    podcast_index_api_key: str = ""
-    podcast_index_api_secret: str = ""
     # Optional PAT for the github_releases source. Unauthenticated = 60 req/hr;
     # with a PAT = 5000 req/hr. Recommended if you watch many repos.
     github_token: str = ""
@@ -277,7 +285,7 @@ class Settings(BaseSettings):
     # Deliberately below click-parity: dwell is a passive, volume-
     # heavy signal that also scales with article length -- the full
     # rationale is in the sweep2 PR's notes-for-review. Override
-    # with POPPING_PREF_VECTOR_WEIGHT_DWELL.
+    # with PREF_VECTOR_WEIGHT_DWELL.
     pref_vector_weight_dwell: float = 0.3
 
     # --- Phase 2: convergence boost ----------------------------------------
@@ -345,14 +353,14 @@ class Settings(BaseSettings):
     # install tops out around "two weeks of CVE volume + a few
     # hundred convergence slugs". Set to 0 to disable pruning
     # (keep full history). Override with
-    # POPPING_NOTIFICATION_DEDUP_RETENTION_DAYS.
+    # NOTIFICATION_DEDUP_RETENTION_DAYS.
     notification_dedup_retention_days: int = 30
 
     # --- Runtime settings (LLM picker) -----------------------------------
     # TTL for the /api/llm/tags response cache. The picker fetches this
     # on drawer-open; 1 h is plenty because the user's available models
     # change rarely (account-level quotas, not per-call). Override with
-    # POPPING_LLM_TAGS_CACHE_TTL_SECONDS if you need tighter refresh.
+    # LLM_TAGS_CACHE_TTL_SECONDS if you need tighter refresh.
     llm_tags_cache_ttl_seconds: int = 3600
 
     # How long to keep an empty-string cached_summary before retrying
@@ -363,20 +371,27 @@ class Settings(BaseSettings):
     # burn the LLM budget on a constant retry loop, short enough
     # that a permanent source fix or LLM-provider reconfiguration
     # becomes visible within a day. Override with
-    # POPPING_CACHED_SUMMARY_RETRY_HOURS.
+    # CACHED_SUMMARY_RETRY_HOURS.
     cached_summary_retry_hours: float = 24.0
 
     # --- Asset cache (favicons + thumbnails) ------------------------------
     # Where the ingest pipeline writes downloaded images. Must be
     # readable by the StaticFiles mount at /assets and writable by the
     # backend. Default /app/assets matches the named volume in
-    # docker-compose.yml. Override with POPPING_ASSETS_DIR.
+    # docker-compose.yml. Override with ASSETS_DIR.
     assets_dir: str = "/app/assets"
+
+    # User-Agent for outbound fetches. Sites like Reddit prefer one with
+    # a contact, e.g. "Popping/0.2 (+https://github.com/you/popping; you@example.com)".
+    user_agent: str = "Popping/0.2 (+https://github.com/adamjmachill/popping)"
+    # Reddit-only override; falls back to user_agent.
+    reddit_user_agent: str = ""
 
     @property
     def database_url(self) -> str:
         return (
-            f"postgresql+asyncpg://{self.postgres_user}:{self.postgres_password}"
+            f"postgresql+asyncpg://{quote(self.postgres_user, safe='')}"
+            f":{quote(self.postgres_password, safe='')}"
             f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
         )
 

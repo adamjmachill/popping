@@ -749,7 +749,7 @@ _INTERACTION_WEIGHTS: dict[str, float] = {
     #     contribution = PREF_VECTOR_WEIGHT_DWELL * min(value / 10, 1.0)
     # via ``_interaction_row_weight`` below. The knob lives in
     # config (``pref_vector_weight_dwell``, default 0.3, override
-    # with POPPING_PREF_VECTOR_WEIGHT_DWELL) and is read at call
+    # with PREF_VECTOR_WEIGHT_DWELL) and is read at call
     # time. The cap keeps a tab left open overnight from
     # out-weighing a deliberate deep read; the 10s reference keeps
     # the knob's units interpretable. NOTE: the weight is a

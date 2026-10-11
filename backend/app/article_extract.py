@@ -22,6 +22,7 @@ import logging
 import httpx
 import trafilatura
 
+from app.config import settings
 from app.url_safety import check_url_safe, ssrf_event_hook
 
 logger = logging.getLogger("popping.article_extract")
@@ -52,7 +53,7 @@ _MIN_USABLE_CHARS = 200
 
 # Default User-Agent for all fetches. Callers can override via the
 # ``custom_headers`` parameter to ``fetch_html`` (B4 fix).
-_DEFAULT_HEADERS = {"User-Agent": "Popping/0.2"}
+_DEFAULT_HEADERS = {"User-Agent": settings.user_agent}
 
 
 async def fetch_html(url: str, custom_headers: dict | None = None) -> str | None:

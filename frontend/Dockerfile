@@ -2,9 +2,10 @@ FROM node:22-alpine
 
 WORKDIR /app
 
-# Install deps first so source changes don't bust the cache
-COPY package.json ./
-RUN npm install
+# Install deps first so source changes don't bust the cache. ``npm ci``
+# installs exactly what package-lock.json pins.
+COPY package.json package-lock.json ./
+RUN npm ci
 
 # Guard against the "JSX-style /* ... */ comments in index.html render
 # as visible text" regression (commits 32bdd2f introduced, 621d90c

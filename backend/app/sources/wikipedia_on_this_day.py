@@ -18,6 +18,7 @@ import logging
 
 import httpx
 
+from app.config import settings
 from app.sources import register_source
 from app.sources.base import SourcePlugin
 from app.url_safety import ssrf_event_hook
@@ -34,7 +35,7 @@ _MAX_EVENTS = 50  # plenty; the feed has ~60 events per day
 # one gates the JSON parse.
 _MAX_RESPONSE_BYTES = 5 * 1024 * 1024
 _DEFAULT_HEADERS = {
-    "User-Agent": "Popping/0.2 (+https://github.com/compactly8274/popping)",
+    "User-Agent": settings.user_agent,
     "Accept": "application/json",
 }
 

@@ -63,7 +63,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import re
 import time
 # Slice 23 (security): use ``defusedxml`` instead of the stdlib
@@ -124,15 +123,6 @@ _DIRECT_BURST = 1.0
 # aligned with the listings' freshness.
 _CROSSREF_CACHE_TTL_S = 15 * 60
 
-# Default User-Agent. Reddit's RSS endpoints don't require a contact
-# string the way the JSON endpoints do (the JS challenge is what
-# the JSON endpoint uses to enforce contact, and the RSS endpoint
-# doesn't do JS challenges). Still, a contact UA is good hygiene.
-_DEFAULT_USER_AGENT = "Popping/0.2 (+https://github.com/compactly8274/popping)"
-_DEFAULT_USER_AGENT_WITH_CONTACT = (
-    "Popping/0.2 (+https://github.com/compactly8274/popping; "
-    "contact: phil@philjnewman.com)"
-)
 
 # Atom XML namespaces. Reddit's hot.rss feed declares both ATOM
 # (the feed itself) and MRSS (media thumbnails). The cross-ref
@@ -281,10 +271,7 @@ def is_disabled() -> bool:
 def _user_agent() -> str:
     """User-Agent string for Reddit calls.
     """
-    ua = os.environ.get("REDDIT_USER_AGENT", "").strip()
-    if ua:
-        return ua
-    return _DEFAULT_USER_AGENT_WITH_CONTACT
+    return settings.reddit_user_agent.strip() or settings.user_agent
 
 
 # ---------------------------------------------------------------------------

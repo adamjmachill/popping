@@ -6,9 +6,9 @@ name: build
 #
 # Tags produced:
 #   ghcr.io/<owner>/popping-backend:main        <- every push to main
-#   ghcr.io/<owner>/popping-backend:sha-<sha>   <- every push (any branch)
+#   ghcr.io/<owner>/popping-backend:sha-<full sha> <- every push to main
 #   ghcr.io/<owner>/popping-frontend:main
-#   ghcr.io/<owner>/popping-frontend:sha-<sha>
+#   ghcr.io/<owner>/popping-frontend:sha-<full sha>
 #   ghcr.io/<owner>/popping-{backend,frontend}:<pr>-<num>  <- PR builds
 
 on:
@@ -94,6 +94,8 @@ jobs:
 
   build-backend:
     name: backend image
+    # Never publish an image whose tests failed: compose pulls :latest.
+    needs: backend-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -140,6 +142,8 @@ jobs:
 
   build-frontend:
     name: frontend image
+    # Never publish an image whose tests failed: compose pulls :latest.
+    needs: backend-tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
