@@ -163,8 +163,13 @@ _crossref_cache: dict[str, tuple[float, list[dict]]] = {}
 # OAuth app-only token cache (script-type app).
 #
 # When REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET are both set, the direct
-# client fetches an app-only bearer from oauth.reddit.com and caches it
-# until near expiry, refreshing on 401. Without creds these stay inert.
+# client fetches an app-only bearer from www.reddit.com/api/v1/access_token
+# and caches it until near expiry, dropping it on 401. Without creds these
+# stay inert.
+#
+# Caveat: Reddit documents bearer requests as belonging on
+# oauth.reddit.com, but this client fetches public RSS from
+# www.reddit.com. Whether the bearer helps there is unverified.
 # ---------------------------------------------------------------------------
 
 # Token cached as (access_token, expires_at_monotonic) with a safety
@@ -196,7 +201,7 @@ async def _fresh_oauth_token() -> Optional[str]:
         try:
             async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
                 resp = await client.post(
-                    "https://oauth.reddit.com/api/v1/access_token",
+                    "https://www.reddit.com/api/v1/access_token",
                     data={"grant_type": "client_credentials"},
                     auth=(
                         settings.reddit_client_id,
@@ -224,8 +229,7 @@ async def _fresh_oauth_token() -> Optional[str]:
 async def _oauth_request_hook(request: httpx.Request) -> None:
     """Attach the OAuth bearer to every outgoing direct request. Only
     applies to reddit.com traffic; the token endpoint call is exempt."""
-    host = request.url.host or ""
-    if host == "oauth.reddit.com":
+    if request.url.path == "/api/v1/access_token":
         return  # never auth the token endpoint itself
     token = await _fresh_oauth_token()
     if token:
