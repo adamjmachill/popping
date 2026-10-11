@@ -179,7 +179,6 @@ export interface Health {
   sources: number
   entries: number
   db: string
-  redis: string
   last_fetch: string | null
 }
 

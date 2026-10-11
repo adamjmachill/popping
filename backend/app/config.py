@@ -89,8 +89,6 @@ class Settings(BaseSettings):
     postgres_host: str = "postgres"
     postgres_port: int = 5432
 
-    # --- Redis --------------------------------------------------------------
-    redis_url: str = "redis://redis:6379/0"
 
     # --- LLM (phase 2+, listed here so the env file has one home) ----------
     ollama_base_url: str = "http://host.docker.internal:11434"
@@ -111,6 +109,10 @@ class Settings(BaseSettings):
     claude_model_brief: str = "claude-sonnet-4-6"
 
     openai_api_key: str = ""
+    # Any OpenAI-compatible endpoint: OpenRouter (https://openrouter.ai/api/v1),
+    # Gemini (https://generativelanguage.googleapis.com/v1beta/openai),
+    # DeepSeek (https://api.deepseek.com/v1), ...
+    openai_base_url: str = "https://api.openai.com/v1"
     openai_model_scoring: str = "gpt-4o-mini"
     openai_model_brief: str = "gpt-4o"
 
@@ -177,6 +179,10 @@ class Settings(BaseSettings):
     oidc_issuer: str = ""            # e.g. https://auth.example.com
     oidc_client_id: str = ""
     oidc_scopes: str = "openid email profile"
+    # Comma-separated emails allowed to sign in via OIDC. Empty = any
+    # account the IdP authenticates (fine for a private IdP; NOT for
+    # Google or any IdP with open sign-up).
+    oidc_allowed_emails: str = ""
     public_url: str = ""             # e.g. https://popping.example.com
     # Extra CORS origins, comma-separated. Useful when the frontend
     # is served from a different host than ``public_url`` (LAN IP,

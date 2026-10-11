@@ -18,6 +18,7 @@ misses a ``public.example.com -> 127.0.0.1`` redirect hop).
 from __future__ import annotations
 
 import logging
+import zlib
 
 import httpx
 import trafilatura
@@ -56,7 +57,12 @@ _MIN_USABLE_CHARS = 200
 _DEFAULT_HEADERS = {"User-Agent": settings.user_agent}
 
 
-async def fetch_html(url: str, custom_headers: dict | None = None) -> str | None:
+async def fetch_html(
+    url: str,
+    custom_headers: dict | None = None,
+    *,
+    content_types: tuple[str, ...] | None = ("html",),
+) -> str | None:
     """SSRF-guarded HTML fetch, public so other callers that need raw
     HTML (rather than just extracted article text) can reuse the same
     guarded fetch instead of duplicating it — see
@@ -75,6 +81,10 @@ async def fetch_html(url: str, custom_headers: dict | None = None) -> str | None
         default) uses only the default headers. This is the path
         that ``GenericScrapePlugin`` uses to pass user-supplied
         ``Source.custom_headers`` through to the fetch (B4 fix).
+    content_types
+        Substrings, one of which the response Content-Type must contain.
+        ``None`` accepts any type (sitemap discovery fetches XML, plain
+        text and gzip).
     """
     safe, reason = check_url_safe(url)
     if not safe:
@@ -117,8 +127,10 @@ async def fetch_html(url: str, custom_headers: dict | None = None) -> str | None
                             url, final_url, final_reason,
                         )
                         return None
-                content_type = resp.headers.get("content-type", "")
-                if content_type and "html" not in content_type.lower():
+                content_type = resp.headers.get("content-type", "").lower()
+                if content_types and content_type and not any(
+                    t in content_type for t in content_types
+                ):
                     # PDFs, direct media links, etc. — not something
                     # trafilatura can do anything useful with.
                     return None
@@ -136,6 +148,13 @@ async def fetch_html(url: str, custom_headers: dict | None = None) -> str | None
         return None
     if not body:
         return None
+    if body[:2] == b"\x1f\x8b":  # gzip, e.g. sitemap.xml.gz
+        # Bounded output so a small compressed body can't expand
+        # without limit.
+        try:
+            body = zlib.decompressobj(wbits=31).decompress(body, _MAX_HTML_BYTES)
+        except zlib.error:
+            return None
     return body.decode("utf-8", errors="replace")
 
 

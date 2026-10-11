@@ -168,7 +168,7 @@ class SourceUpdate(BaseModel):
     # homepage-discovery behavior; set to a working direct
     # sitemap URL when the homepage's sitemap_index is broken
     # but a specific section's sitemap is healthy. The plugin
-    # uses this URL with ``trafilatura.sitemaps.sitemap_search``
+    # uses this URL with ``app.feed_autodiscovery.discover_sitemap_urls``
     # directly instead of going through the broken discovery
     # heuristic.
     sitemap_url: Optional[str] = None
@@ -588,7 +588,6 @@ class HealthOut(BaseModel):
     sources: int
     entries: int
     db: str
-    redis: str
     last_fetch: Optional[dt.datetime] = None
 
 

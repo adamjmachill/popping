@@ -58,7 +58,7 @@ import {
 import { STORAGE_KEYS, safeGetItem, safeSetItem } from './lib/storage'
 
 const REFRESH_INTERVAL_MS = 60_000
-// Health pings don't need 60s cadence — DB / Redis status is slow-
+// Health pings don't need 60s cadence — DB status is slow-
 // moving and the user only needs to see "everything is green" most
 // of the time. 5 min cuts the request count by 5x for the cost of
 // up-to-5-minute staleness on the status chip.
@@ -1117,7 +1117,7 @@ export function App() {
     }
   }, [activeSources])
 
-  // Cold path: health pings (DB / Redis / sources count). Pulled on
+  // Cold path: health pings (DB / sources count). Pulled on
   // its own slower interval so a single 5xx doesn't sit visible
   // for 60s on every entry-poll failure. ``refreshHealth`` is a
   // separate useCallback so the hot-path effect doesn't re-attach
@@ -2131,7 +2131,10 @@ export function App() {
   }
 
   if (!oidcDisabled && user === null) {
-    return <LoginPage returnTo="/" onSignedIn={setUser} />
+    // Reload on sign-in/out: PreferencesProvider loads once per page, and
+    // a reload makes it fetch the new account's preferences instead of
+    // writing the previous state into it.
+    return <LoginPage returnTo="/" onSignedIn={() => window.location.reload()} />
   }
 
   const showSearchView = searchQuery.trim().length > 0
@@ -2326,7 +2329,7 @@ export function App() {
             >
               {generatingBrief ? '…' : 'Brief'}
             </button>
-            {user && <UserBadge user={user} onSignedOut={() => setUser(null)} />}
+            {user && <UserBadge user={user} onSignedOut={() => window.location.reload()} />}
           </div>
         </div>
       </header>

@@ -37,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.deps import current_user
 from app.config import settings
 from app.db import get_session
-from app.models import Entry, Source, UserProfile
+from app.models import Entry, Source
 from app.schemas import EntryListOut
 from app.scoring import composite as composite_scorer
 from app.scoring import convergence
@@ -61,8 +61,6 @@ async def foryou(
       2. Apply the convergence multiplier to the stored composite_score.
       3. Re-sort and trim to ``limit``.
     """
-    profile = await session.scalar(select(UserProfile).where(UserProfile.id == 1))
-
     over_fetch = min(max(limit * 4, 200), 500)
     # Slim SELECT: we project only the columns the frontend renders plus
     # the source fields needed for the convergence slug lookup.

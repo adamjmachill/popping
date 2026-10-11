@@ -21,7 +21,6 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
 from app.llm.base import Provider, ProviderError
 from app.llm.tags import _THINKING_MODELS
 

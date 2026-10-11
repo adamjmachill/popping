@@ -18,7 +18,6 @@ import asyncio
 import datetime as dt
 import json
 import logging
-from typing import Any
 
 import httpx
 

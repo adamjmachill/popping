@@ -14,7 +14,6 @@ from typing import Any
 
 import httpx
 
-from app.config import settings
 from app.llm.base import Provider, ProviderError
 
 logger = logging.getLogger("popping.llm.anthropic")

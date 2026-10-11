@@ -77,8 +77,8 @@ import time
 # Aliased as ``ET`` so the existing call sites (``ET.fromstring(...)``,
 # ``root.findall(...)``) don't change — only the import does.
 from defusedxml import ElementTree as ET
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import datetime
+from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -182,6 +182,7 @@ def _oauth_enabled() -> bool:
 async def _fresh_oauth_token() -> Optional[str]:
     """Return a bearer token (cached or freshly fetched), or None if OAuth
     isn't configured / the exchange fails."""
+    global _oauth_token, _oauth_expires_at
     if not _oauth_enabled():
         return None
     now = time.monotonic()
