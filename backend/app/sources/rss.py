@@ -29,13 +29,14 @@ from urllib.parse import urljoin
 import feedparser
 import httpx
 
+from app.config import settings
 from app.sources import register_source
 from app.sources.base import SourcePlugin
 from app.url_safety import check_url_safe, ssrf_event_hook
 
 logger = logging.getLogger("popping.sources.rss")
 
-_USER_AGENT = "Popping/0.2 (+https://github.com/compactly8274/popping)"
+_USER_AGENT = settings.user_agent
 _ACCEPT = (
     "application/rss+xml, application/atom+xml, application/xml;q=0.9, */*;q=0.8"
 )

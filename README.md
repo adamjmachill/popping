@@ -2,16 +2,16 @@
 
 Personal AI-ranked intelligence dashboard. Aggregates deals, vulnerabilities, news, sports, podcasts, YouTube, and more into a single scored feed.
 
-**Phase 1 scope**: scaffold + 1 RSS source (BBC News) + minimal UI. The schema and source-plugin interface are designed to absorb the rest of the categories (deals, vulns, sports, etc.) in later phases without reshaping the database.
+Ships with RSS, Hacker News, Reddit, CVE (NVD + CISA KEV), GitHub releases, podcasts, YouTube, RedFlagDeals, Wikipedia "on this day" and generic-scrape sources, plus an LLM-written daily Brief.
 
 ## Quickstart
 
 **Prebuilt images (production, no build step):**
 
 ```bash
-cp .env.example .env             # defaults work out of the box
-docker compose up -d             # pulls ghcr.io/compactly8274/popping-{backend,frontend}:latest
-open http://<server-ip>:14789    # frontend (the only published port)
+cp .env.example .env             # then set POSTGRES_PASSWORD (openssl rand -hex 24)
+docker compose up -d             # pulls ghcr.io/adamjmachill/popping-{backend,frontend}:latest
+open http://localhost:14789      # frontend (the only published port)
 ```
 
 The frontend publishes on `14789` by default — a 5-digit port in the
@@ -22,10 +22,27 @@ range and below typical ephemeral-port territory (32768+). Override with
 the frontend over the internal docker network (`http://backend:8000`);
 postgres and redis are entirely internal.
 
-**Headless / LAN deployments** — the frontend binds to `0.0.0.0:14789` by
-default, so any device on the network can reach it. Put a reverse proxy
-in front (Caddy / Traefik / Nginx) for TLS + (optionally) additional
-auth in front of OIDC. Enable OIDC (see below) before exposing on a LAN.
+**The app has no login unless OIDC is enabled.** Anyone who can reach it
+can change settings, delete sources and spend your LLM credit. The
+frontend therefore binds to `127.0.0.1:14789` by default. On a VPS, keep
+it that way: Docker's port rules bypass `ufw`, so `0.0.0.0` would be
+public.
+
+**Public deployment (Cloudflare Tunnel + Access)** — no open ports, TLS
+handled by Cloudflare:
+
+1. In Cloudflare Zero Trust, create a tunnel and copy its token. Give it a
+   public hostname (e.g. `popping.example.com`) pointing at
+   `http://frontend:5173`.
+2. Add a Cloudflare Access application for that hostname that only allows
+   your email.
+3. In `.env` set `COMPOSE_PROFILES=tunnel`, `TUNNEL_TOKEN=<token>`,
+   `POPPING_ALLOWED_HOSTS=popping.example.com` and
+   `PUBLIC_URL=https://popping.example.com`, then `docker compose up -d`.
+
+**LAN deployments** — set `POPPING_FRONTEND_HOST=0.0.0.0` and
+`POPPING_ALLOWED_HOSTS=<hostname>`, put a reverse proxy (Caddy / Traefik /
+Nginx) in front for TLS, and enable OIDC (see below).
 
 The first boot runs `alembic upgrade head` against a fresh postgres volume, so the schema is created automatically. The scheduler then fires one immediate fetch per plugin and re-fetches every `refresh_interval_seconds`.
 
@@ -54,7 +71,7 @@ The override is auto-loaded by `docker compose up` and only adds `build:` + bind
 
 ```bash
 # In .env:
-POPPING_IMAGE_TAG=sha-50af121    # exact commit (immutable)
+POPPING_IMAGE_TAG=sha-<full 40-char commit sha>    # exact commit (immutable)
 # or
 POPPING_IMAGE_TAG=pr-3           # test a PR
 POPPING_PULL_POLICY=never        # don't auto-update a pinned tag
@@ -84,7 +101,7 @@ POPPING_PULL_POLICY=never        # don't auto-update a pinned tag
 - **Backend** (`backend/`): FastAPI + SQLAlchemy 2 async + APScheduler + pgvector.
 - **Frontend** (`frontend/`): Vite + React + Tailwind.
 - **Source plugins** (`backend/app/sources/`): drop a file, restart the backend, it's registered automatically via `@register_source`.
-- **Storage**: Postgres 16 with pgvector (embeddings phase 2+), Redis for caching (phase 1 unused).
+- **Storage**: Postgres 16 with pgvector (embedding storage). Redis is started but currently only health-checked.
 
 ## API
 

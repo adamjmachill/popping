@@ -56,7 +56,7 @@ _etag_cache: dict[str, str] = {}
 
 def _gh_headers() -> dict[str, str]:
     h = {
-        "User-Agent": "Popping/0.2 (+https://github.com/compactly8274/popping)",
+        "User-Agent": settings.user_agent,
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }

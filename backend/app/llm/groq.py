@@ -56,7 +56,10 @@ class GroqProvider(Provider):
             raise ProviderError(
                 f"groq returned {resp.status_code}: {resp.text[:200]}"
             )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ProviderError(f"groq returned invalid JSON: {exc}") from exc
         choices = data.get("choices") or []
         if not choices:
             raise ProviderError("groq returned no choices")

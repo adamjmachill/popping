@@ -444,7 +444,7 @@ const PreferencesContext = createContext<PreferencesContextValue | null>(null)
  *   2. Mount, after first GET: debounced-sync mode. Every
  *      setter is an optimistic in-memory update + a 250ms
  *      trailing-edge PUT.
- *   3. Unmount: flush any pending PUTs via ``navigator.sendBeacon``
+ *   3. Unmount: flush any pending PUTs via ``fetch`` + ``keepalive``
  *      so a tab close doesn't drop the last write.
  */
 export function PreferencesProvider({ children }: { children: ReactNode }) {
@@ -533,9 +533,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     }, 250)
   }, [])
 
-  // Flush on tab close. ``navigator.sendBeacon`` is the only
-  // fetch variant that survives a tab close; the rest are
-  // cancelled with the page.
+  // Flush on tab close. ``fetch`` with ``keepalive`` survives the
+  // page unloading. (``sendBeacon`` can't be used: it always POSTs,
+  // and the preferences endpoint is PUT-only.)
   useEffect(() => {
     const flush = () => {
       if (pendingRef.current.size === 0) return
@@ -547,13 +547,13 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       }
       for (const [key, value] of batch) {
         try {
-          // ``sendBeacon`` needs a Blob or FormData; we send
-          // the JSON string as a Blob with the right MIME.
-          const blob = new Blob(
-            [JSON.stringify({ value })],
-            { type: 'application/json' },
-          )
-          navigator.sendBeacon?.(`/api/preferences/${encodeURIComponent(key)}`, blob)
+          void fetch(`/api/preferences/${encodeURIComponent(key)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ value }),
+            credentials: 'include',
+            keepalive: true,
+          }).catch(() => {})
         } catch {
           // Best-effort. The user lost a write -- tolerable
           // for engagement signals, less tolerable for read

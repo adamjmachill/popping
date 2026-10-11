@@ -311,6 +311,16 @@ if settings.oidc_enabled:
 
     app.include_router(auth_router)
     logger.info("OIDC auth enabled (issuer=%s)", settings.oidc_issuer)
+elif settings.public_url:
+    # Every route (settings, sources, paid LLM calls) is unauthenticated
+    # in this mode. Fine behind an access gate (Cloudflare Access, VPN,
+    # SSH tunnel); dangerous on a bare public hostname.
+    logger.warning(
+        "OIDC is disabled but PUBLIC_URL=%s is set: all API routes are "
+        "unauthenticated. Put an access gate in front of this hostname "
+        "or set OIDC_ENABLED=true.",
+        settings.public_url,
+    )
 
 # Cached asset files (favicons + thumbnails). Mounted last so the API
 # routers above always win for /api/* paths. The browser loads these
@@ -338,7 +348,7 @@ app.mount("/assets", StaticFiles(directory=settings.assets_dir), name="assets")
 
 @app.middleware("http")
 async def _assets_security_headers(request, call_next):
-    """Add ``X-Content-Type-Options: nosniff`` to /assets/* responses.
+    """Add ``nosniff`` and a sandboxing CSP to /assets/* responses.
 
     StaticFiles sets its own content-type from the file extension
     (which is derived from a strict image allowlist in
@@ -350,6 +360,13 @@ async def _assets_security_headers(request, call_next):
     response = await call_next(request)
     if request.url.path.startswith("/assets/"):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        # Cached files come from third-party feeds. ``sandbox`` stops any
+        # script in one (e.g. an SVG cached before SVG was disallowed)
+        # from running with the dashboard's origin on direct navigation.
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; "
+            "frame-ancestors 'none'; sandbox"
+        )
     return response
 
 

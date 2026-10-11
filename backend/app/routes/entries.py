@@ -127,22 +127,10 @@ def _escape_like(term: str) -> str:
 # for the common case of a populated cache, expensive slow-
 # path (lock + re-check) for the cache-miss case.
 #
-# The cap is a leak guard, not a memory bound. ``asyncio.Lock``
-# is a few hundred bytes; 256 entries × ~500 B is ~125 KB,
-# which is fine. The cap prevents a pathological workload
-# (an attacker hammering 10k distinct entry ids) from
-# accumulating one lock per id forever. When the cap is hit
-# we return a throwaway lock — the lock still serializes
-# locally for the requesting task (so two concurrent
-# requests for the SAME id beyond the cap still serialize),
-# but two requests for DIFFERENT ids beyond the cap each get
-# their own lock and can race. The trade-off (mild stampede
-# for the 257+ distinct id) is strictly better than leaking
-# locks per request.
-#
-# This mirrors ``app.auth.oidc._get_discovery_lock`` — same
-# dict-of-locks + guard + cap pattern, kept identical for
-# readability.
+# The cap bounds memory if someone requests thousands of distinct
+# entry ids. When it's reached, idle locks (not currently held) are
+# evicted first; only if every tracked lock is in use do we hand out
+# an untracked lock, which gives up dedup for that one call.
 _SUMMARY_LOCKS_MAX = 256
 _summary_locks: dict[int, asyncio.Lock] = {}
 _summary_locks_guard = asyncio.Lock()
@@ -152,10 +140,8 @@ async def _get_summary_lock(entry_id: int) -> asyncio.Lock:
     """Return a process-wide ``asyncio.Lock`` for ``entry_id``.
 
     First call for a given id allocates a lock and stores it.
-    Subsequent calls return the same lock. When the cap is
-    hit, returns a throwaway untracked lock (a fresh
-    ``asyncio.Lock()`` per call) — see the module-level
-    comment for the trade-off.
+    Subsequent calls return the same lock. At the cap, idle
+    locks are evicted; see the module-level comment.
     """
     # Fast path: the common case is a single concurrent request
     # per entry. Reading the dict under no lock is safe because
@@ -169,11 +155,9 @@ async def _get_summary_lock(entry_id: int) -> asyncio.Lock:
         if lock is not None:
             return lock
         if len(_summary_locks) >= _SUMMARY_LOCKS_MAX:
-            # Return a fresh, untracked lock. The caller still
-            # serializes locally for THIS call, but doesn't
-            # share the lock with any other in-flight request.
-            # Mild cold-start stampede is possible for ids
-            # beyond the cap; preferred over leaking locks.
+            for idle_id in [k for k, v in _summary_locks.items() if not v.locked()]:
+                del _summary_locks[idle_id]
+        if len(_summary_locks) >= _SUMMARY_LOCKS_MAX:
             return asyncio.Lock()
         lock = asyncio.Lock()
         _summary_locks[entry_id] = lock
@@ -648,7 +632,7 @@ async def _fetch_hn_top_comments_text(hn_id: int | None, top_n: int = 8) -> str:
     url = f"https://hacker-news.firebaseio.com/v0/item/{hn_id}.json"
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(url, headers={"User-Agent": "Popping/0.2"})
+            resp = await client.get(url, headers={"User-Agent": settings.user_agent})
             resp.raise_for_status()
             item = resp.json()
     except (httpx.HTTPError, ValueError, json.JSONDecodeError):
@@ -664,7 +648,7 @@ async def _fetch_hn_top_comments_text(hn_id: int | None, top_n: int = 8) -> str:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.get(
                     f"https://hacker-news.firebaseio.com/v0/item/{comment_id}.json",
-                    headers={"User-Agent": "Popping/0.2"},
+                    headers={"User-Agent": settings.user_agent},
                 )
                 resp.raise_for_status()
                 data = resp.json() or {}

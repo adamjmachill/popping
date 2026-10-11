@@ -65,7 +65,10 @@ class AnthropicProvider(Provider):
             raise ProviderError(
                 f"anthropic returned {resp.status_code}: {resp.text[:200]}"
             )
-        data = resp.json()
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise ProviderError(f"anthropic returned invalid JSON: {exc}") from exc
         blocks = data.get("content") or []
         text = "".join(
             block.get("text", "")

@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 import httpx
 
+from app.config import settings
 from app.url_safety import check_url_safe, ssrf_event_hook
 
 # Matches any youtube.com subdomain (www, m, music, ...) or the
@@ -37,7 +38,7 @@ _CHANNEL_ID_DIRECT_RE = re.compile(r"/channel/(UC[0-9A-Za-z_-]{22})")
 _CHANNEL_ID_IN_PAGE_RE = re.compile(r'"channelId":"(UC[0-9A-Za-z_-]{22})"')
 
 _FETCH_TIMEOUT = httpx.Timeout(connect=10.0, read=15.0, write=15.0, pool=15.0)
-_USER_AGENT = "Popping/0.2 (+https://github.com/compactly8274/popping)"
+_USER_AGENT = settings.user_agent
 
 
 class YouTubeResolutionError(RuntimeError):
