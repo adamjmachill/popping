@@ -54,7 +54,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import current_user, resolve_user_id
-from app.config import settings
 from app.db import get_session
 from app.models import Entry, Interaction
 from app.schemas import InteractionBatchIn, InteractionIn, InteractionListOut, InteractionOut

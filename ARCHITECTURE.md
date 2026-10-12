@@ -41,10 +41,12 @@ With N workers:
 ## How to Fix (Future)
 
 If multi-worker is needed:
-1. Swap `AsyncIOScheduler` for `RedisScheduler` (APScheduler supports
-   this) so only one worker runs each job tick.
-2. Move `_etag_cache` and `_extracted_urls` to Redis (or a DB table).
-3. Move the convergence cache to Redis with a shared TTL.
+1. Run the scheduler in one dedicated process (or take a Postgres
+   advisory lock per job tick) so only one worker runs each job. A
+   shared APScheduler job store alone does not prevent duplicate runs.
+2. Move `_etag_cache` and `_extracted_urls` to a shared store (a DB
+   table, or Redis if one is added back).
+3. Move the convergence cache to the same shared store with a TTL.
 4. The notifier singleton is already built from env on startup — no
    change needed, each worker builds its own (that's fine).
 

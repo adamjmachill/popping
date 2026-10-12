@@ -17,10 +17,10 @@ open http://localhost:14789      # frontend (the only published port)
 The frontend publishes on `14789` by default — a 5-digit port in the
 14xxx range chosen to stay out of the common 3000/5173/8000/8080/8443
 range and below typical ephemeral-port territory (32768+). Override with
-`POPPING_FRONTEND_PORT=<port>` in `.env` (the container still listens on
-5173; only the host-side mapping changes). The backend is reachable from
+`POPPING_FRONTEND_PORT=<port>` in `.env` (nginx inside the container
+listens on 8080; only the host-side mapping changes). The backend is reachable from
 the frontend over the internal docker network (`http://backend:8000`);
-postgres and redis are entirely internal.
+postgres is entirely internal.
 
 **The app has no login unless OIDC is enabled.** Anyone who can reach it
 can change settings, delete sources and spend your LLM credit. The
@@ -33,16 +33,15 @@ handled by Cloudflare:
 
 1. In Cloudflare Zero Trust, create a tunnel and copy its token. Give it a
    public hostname (e.g. `popping.example.com`) pointing at
-   `http://frontend:5173`.
+   `http://frontend:8080`.
 2. Add a Cloudflare Access application for that hostname that only allows
    your email.
-3. In `.env` set `COMPOSE_PROFILES=tunnel`, `TUNNEL_TOKEN=<token>`,
-   `POPPING_ALLOWED_HOSTS=popping.example.com` and
+3. In `.env` set `COMPOSE_PROFILES=tunnel`, `TUNNEL_TOKEN=<token>` and
    `PUBLIC_URL=https://popping.example.com`, then `docker compose up -d`.
 
-**LAN deployments** — set `POPPING_FRONTEND_HOST=0.0.0.0` and
-`POPPING_ALLOWED_HOSTS=<hostname>`, put a reverse proxy (Caddy / Traefik /
-Nginx) in front for TLS, and enable OIDC (see below).
+**LAN deployments** — set `POPPING_FRONTEND_HOST=0.0.0.0`, put a reverse
+proxy (Caddy / Traefik / Nginx) in front for TLS, and enable OIDC (see
+below).
 
 The first boot runs `alembic upgrade head` against a fresh postgres volume, so the schema is created automatically. The scheduler then fires one immediate fetch per plugin and re-fetches every `refresh_interval_seconds`.
 
@@ -65,7 +64,7 @@ cp docker-compose.override.yml.example docker-compose.override.yml
 docker compose up -d --build     # builds from ./backend and ./frontend, bind-mounts source
 ```
 
-The override is auto-loaded by `docker compose up` and only adds `build:` + bind mounts; postgres and redis stay pulled.
+The override is auto-loaded by `docker compose up` and only adds `build:` + bind mounts; postgres stays pulled.
 
 **Pin to a specific build:**
 
@@ -90,18 +89,18 @@ POPPING_PULL_POLICY=never        # don't auto-update a pinned tag
                    │  (sources)  │   │
                    └──────┬──────┘   │
                           │          │
-              ┌───────────┼──────────┤
-              ▼           ▼          ▼
-        ┌─────────┐  ┌────────┐  ┌─────────┐
-        │Postgres │  │ Redis  │  │ Source  │
-        │pgvector │  │        │  │ plugins │
-        └─────────┘  └────────┘  └─────────┘
+              ┌───────────┴──────────┤
+              ▼                      ▼
+        ┌─────────┐            ┌─────────┐
+        │Postgres │            │ Source  │
+        │pgvector │            │ plugins │
+        └─────────┘            └─────────┘
 ```
 
 - **Backend** (`backend/`): FastAPI + SQLAlchemy 2 async + APScheduler + pgvector.
-- **Frontend** (`frontend/`): Vite + React + Tailwind.
+- **Frontend** (`frontend/`): Vite + React + Tailwind, served in production by nginx (`frontend/nginx.conf.template`), which also proxies `/api`, `/assets` and `/auth` to the backend.
 - **Source plugins** (`backend/app/sources/`): drop a file, restart the backend, it's registered automatically via `@register_source`.
-- **Storage**: Postgres 16 with pgvector (embedding storage). Redis is started but currently only health-checked.
+- **Storage**: Postgres 16 with pgvector (embedding storage). The backend runs as a single process; see `ARCHITECTURE.md`.
 
 ## API
 
@@ -512,7 +511,6 @@ just without the vector signal.
 │       ├── main.py            # FastAPI app + lifespan
 │       ├── config.py          # pydantic-settings
 │       ├── db.py              # async SQLAlchemy engine
-│       ├── redis.py           # async Redis client
 │       ├── deps.py
 │       ├── auth/              # OIDC + local auth (mounted when OIDC_ENABLED=true)
 │       │   ├── settings.py    #   OIDCConfig loader
@@ -581,10 +579,12 @@ just without the vector signal.
 
 ## Environment variables
 
-All optional except the database credentials (defaults work). See `.env.example` for the full list. The frontend's `VITE_BACKEND_URL` (in `docker-compose.yml`) points Vite's dev-server proxy at the backend container.
+All optional except the database credentials (defaults work). See `.env.example` for the full list. In production nginx proxies to `BACKEND_URL` (set in `docker-compose.yml`); in dev, `VITE_BACKEND_URL` points Vite's dev-server proxy at the backend.
 
 ## Development notes
 
 - **Hot reload**: both backend (`uvicorn --reload`) and frontend (Vite HMR) reload on file changes via the bind mounts in `docker-compose.yml`.
 - **Schema changes**: edit `app/models.py`, then `docker compose exec backend alembic revision --autogenerate -m "..."`. Commit the new file in `alembic/versions/`.
 - **Reset**: `docker compose down -v` wipes the postgres volume. Next `up` re-runs migrations from scratch.
+- **Dependencies**: Python packages are pinned in `backend/requirements.lock` (runtime) and `backend/requirements-dev.lock` (adds test tools). After editing `pyproject.toml`, run `backend/scripts/lock.sh` (needs [uv](https://docs.astral.sh/uv/)). torch is installed separately as the CPU build; its version is `TORCH_VERSION` in `backend/Dockerfile`.
+- **Upgrading from an older image**: the backend now runs as uid 10001. If an existing `assets` volume was created by an older root-run image, fix its ownership once: `docker compose run --rm --user root backend chown -R 10001:10001 /app/assets`.

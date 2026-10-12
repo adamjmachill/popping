@@ -1,69 +1,12 @@
-"""Groq provider. OpenAI-compatible at ``/openai/v1/chat/completions``.
-
-Groq uses the same chat-completions schema as OpenAI; the only
-difference is the base URL and the Authorization scheme.
-"""
+"""Groq provider: OpenAI-compatible chat completions at Groq's URL."""
 
 from __future__ import annotations
 
-import logging
-from typing import Any
-
-import httpx
-
-from app.config import settings
-from app.llm.base import Provider, ProviderError
-
-logger = logging.getLogger("popping.llm.groq")
+from app.llm.openai import OpenAIProvider
 
 
-class GroqProvider(Provider):
+class GroqProvider(OpenAIProvider):
     name = "groq"
 
-    def __init__(self, model: str, api_key: str) -> None:
-        self._model = model
-        self._api_key = api_key
-
-    async def complete(
-        self,
-        prompt: str,
-        *,
-        max_tokens: int = 512,
-        stop: list[str] | None = None,
-        think: bool = True,
-    ) -> str:
-        # ``think`` is an Ollama-specific knob (see Provider.complete's
-        # docstring) — accepted for call-site uniformity across the
-        # provider chain, unused here.
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "authorization": f"Bearer {self._api_key}",
-            "content-type": "application/json",
-        }
-        payload: dict[str, Any] = {
-            "model": self._model,
-            "max_tokens": max_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        }
-        if stop:
-            payload["stop"] = stop
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
-                resp = await client.post(url, headers=headers, json=payload)
-        except httpx.HTTPError as exc:
-            raise ProviderError(f"groq transport error: {exc}") from exc
-        if resp.status_code != 200:
-            raise ProviderError(
-                f"groq returned {resp.status_code}: {resp.text[:200]}"
-            )
-        try:
-            data = resp.json()
-        except ValueError as exc:
-            raise ProviderError(f"groq returned invalid JSON: {exc}") from exc
-        choices = data.get("choices") or []
-        if not choices:
-            raise ProviderError("groq returned no choices")
-        text = (choices[0].get("message") or {}).get("content", "")
-        if not text:
-            raise ProviderError("groq returned empty message content")
-        return text
+    def _default_base_url(self) -> str:
+        return "https://api.groq.com/openai/v1"

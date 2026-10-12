@@ -39,8 +39,8 @@ const proxy = {
 }
 
 // Vite rejects requests whose Host header isn't localhost or an IP.
-// List the public hostname(s) here when serving behind a tunnel or
-// reverse proxy, e.g. POPPING_ALLOWED_HOSTS=popping.example.com
+// List extra hostnames for the dev server here, e.g.
+// POPPING_ALLOWED_HOSTS=popping.example.com. (Production uses nginx.)
 const allowedHosts = (process.env.POPPING_ALLOWED_HOSTS || '')
   .split(',')
   .map((h) => h.trim())

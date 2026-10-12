@@ -24,7 +24,6 @@ from app.llm import router as llm_router
 from app.models import Entry, Source, StoryCluster
 from app.podcast_asr import asr_available, transcribe_audio
 from app.podcast_transcript import fetch_transcript_text, summarize_transcript
-from app.reddit_client import fetch_thread_comments
 from app.reddit_comment_summary import summarize_comments
 from app.schemas import (
     EntryListOut,

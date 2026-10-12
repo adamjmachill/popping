@@ -54,7 +54,7 @@ from app.brief import BriefGenerator
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import embedder
-from app.models import AppSetting, Brief, Entry, Interaction, NotificationDedup, Source, UserProfile
+from app.models import AppSetting, Entry, Interaction, NotificationDedup, Source, UserProfile
 from app.notify import Notifier
 from app.scoring import composite as composite_scorer
 from app.scoring import convergence as convergence_helper
@@ -387,15 +387,39 @@ async def _ingest(plugin_cls: Any) -> dict:
             if not source.active:
                 logger.debug("ingest: %s paused — skipping", source.name)
                 return summary
+
+        # Network fetch with no DB session open: some plugins (podcasts,
+        # generic scrape) take minutes, and an idle transaction for that
+        # long starves the connection pool.
+        raw_items = await plugin.fetch()
+        summary["fetched"] = len(raw_items)
+
+        async with SessionLocal() as session:
+            source = await session.get(Source, source_id)
+            if source is None:
+                return summary
             profile = await _load_profile(session)
-            raw_items = await plugin.fetch()
-            summary["fetched"] = len(raw_items)
+            normalized: list[dict] = []
             for raw in raw_items:
                 try:
-                    norm = plugin.normalize(raw)
+                    normalized.append(plugin.normalize(raw))
                 except ValueError as exc:
                     logger.warning("%s: skipping bad item: %s", plugin_cls.name, exc)
+            # Most polls return mostly items we already have. Skip them
+            # before embedding, which is the expensive step; the INSERT's
+            # ON CONFLICT still covers a concurrent writer.
+            urls = [n["url"] for n in normalized if n.get("url")]
+            known: set[str] = set()
+            if urls:
+                known = set(
+                    (await session.scalars(select(Entry.url).where(Entry.url.in_(urls)))).all()
+                )
+            for norm in normalized:
+                if norm.get("url") in known:
+                    summary["duplicates"] += 1
                     continue
+                if norm.get("url"):
+                    known.add(norm["url"])
                 # Lift image_url out of meta (the default normalize()
                 # buckets it there) so it can land in its own column.
                 # A missing image is the common case for non-RSS sources
@@ -406,14 +430,8 @@ async def _ingest(plugin_cls: Any) -> dict:
                 # as "how fresh was this when it arrived".
                 raw_score = recency.score(norm["published_at"], source.category)
                 embedding = await _embed_text(norm)
-                # Composite without an Entry. The fields it needs
-                # (published_at, raw_score, embedding, meta) are all
-                # in hand from the plugin output and the embedder;
-                # there's no Entry row yet (the INSERT below creates
-                # it). The old code built a transient ``_stub_entry``
-                # here as a workaround for ``composite.score``'s
-                # Entry-shaped signature; the new ``score_partial``
-                # takes the fields directly and the stub is gone.
+                # No Entry row exists yet (the INSERT below creates it),
+                # so score from the fields directly.
                 composite = composite_scorer.score_partial(
                     published_at=norm["published_at"],
                     raw_score=raw_score,
@@ -2386,7 +2404,7 @@ async def update_source(
     if sitemap_url is not _UNSET:
         # ``None`` = explicit clear back to homepage discovery.
         # Any string = set the direct sitemap URL the plugin
-        # should parse with ``trafilatura.sitemaps.sitemap_search``
+        # should parse with ``app.feed_autodiscovery.discover_sitemap_urls``
         # next poll.
         row.sitemap_url = sitemap_url
     if link_pattern is not _UNSET:

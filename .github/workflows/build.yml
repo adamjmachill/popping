@@ -52,7 +52,13 @@ jobs:
 
       - name: Install backend + test deps
         working-directory: backend
-        run: pip install -e ".[test]"
+        # Same pins as the image: CPU torch (version from the Dockerfile),
+        # then the lockfile, then the app itself.
+        run: |
+          TORCH_VERSION=$(sed -n 's/^ARG TORCH_VERSION=//p' Dockerfile)
+          pip install --index-url https://download.pytorch.org/whl/cpu "torch==${TORCH_VERSION}"
+          pip install -r requirements-dev.lock
+          pip install --no-deps -e .
 
       - name: Create pgvector extension
         run: |
@@ -92,8 +98,28 @@ jobs:
             echo "::error::${line}"
           done
 
+  frontend-checks:
+    name: frontend lint + build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      # tsc + vite build
+      - run: npm run build
+
   build-backend:
     name: backend image
+    # A normal build takes a few minutes; fail fast instead of GitHub's 6h default.
+    timeout-minutes: 30
     # Never publish an image whose tests failed: compose pulls :latest.
     needs: backend-tests
     runs-on: ubuntu-latest
@@ -142,8 +168,10 @@ jobs:
 
   build-frontend:
     name: frontend image
+    # A normal build takes a few minutes; fail fast instead of GitHub's 6h default.
+    timeout-minutes: 30
     # Never publish an image whose tests failed: compose pulls :latest.
-    needs: backend-tests
+    needs: [backend-tests, frontend-checks]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

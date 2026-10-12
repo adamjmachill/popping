@@ -5,7 +5,7 @@ Auto-feed (see ``app.feed_autodiscovery``) tries an actual feed
 first; this is the fallback the "Add custom" flow wires up when none
 exists. Rather than a bespoke "guess which links on this page are
 articles" heuristic, this leans on the site's own sitemap (via
-``trafilatura.sitemaps.sitemap_search``) for the list of candidate
+``app.feed_autodiscovery.discover_sitemap_urls``) for the list of candidate
 page URLs, then extracts each one's title/body the same way the
 on-demand article-summary feature does (``trafilatura.bare_extraction``,
 same library, same SSRF-guarded fetch as ``app.article_extract``).
@@ -312,7 +312,7 @@ class GenericScrapePlugin(SourcePlugin):
         # doesn't work on every site — e.g. theprogress.com's
         # sitemap_index has 1100+ cross-domain entries that all
         # 404) and instead parses the user-specified URL directly
-        # with ``trafilatura.sitemaps.sitemap_search``. Same code
+        # with ``app.feed_autodiscovery.discover_sitemap_urls``. Same code
         # path, same SSRF guard, same dedup; just a more specific
         # entry point. None falls back to the original behavior
         # so old rows aren't affected by the migration.
@@ -369,7 +369,7 @@ class GenericScrapePlugin(SourcePlugin):
 
     async def fetch(self) -> list[dict]:
         # If the row carries an explicit sitemap_url, use it
-        # directly — ``trafilatura.sitemaps.sitemap_search`` will
+        # directly — ``app.feed_autodiscovery.discover_sitemap_urls`` will
         # parse it as a sitemap (returning the article URLs) when
         # given a direct sitemap URL, but it tries to *find* the
         # sitemap first when given a homepage URL, which is
@@ -384,7 +384,7 @@ class GenericScrapePlugin(SourcePlugin):
         #   2. AND the user supplied a link_pattern on the row
         # The plugin doesn't page_links-only by design — sitemap
         # discovery is still the primary path because it's
-        # robust (trafilatura's sitemap_search handles sitemap
+        # robust (the sitemap crawler handles sitemap
         # indexes, news sitemaps, gzip, etc.). page_links is
         # the "no sitemap at all" escape hatch.
         if not candidates and self.link_pattern:

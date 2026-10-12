@@ -46,7 +46,7 @@ class Source(Base):
     category: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)
     # Optional direct sitemap URL. When set, the generic_scrape
-    # plugin parses it with ``trafilatura.sitemaps.sitemap_search``
+    # plugin parses it with ``app.feed_autodiscovery.discover_sitemap_urls``
     # directly instead of asking trafilatura to discover the
     # sitemap from the page URL. Solves the case where the
     # homepage's sitemap_index is broken (e.g. 1100+ cross-domain

@@ -20,12 +20,10 @@ name: popping
 #                 on it) can reach it. Docker's port rules bypass ufw, so
 #                 binding 0.0.0.0 on a VPS exposes it to the internet.
 #                 Override with POPPING_FRONTEND_HOST / POPPING_FRONTEND_PORT
-#                 (container port stays at 5173 — Vite default).
+#                 (container port is 8080, nginx).
 #   - backend:    not published. Reachable only via the frontend's
-#                 internal /api proxy (Vite dev server) on the docker
-#                 network.
+#                 nginx proxy (/api, /assets, /auth) on the docker network.
 #   - postgres:   not published. Internal-only.
-#   - redis:      not published. Internal-only.
 #   - guard-proxy: not published, and not started at all unless the
 #                 "hardened" profile is enabled. Internal-only egress
 #                 guard for the backend's outbound requests — see
@@ -52,7 +50,8 @@ x-logging: &default-logging
 
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    image: pgvector/pgvector:0.8.1-pg16
+    mem_limit: 768m
     restart: unless-stopped
     logging: *default-logging
     environment:
@@ -63,16 +62,6 @@ services:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-popping} -d ${POSTGRES_DB:-popping}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    logging: *default-logging
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -97,11 +86,12 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
     volumes:
       # Cached favicons + thumbnails written by ingest and served at /assets.
       - assets:/app/assets
+      # Downloaded embedding model, so a container recreate doesn't
+      # re-download it.
+      - models:/home/app/.cache
     # Map host.docker.internal to the docker host's gateway IP. The
     # default OLLAMA_BASE_URL points at host.docker.internal:11434 so
     # the backend can reach an Ollama instance running on the host
@@ -112,8 +102,10 @@ services:
     # different host, etc.).
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Embedding model (~1 GB resident) + torch; leave headroom on a 4 GB host.
+    mem_limit: 2g
     healthcheck:
-      test: ["CMD", "curl", "-fsS", "http://localhost:8000/api/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health', timeout=4)"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -126,25 +118,25 @@ services:
     restart: unless-stopped
     logging: *default-logging
     pull_policy: ${POPPING_PULL_POLICY:-always}
+    mem_limit: 128m
     depends_on:
       - backend
     environment:
-      VITE_BACKEND_URL: http://backend:8000
-      POPPING_ALLOWED_HOSTS: ${POPPING_ALLOWED_HOSTS:-}
+      BACKEND_URL: http://backend:8000
     ports:
-      # Container port is fixed at 5173 (Vite default baked into the image);
-      # only the host-side port is configurable via POPPING_FRONTEND_PORT.
-      - "${POPPING_FRONTEND_HOST:-127.0.0.1}:${POPPING_FRONTEND_PORT:-14789}:5173"
+      # nginx listens on 8080 inside the container; only the host side
+      # is configurable via POPPING_FRONTEND_PORT.
+      - "${POPPING_FRONTEND_HOST:-127.0.0.1}:${POPPING_FRONTEND_PORT:-14789}:8080"
 
   # Optional Cloudflare Tunnel. Enable with COMPOSE_PROFILES=tunnel and
   # TUNNEL_TOKEN in .env. In the Cloudflare dashboard, point the tunnel's
-  # public hostname at http://frontend:5173 and add that hostname to
-  # POPPING_ALLOWED_HOSTS.
+  # public hostname at http://frontend:8080.
   cloudflared:
     image: cloudflare/cloudflared:2026.9.1
     restart: unless-stopped
     logging: *default-logging
     profiles: ["tunnel"]
+    mem_limit: 128m
     command: tunnel --no-autoupdate run
     environment:
       TUNNEL_TOKEN: ${TUNNEL_TOKEN:-}
@@ -154,3 +146,4 @@ services:
 volumes:
   pgdata:
   assets:
+  models:

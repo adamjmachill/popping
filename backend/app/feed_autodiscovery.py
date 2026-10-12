@@ -3,37 +3,28 @@ either an existing RSS/Atom feed, or (when none exists) a sitemap-
 derived list of article URLs suitable for the generic-scrape fallback
 source type (``app.sources.generic_scrape``).
 
-Uses trafilatura's own feed/sitemap discovery (``trafilatura.feeds``,
-``trafilatura.sitemaps``) rather than reimplementing "search a page
-for <link rel=alternate>" or "guess an external service's API shape"
-ourselves — well-tested, actively maintained, and already a project
+Uses trafilatura's feed detection (``trafilatura.feeds``) rather than
+reimplementing "search a page for <link rel=alternate>" ourselves — well-tested, actively maintained, and already a project
 dependency (added in ``app.article_extract`` for full-article LLM
 summaries).
 
-SSRF note: trafilatura does its own internal HTTP fetching for
-redirects and any secondary URLs it discovers along the way (a
-candidate feed URL, a sitemap linked from robots.txt, etc.) — those
-calls are NOT individually routed through
-``app.url_safety.check_url_safe`` the way every other network call in
-this codebase is, because trafilatura has no hook for injecting an
-external URL check into its internal fetch layer. We check the
-user-supplied entry URL before calling into trafilatura at all (blocks
-the direct/obvious case), but accept the internal-fetch gap as a
-lower-severity, lower-probability trade for a single-operator
-dashboard where the URL always originates from the operator's own
-deliberate input, not an adversarial multi-tenant path. The ONGOING
-periodic re-fetch of any discovered article URL (the generic_scrape
-plugin's scheduled polling, not this one-time discovery step) goes
-through ``app.article_extract.fetch_article_text``, which DOES apply
-the full SSRF guard on every single call — so the unguarded window is
-only this one-shot, user-initiated discovery request.
+Network access: every request goes through
+``app.article_extract.fetch_html``, which applies the SSRF guard to the
+URL and to every redirect hop. trafilatura is used only to parse what we
+fetched (``determine_feed``); it never fetches anything itself, because
+its own downloader has no hook for that guard.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import urlparse
 
+from defusedxml import DefusedXmlException
+from defusedxml import ElementTree as DefusedET
+
+from app.article_extract import fetch_html
 from app.sources.rss import fetch_rss
 from app.url_safety import check_url_safe
 
@@ -41,49 +32,6 @@ logger = logging.getLogger("popping.feed_autodiscovery")
 
 _MAX_FEED_CANDIDATES = 5
 _MAX_SITEMAP_URLS = 50
-
-# trafilatura's own per-request download timeout — NOT unbounded, as
-# the ``_TRAFILATURA_BUDGET`` comment below used to claim. It defaults
-# to 30s (``trafilatura.settings`` DEFAULT.DOWNLOAD_TIMEOUT), which is
-# a problem for us specifically: ``sitemap_search`` doesn't crawl a
-# site with just one request — it tries robots.txt, several guessed
-# common paths, and any nested sitemap-index references it finds,
-# fetching each one in turn (see ``trafilatura.sitemaps.SitemapObject
-# .fetch``, which calls ``fetch_url`` with no override). Our own
-# ``_TRAFILATURA_BUDGET`` (30s) wraps that WHOLE multi-request crawl,
-# so if trafilatura's internal per-request timeout is ALSO 30s, a
-# single slow/hanging host among several candidates can consume the
-# entire outer budget by itself — the rest of the crawl (which might
-# have found something) never even gets a chance to run. Observed
-# directly: a real site's sitemap crawl went completely silent for
-# ~28s (one slow request eating nearly the whole 30s budget) before
-# our outer wait_for cut it off.
-#
-# ``fetch_url`` resolves to a shared, mutable ConfigParser object when
-# called without an explicit ``config=`` (which is how both
-# ``sitemap_search`` and ``determine_feed``'s own fetch call it) — we
-# tighten THAT shared object in place so every internal trafilatura
-# request this module triggers is bounded to a few seconds instead of
-# up to 30, leaving room in our outer budget for the multi-request
-# crawl a real site's sitemap discovery actually needs.
-_TRAFILATURA_DOWNLOAD_TIMEOUT_S = 8
-
-
-def _tighten_trafilatura_download_timeout() -> None:
-    import inspect
-
-    from trafilatura.downloads import fetch_url as _trafilatura_fetch_url
-
-    # ``config`` is a positional-or-keyword parameter, so its default
-    # lives in ``__defaults__`` — but which slot depends on how many
-    # other defaulted params precede it, which is exactly the kind of
-    # detail a trafilatura version bump could silently shift. Using
-    # ``inspect.signature`` instead of indexing ``__defaults__``
-    # directly is robust to that: it resolves the actual bound
-    # default object regardless of position.
-    default_config = inspect.signature(_trafilatura_fetch_url).parameters["config"].default
-    default_config.set("DEFAULT", "DOWNLOAD_TIMEOUT", str(_TRAFILATURA_DOWNLOAD_TIMEOUT_S))
-
 
 # Per-stage timeouts for the autodiscovery flow.
 #
@@ -105,13 +53,9 @@ def _tighten_trafilatura_download_timeout() -> None:
 #   _INITIAL_PROBE_BUDGET    10s  the user-supplied URL is a direct feed
 #                              (fast probe; if the URL itself isn't a
 #                              feed we move on quickly)
-#   _TRAFILATURA_BUDGET      30s  one-shot internal HTTP for find_feed_urls
-#                              / sitemap_search — a multi-request crawl
-#                              (robots.txt, guessed paths, nested
-#                              sitemap indexes), each request now
-#                              capped at ``_TRAFILATURA_DOWNLOAD_TIMEOUT_S``
-#                              (see above) so this budget covers
-#                              several of them instead of one
+#   _TRAFILATURA_BUDGET      30s  fetching + scanning the page for feed
+#                              links, or the sitemap crawl (robots.txt,
+#                              guessed paths, nested sitemap indexes)
 #   _CANDIDATE_PROBE_BUDGET  20s  per-candidate fetch_rss; shorter than
 #                              60s because we have many candidates and
 #                              the diminishing-return on slow feeds is
@@ -175,73 +119,34 @@ async def discover_feed_url(page_url: str) -> str | None:
         pass
 
     async def _trafilatura_find() -> list[str]:
-        # Lazy import — ``trafilatura`` is a heavy dep that loads lxml at
-        # import time, so deferring to here keeps the module-load cost
-        # off the request hot path when no one is using autofeed.
-        from trafilatura.downloads import fetch_url
+        # Lazy import: trafilatura loads lxml at import time.
         from trafilatura.feeds import FeedParameters, determine_feed, get_hostinfo
 
-        _tighten_trafilatura_download_timeout()
-
-        # NOT trafilatura.feeds.find_feed_urls — despite the name, that
-        # function does NOT return feed URLs found on the page. It
-        # fetches the page, and if the page itself doesn't parse as a
-        # feed, it locates a candidate feed (via determine_feed, same
-        # as below), fetches THAT too, and returns the individual
-        # ARTICLE links extracted from inside the feed — it's a "give
-        # me article URLs, using feed discovery as the mechanism"
-        # helper, not a "find the feed URL" helper. Feeding its output
-        # to fetch_rss() (which is what happens below) means every
-        # "candidate" is an individual article page, which never
-        # parses as RSS/Atom — so this returned real candidates from
-        # trafilatura but discover_feed_url still reported "not
-        # found" for effectively every site whose homepage isn't
-        # itself the feed (i.e. nearly every real site). Verified via
-        # a local mock: find_feed_urls returned the mock feed's two
-        # <item> links, not the feed.xml URL itself.
-        #
-        # determine_feed(html, params) is the actual "<link
-        # rel=alternate>-and-common-paths" scanner find_feed_urls
-        # calls internally before it goes and dereferences the
-        # result — replicate exactly that first half (fetch the page,
-        # build the same FeedParameters, call determine_feed) and
-        # return ITS output, which is real feed URLs. Same to_thread
-        # reasoning as before: fetch_url is synchronous and does its
-        # own network I/O, so it runs on a worker thread; wait_for
-        # (below) still bounds the total wait since trafilatura has
-        # no internal timeout of its own.
-        def _sync_determine_feed() -> list[str]:
-            domain, baseurl = get_hostinfo(page_url)
-            if domain is None:
-                logger.info(
-                    "feed_autodiscovery: get_hostinfo could not extract a "
-                    "domain from %s — giving up before fetching",
-                    page_url,
-                )
-                return []
-            downloaded = fetch_url(page_url)
-            if downloaded is None:
-                # trafilatura's fetch_url swallows the underlying reason
-                # (bot-blocked, TLS error, DNS failure, non-2xx status,
-                # etc.) and just returns None — this is as much detail
-                # as we get without reimplementing its fetch layer.
-                logger.info(
-                    "feed_autodiscovery: trafilatura could not fetch %s "
-                    "(blocked, non-2xx, or a network error) — no page "
-                    "content to scan for a <link rel=alternate> tag",
-                    page_url,
-                )
-                return []
-            params = FeedParameters(baseurl, domain, page_url, False, None)
-            found = determine_feed(downloaded, params)
+        # determine_feed scans the page for <link rel=alternate> tags and
+        # common feed paths and returns candidate feed URLs. (Not
+        # trafilatura.feeds.find_feed_urls: that dereferences the feed
+        # and returns the article links inside it.)
+        domain, baseurl = get_hostinfo(page_url)
+        if domain is None:
             logger.info(
-                "feed_autodiscovery: determine_feed found %d candidate(s) "
-                "for %s: %s",
-                len(found), page_url, found[:_MAX_FEED_CANDIDATES],
+                "feed_autodiscovery: no domain in %s — giving up before fetching",
+                page_url,
             )
-            return found
-
-        return await asyncio.to_thread(_sync_determine_feed)
+            return []
+        html = await fetch_html(page_url)
+        if html is None:
+            logger.info(
+                "feed_autodiscovery: could not fetch %s — no page to scan for feed links",
+                page_url,
+            )
+            return []
+        params = FeedParameters(baseurl, domain, page_url, False, None)
+        found = await asyncio.to_thread(determine_feed, html, params)
+        logger.info(
+            "feed_autodiscovery: determine_feed found %d candidate(s) for %s: %s",
+            len(found), page_url, found[:_MAX_FEED_CANDIDATES],
+        )
+        return found
 
     try:
         candidates = await asyncio.wait_for(_trafilatura_find(), _TRAFILATURA_BUDGET)
@@ -305,30 +210,107 @@ async def discover_sitemap_urls(page_url: str, limit: int = _MAX_SITEMAP_URLS) -
     if not safe:
         logger.info("feed_autodiscovery: %s rejected by URL safety check (%s)", page_url, reason)
         return []
-    async def _trafilatura_sitemap() -> list[str]:
-        # Lazy import — see ``_trafilatura_find`` above.
-        from trafilatura import sitemaps as trafilatura_sitemaps
-
-        _tighten_trafilatura_download_timeout()
-
-        # Same to_thread reasoning as find_feed_urls above —
-        # sitemap_search is synchronous and does its own network I/O.
-        # It crawls MULTIPLE URLs internally (robots.txt, guessed
-        # common paths, nested sitemap indexes) — see the
-        # _TRAFILATURA_DOWNLOAD_TIMEOUT_S comment up top for why each
-        # of those needs its own tight cap, not just the one this
-        # wait_for applies to the whole crawl.
-        return await asyncio.to_thread(trafilatura_sitemaps.sitemap_search, page_url)
     try:
-        urls = await asyncio.wait_for(_trafilatura_sitemap(), _TRAFILATURA_BUDGET)
+        urls = await asyncio.wait_for(
+            _crawl_sitemaps(page_url, limit), _TRAFILATURA_BUDGET
+        )
     except asyncio.TimeoutError:
         logger.info(
-            "feed_autodiscovery: trafilatura.sitemap_search for %s hit the "
-            "%ss budget; returning empty list",
+            "feed_autodiscovery: sitemap crawl for %s hit the %ss budget",
             page_url, _TRAFILATURA_BUDGET,
         )
         return []
     except Exception as exc:  # noqa: BLE001
-        logger.info("feed_autodiscovery: sitemap_search failed for %s: %s", page_url, exc)
+        logger.info("feed_autodiscovery: sitemap crawl failed for %s: %s", page_url, exc)
         return []
-    return urls[:limit]  # noqa: RET504 - explicit for the type checker; see dict-route equivalent
+    return urls[:limit]
+
+
+# Sitemap crawl limits: how many sitemap documents one discovery may
+# fetch (robots.txt-listed + guessed + nested index entries).
+_MAX_SITEMAP_DOCS = 10
+_GUESSED_SITEMAP_PATHS = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
+
+
+def _looks_like_sitemap(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return path.endswith((".xml", ".xml.gz", ".txt")) or "sitemap" in path
+
+
+def _site_key(host: str) -> str:
+    """Approximate registrable domain: news.example.com -> example.com,
+    www.bbc.co.uk -> bbc.co.uk. Good enough to keep a site's own
+    subdomains together without a public-suffix list."""
+    host = host.lower().rstrip(".")
+    if host.replace(".", "").isdigit() or ":" in host:  # IP literal
+        return host
+    labels = host.split(".")
+    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in {
+        "co", "com", "org", "net", "gov", "ac", "edu"
+    }:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _same_site(url: str, host: str) -> bool:
+    return _site_key(urlparse(url).hostname or "") == _site_key(host)
+
+
+def _parse_sitemap(text: str) -> tuple[list[str], list[str]]:
+    """Return (page URLs, nested sitemap URLs) from a sitemap document:
+    an XML urlset, an XML sitemapindex, or a plain-text list."""
+    try:
+        root = DefusedET.fromstring(text.lstrip())
+    except (DefusedET.ParseError, ValueError, DefusedXmlException):
+        lines = [ln.strip() for ln in text.splitlines()]
+        return [ln for ln in lines if ln.startswith(("http://", "https://"))], []
+    pages: list[str] = []
+    nested: list[str] = []
+    is_index = root.tag.rsplit("}", 1)[-1] == "sitemapindex"
+    for el in root.iter():
+        if el.tag.rsplit("}", 1)[-1] == "loc" and el.text:
+            (nested if is_index else pages).append(el.text.strip())
+    return pages, nested
+
+
+async def _crawl_sitemaps(page_url: str, limit: int) -> list[str]:
+    """Find article URLs for ``page_url`` from its sitemap(s), using only
+    SSRF-guarded fetches. ``page_url`` may be a sitemap itself or a site
+    URL; for a site URL, robots.txt ``Sitemap:`` lines are tried first,
+    then a few common paths."""
+    parsed = urlparse(page_url)
+    host = (parsed.hostname or "").lower()
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    if _looks_like_sitemap(page_url):
+        queue = [page_url]
+    else:
+        robots = await fetch_html(f"{origin}/robots.txt", content_types=None) or ""
+        listed = [
+            line.split(":", 1)[1].strip()
+            for line in robots.splitlines()
+            if line.lower().startswith("sitemap:")
+        ]
+        queue = listed or [origin + path for path in _GUESSED_SITEMAP_PATHS]
+
+    seen: set[str] = set()
+    pages: list[str] = []
+    page_set: set[str] = set()
+    fetched = 0
+    while queue and fetched < _MAX_SITEMAP_DOCS and len(pages) < limit:
+        url = queue.pop(0)
+        if url in seen or not _same_site(url, host):
+            continue
+        seen.add(url)
+        fetched += 1
+        text = await fetch_html(url, content_types=None)
+        if not text:
+            continue
+        found, nested = _parse_sitemap(text)
+        for u in found:
+            if len(pages) >= limit:
+                break
+            if u not in page_set and _same_site(u, host):
+                page_set.add(u)
+                pages.append(u)
+        queue.extend(nested)
+    return pages

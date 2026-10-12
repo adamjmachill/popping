@@ -41,11 +41,12 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from app import assets
+from app.auth.deps import require_user
 from app.config import settings
 from app.embeddings import close_embedder, embedder
 from app.notify import build_notifier
@@ -63,7 +64,6 @@ from app.routes import interactions as interactions_routes
 from app.routes import preferences as preferences_routes
 from app.routes import settings as settings_routes
 from app.routes import sources as sources_routes
-from app.redis import close_redis, init_redis
 from app.db import dispose_engine
 from app.scheduler import start_scheduler, stop_scheduler
 
@@ -168,14 +168,6 @@ async def lifespan(app: FastAPI):
     # because (a) the bearer token shouldn't leak to the thumbnail
     # fetcher, (b) per-call timeouts diverge (Hydra wants short).
     reddit_client.init_client()
-    # Build the Redis pool up-front so the first request doesn't pay
-    # the connect round-trip. ``init_redis`` is a no-op if the URL
-    # is unset (pure file-system deploy), so we don't gate it on
-    # ``settings.redis_url``. A failed Redis call will be raised
-    # here and logged; if you want graceful degrade, wrap in try/
-    # except — today we let it crash because the rest of the app
-    # assumes Redis exists.
-    await init_redis()
     # Load embedder first — the scheduler's ingest path will call
     # embed() on every entry, and we want the model warm before the
     # first fetch lands. If the model download fails (offline cold
@@ -218,7 +210,7 @@ async def lifespan(app: FastAPI):
     finally:
         # Teardown order: scheduler first (so no in-flight fetches
         # race the closes), then the shared asset client, the Hydra
-        # Reddit client (same idempotent shape), the Redis pool, the
+        # Reddit client (same idempotent shape), the
         # embedder's ThreadPoolExecutor (otherwise the worker
         # threads leak across ``uvicorn --reload`` cycles), and
         # finally the SQLAlchemy engine. Each close is idempotent —
@@ -226,7 +218,6 @@ async def lifespan(app: FastAPI):
         await stop_scheduler()
         await assets.close_client()
         await reddit_client.close_client()
-        await close_redis()
         await close_embedder()
         await dispose_engine()
         logger.info("popping stopped")
@@ -293,16 +284,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# With OIDC on, every API route except the health check requires a
+# session (or a local-bypass grant). Reads included: entries, briefs and
+# For You reveal what the user follows and reads.
+_api_deps = [Depends(require_user)] if settings.oidc_enabled else []
+
 app.include_router(health_routes.router, prefix="/api")
-app.include_router(sources_routes.router, prefix="/api")
-app.include_router(entries_routes.router, prefix="/api")
-app.include_router(foryou_routes.router, prefix="/api")
-app.include_router(framing_routes.router, prefix="/api")
-app.include_router(ingest_routes.router, prefix="/api")
-app.include_router(interactions_routes.router, prefix="/api")
-app.include_router(preferences_routes.router, prefix="/api")
-app.include_router(brief_routes.router, prefix="/api")
-app.include_router(settings_routes.router, prefix="/api")
+for _router in (
+    sources_routes.router,
+    entries_routes.router,
+    foryou_routes.router,
+    framing_routes.router,
+    ingest_routes.router,
+    interactions_routes.router,
+    preferences_routes.router,
+    brief_routes.router,
+    settings_routes.router,
+):
+    app.include_router(_router, prefix="/api", dependencies=_api_deps)
 
 # Auth router is only mounted when OIDC is enabled — keeps single-user
 # deployments free of /auth/* routes entirely.
