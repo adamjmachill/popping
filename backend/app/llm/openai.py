@@ -31,6 +31,10 @@ class OpenAIProvider(Provider):
     def _default_base_url(self) -> str:
         return settings.openai_base_url
 
+    def _payload_overrides(self, max_tokens: int) -> dict[str, Any]:
+        """Extra or replacement request fields for a specific service."""
+        return {}
+
     async def complete(
         self,
         prompt: str,
@@ -60,6 +64,7 @@ class OpenAIProvider(Provider):
         }
         if stop:
             payload["stop"] = stop
+        payload.update(self._payload_overrides(max_tokens))
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(60.0)) as client:
                 resp = await client.post(self._url, headers=headers, json=payload)
