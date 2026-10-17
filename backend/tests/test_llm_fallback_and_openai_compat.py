@@ -107,3 +107,24 @@ async def test_groq_url_and_error_naming(monkeypatch):
     with pytest.raises(ProviderError, match="^groq returned invalid JSON"):
         await GroqProvider("m", "k").complete("p")
     assert str(seen[0].url) == "https://api.groq.com/openai/v1/chat/completions"
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_groq_gpt_oss_gets_reasoning_headroom(monkeypatch):
+    seen = _capture_requests(monkeypatch, _OK)
+    await GroqProvider("openai/gpt-oss-120b", "k").complete("p", max_tokens=600)
+    body = json.loads(seen[0].content)
+    assert body["max_tokens"] == 600 + 1024
+    assert body["reasoning_effort"] == "low"
+    assert body["include_reasoning"] is False
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_groq_other_models_unchanged(monkeypatch):
+    seen = _capture_requests(monkeypatch, _OK)
+    await GroqProvider("qwen/qwen3-32b", "k").complete("p", max_tokens=600)
+    body = json.loads(seen[0].content)
+    assert body["max_tokens"] == 600
+    assert "reasoning_effort" not in body
