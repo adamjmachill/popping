@@ -1254,7 +1254,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               aria-label={vote === 'up' ? 'remove upvote' : 'upvote — more like this'}
               aria-pressed={vote === 'up'}
               title="more like this"
-              className={`h-9 px-3 rounded-full flex items-center justify-center transition-colors
+              className={`h-10 px-3 rounded-full flex items-center justify-center transition-colors
                           ${vote === 'up'
                             ? 'bg-amber-400/15 text-amber-400'
                             : 'text-label-secondary hover:text-amber-400 active:text-amber-400'}`}
@@ -1281,7 +1281,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               aria-label={vote === 'down' ? 'remove downvote' : 'downvote — less like this'}
               aria-pressed={vote === 'down'}
               title="less like this"
-              className={`h-9 px-3 rounded-full flex items-center justify-center transition-colors
+              className={`h-10 px-3 rounded-full flex items-center justify-center transition-colors
                           ${vote === 'down'
                             ? 'bg-sky-400/15 text-sky-400'
                             : 'text-label-secondary hover:text-sky-400 active:text-sky-400'}`}
@@ -1299,7 +1299,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               of whether the vote pill rendered (e.g. a caller that
               wires hide/star but not votes still gets the icons
               flush right, not stranded at the left edge). */}
-          <div className="ml-auto flex items-center gap-1">
+          <div className="ml-auto -mr-2 flex items-center">
             {/* Per-card summary chevron. Same ``data-card-interactive``
                 guard so a long-press / right-click on the card itself
                 doesn't fire while the user is targeting the chevron.
@@ -1321,7 +1321,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={expanded ? 'hide summary' : 'show summary'}
                 aria-expanded={!!expanded}
                 title={expanded ? 'hide summary (s)' : 'show summary (s)'}
-                className={`shrink-0 w-7 h-7 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated
+                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated
                             ${expanded ? 'opacity-100 text-accent' : 'opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100'}`}
               >
                 {/* Rotate 180° when expanded so the chevron flips up —
@@ -1365,7 +1365,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label="mark this card as read"
                 aria-pressed={!unread}
                 title="mark as read (m)"
-                className={`shrink-0 w-7 h-7 flex items-center justify-center rounded-full active:bg-bg-elevated
+                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${unread ? 'text-label-secondary' : 'text-accent'}`}
               >
                 <CheckIcon className="w-4 h-4" filled={!unread} />
@@ -1393,7 +1393,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={starred ? 'remove from saved' : 'save for later'}
                 aria-pressed={!!starred}
                 title="save for later (s)"
-                className={`shrink-0 w-7 h-7 flex items-center justify-center rounded-full active:bg-bg-elevated
+                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${starred ? 'text-accent' : 'text-label-secondary'}`}
               >
                 <StarIcon className="w-4 h-4" filled={!!starred} />
@@ -1428,7 +1428,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={hidden ? 'unhide' : 'hide'}
                 aria-pressed={!!hidden}
                 title="hide (h)"
-                className={`shrink-0 w-7 h-7 flex items-center justify-center rounded-full active:bg-bg-elevated
+                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${hidden ? 'text-accent' : 'text-label-secondary'}`}
               >
                 <EyeIcon className="w-4 h-4" closed={!!hidden} />

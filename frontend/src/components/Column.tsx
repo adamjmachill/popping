@@ -521,7 +521,11 @@ export function ColumnInner({
               <ColumnSection
                 label="Fresh"
                 count={sections.new.length}
-                collapsed={sectionsCollapsed?.new ?? false}
+                // With no History section below, a "Fresh (n)" header
+                // only repeats the column header's count, so it's left
+                // out and the section can't be collapsed out of sight.
+                showHeader={sections.history.length > 0}
+                collapsed={sections.history.length > 0 && (sectionsCollapsed?.new ?? false)}
                 onToggle={onToggleSection ? () => onToggleSection('new') : undefined}
                 entries={sections.new}
                 // All entries in the Fresh section are unread
@@ -618,6 +622,8 @@ export function ColumnInner({
 // the History section without restructuring.)
 type SectionProps = {
   label: string
+  // False drops the collapsible "LABEL (n)" header row.
+  showHeader?: boolean
   count: number
   collapsed: boolean
   onToggle?: () => void
@@ -646,6 +652,7 @@ type SectionProps = {
 
 function ColumnSection({
   label,
+  showHeader = true,
   count,
   collapsed,
   onToggle,
@@ -676,6 +683,7 @@ function ColumnSection({
           expanded). text-ios-caption + uppercase matches the
           column-header typography so the two read as the same
           scale. */}
+      {showHeader && (
       <button
         type="button"
         onClick={onToggle}
@@ -692,6 +700,7 @@ function ColumnSection({
         <span>{label}</span>
         <span className="text-label-secondary font-semibold">({count})</span>
       </button>
+      )}
       {/* Cards. Unmounted when collapsed (no animation, just a
           snap — matches BriefCard's collapse behavior and keeps
           the section cheap to re-open). The list keys are stable

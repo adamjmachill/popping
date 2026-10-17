@@ -285,6 +285,7 @@ export function Drawer({
         // the JS preventDefault engages.
         className={`fixed z-40 bg-bg-app shadow-2xl flex flex-col touch-pan-y-zoom
                     inset-y-0 right-0 top-0 left-auto h-full w-[88vw] max-w-[420px] rounded-l-ios-lg
+                    pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)]
                     md:w-[360px] md:rounded-none
                     transition-transform duration-300 ease-out
                     ${open
@@ -345,7 +346,7 @@ export function Drawer({
                 onClose()
               }}
               title="History"
-              subtitle="review your reads · hides · saves"
+              subtitle="read, hidden and saved stories"
               showChevron
             />
             {/* 'Save current view' row. The user can
@@ -369,7 +370,7 @@ export function Drawer({
                   onClose()
                 }}
                 title="Save current view"
-                subtitle="capture the current filter + per-column prefs as a named preset"
+                subtitle="keep this layout to come back to"
                 showChevron
               />
             )}
@@ -384,7 +385,7 @@ export function Drawer({
                 onClose()
               }}
               title="All settings…"
-              subtitle="feeds · LLM · notifications · reset"
+              subtitle="feeds · AI · notifications · reset"
               showChevron
             />
           </GroupedSection>
