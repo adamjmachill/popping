@@ -34,6 +34,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type Source } from '../api'
 import { SourceIcon } from './SourceIcon'
+import { categoryLabel, sourceLabel } from '../lib/labels'
 import { toast } from './Toast'
 
 type Props = {
@@ -697,9 +698,9 @@ function SourceRow({
               : undefined
           }
         >
-          {source.name}
+          {sourceLabel(source.name)}
         </span>
-        <span className="text-label-tertiary shrink-0 text-[11px]">{source.category}</span>
+        <span className="text-label-tertiary shrink-0 text-[11px]">{categoryLabel(source.category)}</span>
         {/* Auto-disabled chips take precedence over the plain
             "paused" chip — the distinction matters: a paused source
             is a user choice (no action needed); an auto-disabled

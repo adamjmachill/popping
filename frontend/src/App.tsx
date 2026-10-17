@@ -33,6 +33,7 @@ import { Wallpaper } from './components/Wallpaper'
 import { SkeletonGrid } from './components/Skeleton'
 import { Settings, type SettingsTab } from './components/Settings'
 import { recordImmediate } from './lib/interactions'
+import { categoryLabel } from './lib/labels'
 // Per-user server-backed preferences. Replaces the 8 localStorage
 // keys the dashboard used to write (readEntries, lastViewed,
 // columnPrefs, columnSections, hiddenEntries, starredEntries,
@@ -2699,7 +2700,7 @@ export function App() {
                         : 'bg-bg-surface text-label-secondary active:bg-bg-elevated'
                     }`}
                   >
-                    {c.name}
+                    {categoryLabel(c.name)}
                     {!!newCount && (
                       <span
                         className={`rounded-full px-1.5 text-[10px] leading-4 font-semibold ${

@@ -1,6 +1,7 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
 import type { Entry } from '../api'
 import { Card } from './Card'
+import { categoryLabel } from '../lib/labels'
 
 // Per-column sort/filter preferences. Owned by App (so it persists
 // across columns and across renders) and passed in here for the
@@ -328,7 +329,7 @@ export function ColumnInner({
         />
         <div className="flex items-center gap-2 min-w-0">
           <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary truncate">
-            {name}
+            {categoryLabel(name)}
           </h2>
           {/* New-entry chip. Only renders when newCount > 0 — when
               it hits 0 the user has acknowledged the column and the

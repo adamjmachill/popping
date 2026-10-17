@@ -217,13 +217,12 @@ export function Settings({
             {tab === 'feeds' ? 'Settings' : `Settings → ${TAB_META[tab].label}`}
           </h2>
         </div>
-        {/* Tab strip. iOS segmented control style — same 4-cell
-            grid the Drawer's tone picker uses, but extended to
-            cover all settings tabs. Active tab uses bg-bg-elevated
-            + text-accent; inactive is bg-bg-surface + text-label-
-            primary. ``role="tablist"`` so screen readers
-            announce it as a tab group. */}
-        <div className="flex gap-1 mx-4 mt-3 rounded-ios overflow-hidden border border-hairline" role="tablist">
+        {/* Tab strip: a scrolling row of labelled pills, the same
+            shape as the dashboard's category chips. Eight icon-only
+            cells didn't fit a phone with their labels, and icons
+            alone left the reader guessing. ``role="tablist"`` so
+            screen readers announce it as a tab group. */}
+        <div className="flex gap-1.5 overflow-x-auto px-4 mt-3 pb-1" role="tablist">
           {(['feeds', 'llm', 'notifications', 'history', 'hidden', 'starred', 'voted', 'reset'] as SettingsTab[]).map((t) => {
             const active = t === tab
             return (
@@ -243,14 +242,14 @@ export function Settings({
                   // simpler and keeps the API minimal.
                   window.dispatchEvent(new Event('popstate'))
                 }}
-                className={`flex-1 min-h-[36px] flex items-center justify-center gap-1 text-ios-caption transition ${
+                className={`shrink-0 min-h-[36px] flex items-center gap-1.5 rounded-full px-3 text-ios-caption font-medium whitespace-nowrap transition ${
                   active
-                    ? 'bg-bg-elevated text-accent'
-                    : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
+                    ? 'bg-accent text-white'
+                    : 'bg-bg-surface text-label-secondary active:bg-bg-elevated'
                 }`}
               >
                 <TabIcon name={TAB_META[t].icon} active={active} />
-                <span className="hidden sm:inline">{TAB_META[t].label}</span>
+                <span>{TAB_META[t].label}</span>
               </button>
             )
           })}
