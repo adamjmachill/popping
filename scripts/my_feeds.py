@@ -3,7 +3,7 @@
 
 Run on the server (stdlib only):
 
-    python3 my_feeds.py
+    python3 my_feeds.py [--skip-reddit]
 
 Talks to the app's own API on localhost. Each feed is probed with
 /api/sources/test before it's added, so a dead or blocking URL is
@@ -45,7 +45,7 @@ FEEDS = [
     ("selkirk_copper_news", "rss", "commodities", gnews("%22Selkirk+Copper%22"), 3600, None),
     ("copper_news", "rss", "commodities", gnews("copper+price+OR+%22copper+futures%22"), 3600, None),
     ("oil_news", "rss", "commodities", gnews("%22crude+oil%22+price+OR+%22oil+futures%22"), 3600, None),
-    ("mining_com", "rss", "commodities", "https://www.mining.com/feed/", 3600, None),
+    ("mining_com", "rss", "commodities", "https://www.mining.com/feed/", 3600, BROWSER_UA),
     ("oilprice_com", "rss", "commodities", "https://oilprice.com/rss/main", 3600, None),
     # BC and federal policy, budget, tax
     ("bc_gov_news", "rss", "policy", gnews("site:news.gov.bc.ca"), 3600, None),
@@ -60,6 +60,19 @@ FEEDS = [
     ("r_fpanda", "reddit", "career", "r/FPandA", 1800, None),
     ("r_accounting", "reddit", "career", "r/Accounting", 1800, None),
     ("r_smallbusiness", "reddit", "career", "r/smallbusiness", 1800, None),
+    # AI and Claude
+    ("anthropic_yt", "youtube_channel", "ai", "https://www.youtube.com/@anthropic-ai", 3600, None),
+    ("claude_news", "rss", "ai", gnews("Anthropic+Claude"), 3600, None),
+    ("ai_in_finance", "rss", "ai", gnews("AI+CFO+OR+accountants+OR+%22finance+teams%22"), 3600, None),
+    ("r_claudeai", "reddit", "ai", "r/ClaudeAI", 1800, None),
+    # ERP and accounting software
+    ("acumatica_news", "rss", "erp", gnews("Acumatica"), 3600, None),
+    ("epicor_news", "rss", "erp", gnews("Epicor+ERP"), 3600, None),
+    ("quickbooks_online_news", "rss", "erp", gnews("%22QuickBooks+Online%22"), 3600, None),
+    ("other_erp_news", "rss", "erp", gnews("NetSuite+OR+%22Sage+Intacct%22+OR+%22Business+Central%22+OR+Xero+ERP"), 3600, None),
+    ("firm_of_the_future", "rss", "erp", "https://www.firmofthefuture.com/feed/", 3600, BROWSER_UA),
+    ("cpa_practice_advisor", "rss", "erp", "https://www.cpapracticeadvisor.com/feed/", 3600, BROWSER_UA),
+    ("accounting_today_tech", "rss", "erp", gnews("site:accountingtoday.com+technology"), 3600, None),
     # Football
     ("fantasy_footballers_yt", "youtube_channel", "football", "https://www.youtube.com/@TheFantasyFootballers", 3600, None),
     ("r_fantasyfootball", "reddit", "football", "r/fantasyfootball", 900, None),
@@ -98,8 +111,11 @@ def main():
         sys.exit(f"GET /sources failed: {status} {sources}")
     by_name = {s["name"]: s for s in sources}
 
+    skip_reddit = "--skip-reddit" in sys.argv[1:]
     added, skipped, failed = [], [], []
     for name, type_, category, url, refresh, headers in FEEDS:
+        if skip_reddit and type_ == "reddit":
+            continue
         if name in by_name:
             skipped.append(name)
             print(f"  = {name}: already there")
