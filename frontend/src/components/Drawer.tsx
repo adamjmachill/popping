@@ -30,6 +30,7 @@
 import { useEffect, useRef } from 'react'
 import type { Source } from '../api'
 import { SourceIcon } from './SourceIcon'
+import { categoryLabel, sourceLabel } from '../lib/labels'
 import type { SettingsTab } from './Settings'
 
 type Props = {
@@ -395,7 +396,7 @@ export function Drawer({
                 // and scroll the desktop grid to that column.
                 <GroupedRow
                   key={c}
-                  title={c}
+                  title={categoryLabel(c)}
                   onClick={() => {
                     onCategoryJump?.(c)
                     onClose()
@@ -469,7 +470,7 @@ export function Drawer({
                           when the favicon hasn't been fetched yet. */}
                       <SourceIcon src={s.favicon_path} name={s.name} size={18} />
                       <span className="flex-1 min-w-0 truncate text-ios-body text-label-primary">
-                        {s.name}
+                        {sourceLabel(s.name)}
                       </span>
                       <span className="shrink-0 text-ios-caption text-label-tertiary">
                         {s.category}

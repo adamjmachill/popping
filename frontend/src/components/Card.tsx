@@ -23,17 +23,17 @@
 import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } from 'react'
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
 import { recordBatched, recordImmediate } from '../lib/interactions'
-import { SourceIcon, stableHue } from './SourceIcon'
+import { sourceLabel } from '../lib/labels'
+import { SourceIcon } from './SourceIcon'
 import { toast } from './Toast'
 
 type Props = {
   entry: Entry
   sourceName?: string
   // Source favicon path (relative to /assets), or null if not
-  // fetched yet. Used only as a thumbnail FALLBACK when the entry
-  // itself has no image — see ThumbnailFallback below. Undefined
-  // (prop omitted) and null (fetched-but-empty) both degrade the
-  // same way: a colored letter tile instead of the site's icon.
+  // fetched yet. No longer drawn on the card (cards without a photo
+  // show no thumbnail); kept so callers and the memo comparator
+  // don't change.
   sourceFaviconPath?: string | null
   unread?: boolean
   // True when this card is the keyboard-selected card. Drives the
@@ -233,23 +233,6 @@ function formatDuration(totalSeconds: number): string {
   return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`
 }
 
-// Score bands. Each tier is a gradient now — the flat bg-score-*
-// colors in the previous config were serviceable but felt like
-// badges stuck on a sticker. Gradients give a tiny bit of depth
-// without crossing into skeuomorphism.
-// ``glow`` is a box-shadow class, non-empty only for the hot band —
-// a small red halo behind the badge so the highest-scoring entries
-// pop out of the list at a glance instead of needing the reader to
-// compare numbers card-by-card. Kept to the hot tier only (rather
-// than a glow per band) so it stays a "this one's notable" signal
-// instead of just recoloring every badge's edge.
-function scoreBand(score: number): { color: string; label: string; glow: string } {
-  if (score >= 75) return { color: 'bg-gradient-to-br from-red-500 to-red-700',   label: 'hot',  glow: 'shadow-[0_0_10px_2px_rgba(239,68,68,0.45)]' }
-  if (score >= 50) return { color: 'bg-gradient-to-br from-amber-400 to-amber-600', label: 'warm', glow: '' }
-  if (score >= 25) return { color: 'bg-gradient-to-br from-accent to-blue-700',   label: 'cool', glow: '' }
-  return               { color: 'bg-gradient-to-br from-neutral-500 to-neutral-700',   label: 'cold', glow: '' }
-}
-
 // There's no dedicated "un-vote" interaction type on the backend —
 // the interactions table is an append-only log, and thumb_up/
 // thumb_down are the only vote-shaped types it knows. So clearing or
@@ -306,8 +289,7 @@ const SWIPE_DIRECTION_RATIO = 1.3
 const SWIPE_MAX_REVEAL_PX = 88
 const SWIPE_COMMIT_PX = 58
 
-export function CardInner({ entry, sourceName, sourceFaviconPath, unread, selected, cardRef, onActivate, category, onMarkRead, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote }: Props) {
-  const band = scoreBand(entry.composite_score)
+export function CardInner({ entry, sourceName, unread, selected, cardRef, onActivate, category, onMarkRead, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote }: Props) {
   const stripeClass = categoryStripeClass(category)
   const sourceTextClass = categorySourceTextClass(category)
   const borderClass = categoryBorderClass(category)
@@ -953,53 +935,27 @@ export function CardInner({ entry, sourceName, sourceFaviconPath, unread, select
             ↗
           </span>
         </a>
-        {/* Score badge + thumbnail, stacked in one column rather than
-            sitting side by side. Side by side wasted space two ways
-            at once: the badge ate horizontal width from the title
-            (more wrapped lines than necessary), and the combined
-            badge+thumbnail block was shorter than the wrapped title,
-            leaving a dead gap under the thumbnail where nothing
-            rendered. Stacking narrows the right-hand column to just
-            the thumbnail's width and lets it fill closer to the
-            title's actual wrapped height. */}
-        <div className="shrink-0 flex flex-col items-end gap-1.5">
-          {/* The gradient gives the badge a tiny bit of depth;
-              ``ring-1 ring-white/10`` is a faint inner highlight that
-              reads as "this is a label" rather than "this is a
-              button". Title shows the raw number for power users. */}
-          <span
-            className={`inline-flex items-center rounded-ios px-2 py-0.5 text-xs font-semibold text-white ring-1 ring-white/10 ${band.color} ${band.glow}`}
-            title={`composite score ${entry.composite_score.toFixed(0)}`}
-          >
-            {entry.composite_score.toFixed(0)}
-          </span>
-          {entry.image_path ? (
+        {/* Real thumbnails only. Cards without a photo give the
+            headline the full width rather than showing a placeholder
+            tile, and the ranking score stays out of the reader's way
+            (it still orders the list). */}
+        {entry.image_path && (
+          <div className="shrink-0">
             <Thumbnail
               path={entry.image_path}
               title={entry.title}
               url={entry.url}
               entryId={entry.id}
             />
-          ) : (
-            // No feed-supplied or scraped photo (backend already
-            // tries media:thumbnail / og:image / etc. before giving
-            // up) — fall back to the source's favicon on a colored
-            // tile rather than leaving a blank gap. Only needs
-            // sourceName; ThumbnailFallback degrades to a plain
-            // colored letter if there's no favicon either, so every
-            // card with a known source gets SOME visual.
-            sourceName && (
-              <ThumbnailFallback sourceName={sourceName} faviconPath={sourceFaviconPath} />
-            )
-          )}
-        </div>
+          </div>
+        )}
       </div>
       <div className="flex items-center gap-2 text-ios-caption text-label-secondary">
         {/* Uppercase + tracked, like a magazine section kicker — same
             sans font as the rest of the meta row, just a different
             case/tracking treatment, so the source reads as a label
             rather than blending into the timestamp next to it. */}
-        {sourceName && <span className={`font-semibold uppercase tracking-wide text-[11px] ${sourceTextClass}`}>{sourceName}</span>}
+        {sourceName && <span className={`font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>}
         {sourceName && <span>·</span>}
         <time dateTime={entry.published_at ?? ''}>{timeAgo(entry.published_at)}</time>
       </div>
@@ -1275,9 +1231,9 @@ export function CardInner({ entry, sourceName, sourceFaviconPath, unread, select
           matching the persisted-state treatment star/hidden already
           get. */}
       {(onVote || onToggleSummary || onMarkRead || onStar || onHideToggle) && (
-        <div className="mt-3 pt-2.5 border-t border-hairline/70 flex items-center">
+        <div className="mt-2 -mb-1 flex items-center">
           {onVote && (
-          <div className="flex items-center rounded-full bg-bg-elevated/70 ring-1 ring-white/5 overflow-hidden">
+          <div className="flex items-center -ml-3">
             <button
               type="button"
               data-card-interactive
@@ -1298,14 +1254,13 @@ export function CardInner({ entry, sourceName, sourceFaviconPath, unread, select
               aria-label={vote === 'up' ? 'remove upvote' : 'upvote — more like this'}
               aria-pressed={vote === 'up'}
               title="more like this"
-              className={`h-9 px-3 flex items-center justify-center transition-colors
+              className={`h-9 px-3 rounded-full flex items-center justify-center transition-colors
                           ${vote === 'up'
                             ? 'bg-amber-400/15 text-amber-400'
                             : 'text-label-secondary hover:text-amber-400 active:text-amber-400'}`}
             >
               <ArrowUpIcon className="w-4 h-4" filled={vote === 'up'} />
             </button>
-            <div aria-hidden="true" className="w-px h-5 bg-white/10" />
             <button
               type="button"
               data-card-interactive
@@ -1326,7 +1281,7 @@ export function CardInner({ entry, sourceName, sourceFaviconPath, unread, select
               aria-label={vote === 'down' ? 'remove downvote' : 'downvote — less like this'}
               aria-pressed={vote === 'down'}
               title="less like this"
-              className={`h-9 px-3 flex items-center justify-center transition-colors
+              className={`h-9 px-3 rounded-full flex items-center justify-center transition-colors
                           ${vote === 'down'
                             ? 'bg-sky-400/15 text-sky-400'
                             : 'text-label-secondary hover:text-sky-400 active:text-sky-400'}`}
@@ -1717,35 +1672,6 @@ function ArrowDownIcon({ className, filled = false }: { className?: string; fill
     >
       <path d="M12 5v14M19 12l-7 7-7-7" />
     </svg>
-  )
-}
-
-// Thumbnail placeholder for entries with no photo — same footprint
-// as the real Thumbnail (so the title/badge row doesn't jump between
-// cards that have a photo and cards that don't) but shows the
-// source's favicon centered on a colored tile instead of stretching
-// a tiny icon full-bleed (which would look pixelated at this size).
-// The tile color is the SAME per-source hue SourceIcon's letter
-// fallback uses (``stableHue``, imported not reimplemented — see its
-// comment) so a source reads as "the same color" everywhere it
-// appears, not just in FeedManager/Drawer.
-//
-// Degrades in two steps: favicon present -> icon on a colored tile;
-// no favicon yet either -> SourceIcon's own letter-on-color fallback,
-// just scaled up. Either way the card never has a blank gap where a
-// thumbnail-having sibling has a photo — "media rich, even if it has
-// to cheat" per the brief this was built for.
-function ThumbnailFallback({ sourceName, faviconPath }: { sourceName: string; faviconPath?: string | null }) {
-  const hue = stableHue(sourceName)
-  return (
-    <div
-      aria-hidden="true"
-      title={sourceName}
-      className="shrink-0 w-28 sm:w-40 aspect-video rounded-ios overflow-hidden ring-1 ring-white/10 shadow-md flex items-center justify-center"
-      style={{ background: `hsl(${hue} 45% 18%)` }}
-    >
-      <SourceIcon src={faviconPath ?? null} name={sourceName} size={32} />
-    </div>
   )
 }
 
