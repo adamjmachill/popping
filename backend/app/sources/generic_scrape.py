@@ -75,6 +75,47 @@ _SUMMARY_MAX_CHARS = 2000
 # forcing the FIFO eviction to re-attempt URLs the DB already has.
 _MAX_EXTRACTED_URLS = 5000
 
+# Pages dated more than this many days ago are skipped. Sitemaps list a
+# site's whole back catalogue, so without this a new source fills its
+# column with years-old pages before it ever reaches this week's.
+# Pages with no date are kept (nothing to judge them by).
+_MAX_AGE_DAYS = 30
+
+
+def _section_prefix(url: str) -> str | None:
+    """The path section a source URL points at, e.g. ``/news/`` for
+    ``https://example.com/news``; None for a homepage or a file-like
+    page (``/feed.xml``, ``/news.html``), where there's no section to
+    scope to."""
+    from urllib.parse import urlparse
+
+    path = urlparse(url).path
+    if path in ("", "/"):
+        return None
+    if "." in path.rstrip("/").rsplit("/", 1)[-1]:
+        return None
+    return path if path.endswith("/") else path + "/"
+
+
+async def _section_candidates(sitemap_input: str, page_url: str, limit: int) -> list[str]:
+    """Sitemap URLs under ``page_url``'s section, newest first; the
+    whole sitemap when the URL has no section or the section has no
+    entries in it (its articles may live elsewhere)."""
+    prefix = _section_prefix(page_url)
+    if prefix:
+        candidates = await discover_sitemap_urls(sitemap_input, limit=limit, path_prefix=prefix)
+        if candidates:
+            return candidates
+    return await discover_sitemap_urls(sitemap_input, limit=limit)
+
+
+def _too_old(item: dict) -> bool:
+    published = item.get("published_at")
+    if published is None:
+        return False
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=_MAX_AGE_DAYS)
+    return published < cutoff
+
 
 async def _extract_one(url: str, custom_headers: dict | None = None) -> dict | None:
     """Fetch + extract a single candidate URL into a plugin-item
@@ -200,7 +241,7 @@ async def probe(url: str, limit: int = 3) -> list[dict]:
     than ``limit`` in case the first couple don't extract cleanly
     (e.g. a listing/index page that slipped into the sitemap), so the
     preview isn't overly pessimistic about a genuinely workable site."""
-    candidates = await discover_sitemap_urls(url, limit=max(limit * 3, 10))
+    candidates = await _section_candidates(url, url, max(limit * 3, 10))
     items: list[dict] = []
     for candidate in candidates:
         if len(items) >= limit:
@@ -378,7 +419,7 @@ class GenericScrapePlugin(SourcePlugin):
         # the user point at a known-good sitemap URL side-steps
         # the discovery heuristic entirely.
         sitemap_input = self.sitemap_url or self.url
-        candidates = await discover_sitemap_urls(sitemap_input, limit=_MAX_SITEMAP_CANDIDATES)
+        candidates = await _section_candidates(sitemap_input, self.url, _MAX_SITEMAP_CANDIDATES)
         # Fall back to the page_links strategy when:
         #   1. sitemap discovery returned nothing
         #   2. AND the user supplied a link_pattern on the row
@@ -435,7 +476,7 @@ class GenericScrapePlugin(SourcePlugin):
                     "generic_scrape: extraction failed for %s: %s", url, result,
                 )
                 continue
-            if result is not None:
+            if result is not None and not _too_old(result):
                 items.append(result)
         return items
 

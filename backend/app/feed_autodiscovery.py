@@ -18,7 +18,9 @@ its own downloader has no hook for that guard.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
+import re
 from urllib.parse import urlparse
 
 from defusedxml import DefusedXmlException
@@ -194,9 +196,17 @@ async def discover_feed_url(page_url: str) -> str | None:
     return None
 
 
-async def discover_sitemap_urls(page_url: str, limit: int = _MAX_SITEMAP_URLS) -> list[str]:
+async def discover_sitemap_urls(
+    page_url: str, limit: int = _MAX_SITEMAP_URLS, path_prefix: str | None = None,
+) -> list[str]:
     """Return up to ``limit`` article-page URLs from ``page_url``'s
     sitemap, or an empty list if none is found or discovery fails.
+
+    URLs come back newest first, dated by each entry's ``<lastmod>``
+    or, failing that, a ``/YYYY/MM/`` style date in the URL itself;
+    undated URLs follow in sitemap order. ``path_prefix`` (e.g.
+    ``/news/``) keeps only URLs under that path, so a section of a
+    large site doesn't get buried by the rest of its sitemap.
     Used as the "this site has no native feed" fallback when adding a
     ``type="generic_scrape"`` source — see
     ``app.sources.generic_scrape``.
@@ -212,7 +222,7 @@ async def discover_sitemap_urls(page_url: str, limit: int = _MAX_SITEMAP_URLS) -
         return []
     try:
         urls = await asyncio.wait_for(
-            _crawl_sitemaps(page_url, limit), _TRAFILATURA_BUDGET
+            _crawl_sitemaps(page_url, limit, path_prefix), _TRAFILATURA_BUDGET
         )
     except asyncio.TimeoutError:
         logger.info(
@@ -229,6 +239,10 @@ async def discover_sitemap_urls(page_url: str, limit: int = _MAX_SITEMAP_URLS) -
 # Sitemap crawl limits: how many sitemap documents one discovery may
 # fetch (robots.txt-listed + guessed + nested index entries).
 _MAX_SITEMAP_DOCS = 10
+# How many matching URLs to collect before sorting by date. Sitemaps
+# are often in no useful order, so the newest pages can only be picked
+# out after seeing (a bounded slice of) all of them.
+_MAX_SITEMAP_COLLECT = 5000
 _GUESSED_SITEMAP_PATHS = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 
 
@@ -259,25 +273,99 @@ def _same_site(url: str, host: str) -> bool:
 def _parse_sitemap(text: str) -> tuple[list[str], list[str]]:
     """Return (page URLs, nested sitemap URLs) from a sitemap document:
     an XML urlset, an XML sitemapindex, or a plain-text list."""
+    pages, nested = _parse_sitemap_entries(text)
+    return [loc for loc, _ in pages], [loc for loc, _ in nested]
+
+
+def _local(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _parse_sitemap_entries(
+    text: str,
+) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
+    """Like ``_parse_sitemap`` but keeps each entry's ``<lastmod>``
+    (None when absent): ([(page, lastmod)], [(nested sitemap, lastmod)])."""
     try:
         root = DefusedET.fromstring(text.lstrip())
     except (DefusedET.ParseError, ValueError, DefusedXmlException):
         lines = [ln.strip() for ln in text.splitlines()]
-        return [ln for ln in lines if ln.startswith(("http://", "https://"))], []
-    pages: list[str] = []
-    nested: list[str] = []
-    is_index = root.tag.rsplit("}", 1)[-1] == "sitemapindex"
-    for el in root.iter():
-        if el.tag.rsplit("}", 1)[-1] == "loc" and el.text:
-            (nested if is_index else pages).append(el.text.strip())
+        return [(ln, None) for ln in lines if ln.startswith(("http://", "https://"))], []
+    pages: list[tuple[str, str | None]] = []
+    nested: list[tuple[str, str | None]] = []
+    is_index = _local(root.tag) == "sitemapindex"
+    for entry in root:
+        loc = lastmod = None
+        for child in entry:
+            name = _local(child.tag)
+            if name == "loc" and child.text:
+                loc = child.text.strip()
+            elif name == "lastmod" and child.text:
+                lastmod = child.text.strip()
+        if loc:
+            (nested if is_index else pages).append((loc, lastmod))
     return pages, nested
 
 
-async def _crawl_sitemaps(page_url: str, limit: int) -> list[str]:
+_MONTHS = {
+    name: i
+    for i, names in enumerate(
+        [("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"),
+         ("may",), ("jun", "june"), ("jul", "july"), ("aug", "august"),
+         ("sep", "sept", "september"), ("oct", "october"), ("nov", "november"),
+         ("dec", "december")],
+        start=1,
+    )
+    for name in names
+}
+# /2026/, /2026/07/, /2026/july/, /2026/07/27/
+_URL_DATE_RE = re.compile(r"/((?:19|20)\d{2})/(?:([a-z]+|\d{1,2})/(?:(\d{1,2})/)?)?", re.IGNORECASE)
+
+
+def _entry_date(url: str, lastmod: str | None) -> dt.datetime | None:
+    """Best guess at when a sitemap entry was published or changed:
+    its ``<lastmod>``, else a date in its URL path, else None."""
+    if lastmod:
+        try:
+            parsed = dt.datetime.fromisoformat(lastmod.replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=dt.timezone.utc)
+        except ValueError:
+            pass
+    match = _URL_DATE_RE.search(urlparse(url).path)
+    if not match:
+        return None
+    year = int(match.group(1))
+    month_raw = (match.group(2) or "").lower()
+    month = int(month_raw) if month_raw.isdigit() else _MONTHS.get(month_raw, 1)
+    day = int(match.group(3)) if match.group(3) else 1
+    try:
+        return dt.datetime(year, month, day, tzinfo=dt.timezone.utc)
+    except ValueError:
+        return dt.datetime(year, 1, 1, tzinfo=dt.timezone.utc)
+
+
+def _newest_first(entries: list[tuple[str, str | None]]) -> list[str]:
+    """URLs ordered newest first; undated ones keep their order, last."""
+    dated = [(url, _entry_date(url, lastmod)) for url, lastmod in entries]
+    ordered = sorted(
+        dated,
+        key=lambda pair: (pair[1] is None, -(pair[1].timestamp()) if pair[1] else 0.0),
+    )
+    return [url for url, _ in ordered]
+
+
+def _under_prefix(url: str, prefix: str) -> bool:
+    """True for pages below ``prefix`` (not the section page itself)."""
+    path = urlparse(url).path
+    return path.startswith(prefix) and path.rstrip("/") != prefix.rstrip("/")
+
+
+async def _crawl_sitemaps(page_url: str, limit: int, path_prefix: str | None = None) -> list[str]:
     """Find article URLs for ``page_url`` from its sitemap(s), using only
     SSRF-guarded fetches. ``page_url`` may be a sitemap itself or a site
     URL; for a site URL, robots.txt ``Sitemap:`` lines are tried first,
-    then a few common paths."""
+    then a few common paths. Returns the newest ``limit`` (see
+    ``discover_sitemap_urls``)."""
     parsed = urlparse(page_url)
     host = (parsed.hostname or "").lower()
     origin = f"{parsed.scheme}://{parsed.netloc}"
@@ -293,10 +381,10 @@ async def _crawl_sitemaps(page_url: str, limit: int) -> list[str]:
         queue = listed or [origin + path for path in _GUESSED_SITEMAP_PATHS]
 
     seen: set[str] = set()
-    pages: list[str] = []
+    pages: list[tuple[str, str | None]] = []
     page_set: set[str] = set()
     fetched = 0
-    while queue and fetched < _MAX_SITEMAP_DOCS and len(pages) < limit:
+    while queue and fetched < _MAX_SITEMAP_DOCS and len(pages) < _MAX_SITEMAP_COLLECT:
         url = queue.pop(0)
         if url in seen or not _same_site(url, host):
             continue
@@ -305,12 +393,16 @@ async def _crawl_sitemaps(page_url: str, limit: int) -> list[str]:
         text = await fetch_html(url, content_types=None)
         if not text:
             continue
-        found, nested = _parse_sitemap(text)
-        for u in found:
-            if len(pages) >= limit:
+        found, nested = _parse_sitemap_entries(text)
+        for u, lastmod in found:
+            if len(pages) >= _MAX_SITEMAP_COLLECT:
                 break
+            if path_prefix and not _under_prefix(u, path_prefix):
+                continue
             if u not in page_set and _same_site(u, host):
                 page_set.add(u)
-                pages.append(u)
-        queue.extend(nested)
-    return pages
+                pages.append((u, lastmod))
+        # Newest nested sitemaps first, so the document cap spends its
+        # fetches on recent content (e.g. post-sitemap12 before 1).
+        queue.extend(_newest_first(nested))
+    return _newest_first(pages)[:limit]
