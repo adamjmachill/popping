@@ -56,7 +56,7 @@ async def test_extract_one_returns_none_for_unreachable_url():
 
 @pytest.mark.asyncio
 async def test_probe_returns_empty_list_when_no_sitemap_found(monkeypatch):
-    async def fake_discover_sitemap_urls(url, limit=50):
+    async def fake_discover_sitemap_urls(url, limit=50, path_prefix=None):
         return []
 
     monkeypatch.setattr(generic_scrape, "discover_sitemap_urls", fake_discover_sitemap_urls)
@@ -67,7 +67,7 @@ async def test_probe_returns_empty_list_when_no_sitemap_found(monkeypatch):
 async def test_probe_stops_at_limit(monkeypatch):
     # Five candidates all "extract" successfully via a stubbed
     # _extract_one; probe(limit=2) should only take the first 2.
-    async def fake_discover_sitemap_urls(url, limit=50):
+    async def fake_discover_sitemap_urls(url, limit=50, path_prefix=None):
         return [f"https://example.com/{i}" for i in range(5)]
 
     async def fake_extract_one(url, custom_headers=None):
