@@ -567,6 +567,39 @@ function LLMSection({
   const [apiKeySet, setApiKeySet] = useState<Record<ApiKeyProvider, boolean>>(emptyApiKeySet)
   const [clearingKey, setClearingKey] = useState<ApiKeyProvider | null>(null)
 
+  // Bumped on every tags fetch so a slow response for a provider the
+  // user has already switched away from can't overwrite the newer list.
+  const tagsRequest = useRef(0)
+
+  const fetchTags = async (
+    pinned: string,
+  ): Promise<[LLMTagsResponse | null, LLMTagsResponse | null]> => {
+    const request = ++tagsRequest.current
+    const prov = providerForTagsFetch(pinned)
+    let tb: LLMTagsResponse | null = null
+    let ts: LLMTagsResponse | null = null
+    if (prov) {
+      // Tags fetch failure (e.g. no Ollama Cloud key configured) is
+      // common and shouldn't block the form from reflecting current
+      // settings — in particular, it must not leave a previously-typed
+      // API key sitting in the input because applySettingsToForm
+      // never ran.
+      try {
+        ;[tb, ts] = await Promise.all([
+          api.llmTags(prov, false, 'brief'),
+          api.llmTags(prov, false, 'scoring'),
+        ])
+      } catch (err) {
+        if (request === tagsRequest.current) setTagsError((err as Error).message)
+      }
+    }
+    if (request === tagsRequest.current) {
+      setTags(tb)
+      setScoringTags(ts)
+    }
+    return [tb, ts]
+  }
+
   const openPicker = async () => {
     setPickerOpen(true)
     setSaveError(null)
@@ -574,26 +607,7 @@ function LLMSection({
     setTagsLoading(true)
     try {
       const s = await api.settings()
-      const prov = providerForTagsFetch(s)
-      let tb: LLMTagsResponse | null = null
-      let ts: LLMTagsResponse | null = null
-      if (prov) {
-        // Tags fetch failure (e.g. no Ollama Cloud key configured) is
-        // common and shouldn't block the form from reflecting current
-        // settings below — in particular, it must not leave a
-        // previously-typed API key sitting in the input because
-        // applySettingsToForm never ran.
-        try {
-          ;[tb, ts] = await Promise.all([
-            api.llmTags(prov, false, 'brief'),
-            api.llmTags(prov, false, 'scoring'),
-          ])
-        } catch (err) {
-          setTagsError((err as Error).message)
-        }
-      }
-      setTags(tb)
-      setScoringTags(ts)
+      const [tb, ts] = await fetchTags(s.llm_provider || '')
       applySettingsToForm(s, tb, ts)
     } catch (err) {
       // api.settings() itself failed — nothing to populate the form with.
@@ -603,8 +617,25 @@ function LLMSection({
     }
   }
 
-  const providerForTagsFetch = (s: SettingsOut | null): string | null => {
-    const pinned = s?.llm_provider || ''
+  // Model names are provider-specific (an Ollama tag like ``glm-5.2``
+  // is a 404 on Groq), so switching provider clears both models back
+  // to that provider's env default and reloads the model list.
+  const changeProvider = async (next: string) => {
+    setProvider(next)
+    setModelBrief('')
+    setModelScoring('')
+    setFreeTextBrief('')
+    setUseFreeText(false)
+    setTagsError(null)
+    setTagsLoading(true)
+    try {
+      await fetchTags(next)
+    } finally {
+      setTagsLoading(false)
+    }
+  }
+
+  const providerForTagsFetch = (pinned: string): string | null => {
     if (pinned === 'ollama_cloud' || pinned === '') return 'ollama_cloud'
     if (pinned === 'ollama') return 'ollama'
     return null
@@ -742,7 +773,7 @@ function LLMSection({
             </label>
             <select
               value={provider}
-              onChange={(e) => setProvider(e.target.value)}
+              onChange={(e) => void changeProvider(e.target.value)}
               className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
             >
               <option value="">— env default —</option>
@@ -757,7 +788,17 @@ function LLMSection({
             <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
               Brief model
             </label>
-            {useFreeText ? (
+            {tagNames.length === 0 ? (
+              // No model list for this provider (Groq, Anthropic, OpenAI)
+              // — type the name; empty means the provider's env default.
+              <input
+                type="text"
+                value={modelBrief}
+                onChange={(e) => setModelBrief(e.target.value)}
+                placeholder="empty = this provider's default"
+                className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
+              />
+            ) : useFreeText ? (
               <input
                 type="text"
                 value={freeTextBrief}
@@ -800,20 +841,36 @@ function LLMSection({
             <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
               Scoring model
             </label>
-            <select
-              value={modelScoring}
-              onChange={(e) => setModelScoring(e.target.value)}
-              className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
-            >
-              <option value="">— env default —</option>
-              {scoringOptions.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.recommended ? '★ ' : ''}
-                  {m.name}
-                  {m.recommended_note ? ` (${m.recommended_note})` : ''}
-                </option>
-              ))}
-            </select>
+            {scoringOptions.length === 0 ? (
+              <input
+                type="text"
+                value={modelScoring}
+                onChange={(e) => setModelScoring(e.target.value)}
+                placeholder="empty = this provider's default"
+                className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
+              />
+            ) : (
+              <select
+                value={modelScoring}
+                onChange={(e) => setModelScoring(e.target.value)}
+                className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
+              >
+                <option value="">— env default —</option>
+                {/* A saved name missing from the list still has to be an
+                    option, or the select shows "env default" while Save
+                    sends the stale name back. */}
+                {modelScoring && !scoringOptions.some((m) => m.name === modelScoring) && (
+                  <option value={modelScoring}>{modelScoring}</option>
+                )}
+                {scoringOptions.map((m) => (
+                  <option key={m.name} value={m.name}>
+                    {m.recommended ? '★ ' : ''}
+                    {m.name}
+                    {m.recommended_note ? ` (${m.recommended_note})` : ''}
+                  </option>
+                ))}
+              </select>
+            )}
             {hasScoringRecommendations && (
               <div className="mt-1 text-ios-caption text-label-tertiary">
                 ★ marks models recommended for this task
