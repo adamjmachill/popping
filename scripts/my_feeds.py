@@ -3,7 +3,7 @@
 
 Run on the server (stdlib only):
 
-    python3 my_feeds.py [--skip-reddit]
+    python3 my_feeds.py [--skip-reddit] [--pause-google]
 
 Talks to the app's own API on localhost. Each feed is probed with
 /api/sources/test before it's added, so a dead or blocking URL is
@@ -13,6 +13,7 @@ that already exist (by name) are left alone, so re-running is safe.
 
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -46,6 +47,9 @@ FEEDS = [
     ("copper_news", "rss", "commodities", gnews("copper+price+OR+%22copper+futures%22"), 3600, None),
     ("oil_news", "rss", "commodities", gnews("%22crude+oil%22+price+OR+%22oil+futures%22"), 3600, None),
     ("mining_com", "rss", "commodities", "https://www.mining.com/feed/", 3600, BROWSER_UA),
+    ("selkirk_releases", "rss", "commodities", "https://feeds.newsfilecorp.com/company/11605", 3600, None),
+    ("selkirk_copper_yt", "youtube_channel", "commodities", "https://www.youtube.com/@SelkirkCopperMines", 3600, None),
+    ("eia_press", "rss", "commodities", "https://www.eia.gov/rss/press_rss.xml", 3600, None),
     ("oilprice_com", "rss", "commodities", "https://oilprice.com/rss/main", 3600, None),
     # BC and federal policy, budget, tax
     ("bc_gov_news", "rss", "policy", gnews("site:news.gov.bc.ca"), 3600, None),
@@ -77,6 +81,55 @@ FEEDS = [
     ("fantasy_footballers_yt", "youtube_channel", "football", "https://www.youtube.com/@TheFantasyFootballers", 3600, None),
     ("r_fantasyfootball", "reddit", "football", "r/fantasyfootball", 900, None),
     ("r_sportsbook", "reddit", "football", "r/sportsbook", 1800, None),
+]
+
+# Primary sources from "My Source List" (Oct 17, 2026). Most are
+# pages rather than feeds, so they go through /api/sources/auto, which
+# finds the site's feed or falls back to sitemap scraping. The created
+# row is renamed to the name here so re-runs can tell it already exists.
+# (name, category, page url)
+AUTO_FEEDS = [
+    # Fractional CFO, boards, the profession, starting a business
+    ("icd_director_lens", "career", "https://www.icd.ca/Insights/Director-Lens"),
+    ("hbr_presentation_skills", "career", "https://hbr.org/topic/subject/presentation-skills"),
+    ("cpabc_news", "career", "https://www.bccpa.ca/news-events/publications"),
+    ("cpa_canada", "career", "https://www.cpacanada.ca"),
+    ("ey_tax_alerts_ca", "career", "https://ey.com/en_ca/tax/tax-alerts"),
+    ("kpmg_taxnewsflash_ca", "career", "https://kpmg.com/ca/en/home/services/tax/tax-news-flash-canada.html"),
+    ("small_business_bc", "career", "https://smallbusinessbc.ca"),
+    ("bdc_advice", "career", "https://www.bdc.ca/en/articles-tools"),
+    # Macro and markets
+    ("statcan_the_daily", "markets", "https://www150.statcan.gc.ca/n1/dai-eng.htm"),
+    ("rbc_economics", "markets", "https://thoughtleadership.rbc.com/economics/"),
+    ("bnn_bloomberg", "markets", "https://www.bnnbloomberg.ca"),
+    ("oaktree_memos", "markets", "https://www.oaktreecapital.com/insights"),
+    # Commodities
+    ("icsg_copper", "commodities", "https://icsg.org"),
+    ("eia_energy", "commodities", "https://www.eia.gov"),
+    ("opec_news", "commodities", "https://www.opec.org"),
+    ("northern_miner", "commodities", "https://www.northernminer.com"),
+    # Policy, budgets, tax; think tanks read in pairs
+    ("bc_gov_finance", "policy", "https://news.gov.bc.ca/ministries/finance"),
+    ("finance_canada", "policy", "https://www.canada.ca/en/department-finance/news.html"),
+    ("pbo_publications", "policy", "https://www.pbo-dpb.ca/en/publications"),
+    ("fraser_institute", "policy", "https://www.fraserinstitute.org"),
+    ("ccpa", "policy", "https://policyalternatives.ca"),
+    ("cd_howe", "policy", "https://www.cdhowe.org"),
+    # AI in finance
+    ("cpa_ontario_insights", "ai", "https://www.cpaontario.ca/insights/blog"),
+    ("cfo_dive", "ai", "https://www.cfodive.com"),
+    ("journal_of_accountancy", "ai", "https://www.journalofaccountancy.com"),
+    # ERP vendors
+    ("acumatica_newsroom", "erp", "https://www.acumatica.com/corporate-newsroom/"),
+    ("epicor_news", "erp", "https://www.epicor.com/en/company/news/"),
+    ("xero_blog", "erp", "https://blog.xero.com"),
+]
+
+# Google News searches the source list replaces with a primary source.
+# Paused (not deleted) only when run with --pause-google.
+GOOGLE_REPLACED = [
+    "selkirk_copper_news", "statcan_daily", "bc_gov_news",
+    "cpa_canada_bc", "big4_canada_tax", "accounting_today_tech",
 ]
 
 # Built-ins that fit the previous owner's interests. Switched off, not
@@ -137,7 +190,34 @@ def main():
             failed.append((name, (result or {}).get("detail") or status))
             print(f"  x {name}: add failed ({(result or {}).get('detail') or status})")
 
-    for name in DISABLE:
+    for name, category, url in AUTO_FEEDS:
+        if name in by_name:
+            skipped.append(name)
+            print(f"  = {name}: already there")
+            continue
+        print(f"  ? {name}: looking for a feed...", flush=True)
+        status, result = call("POST", "/sources/auto", {"url": url, "category": category}, timeout=120)
+        if status != 200 or not (result or {}).get("found"):
+            reason = (result or {}).get("detail") or ("no feed or sitemap found" if status == 200 else status)
+            failed.append((name, reason))
+            print(f"  x {name}: {reason}, not added")
+            continue
+        row = result["source"]
+        if row["name"] != name:
+            call("PATCH", f"/sources/{row['id']}", {"name": name})
+        added.append(name)
+        print(f"  + {name}: added ({result.get('kind')})")
+        # Each add kicks off an LLM "more like this" lookup; spacing
+        # them out keeps Groq's free tier under its per-minute limit.
+        time.sleep(3)
+
+    pause = list(DISABLE)
+    if "--pause-google" in sys.argv[1:]:
+        pause += GOOGLE_REPLACED
+    # Re-read so feeds added above can be paused in the same run.
+    _, sources = call("GET", "/sources")
+    by_name = {s["name"]: s for s in sources}
+    for name in pause:
         row = by_name.get(name)
         if row and row.get("active"):
             status, _ = call("PATCH", f"/sources/{row['id']}", {"active": False})
