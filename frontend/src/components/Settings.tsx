@@ -289,9 +289,9 @@ export function Settings({
                 <div className="grid grid-cols-3 gap-0 rounded-ios overflow-hidden border border-hairline">
                   {(
                     [
-                      { value: 'terse' as const, label: 'terse' },
-                      { value: 'narrative' as const, label: 'narrative' },
-                      { value: 'alert' as const, label: 'alert' },
+                      { value: 'terse' as const, label: 'Short' },
+                      { value: 'narrative' as const, label: 'Story' },
+                      { value: 'alert' as const, label: 'Alerts' },
                     ]
                   ).map((t) => {
                     const active = t.value === briefTone

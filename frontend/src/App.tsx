@@ -2726,6 +2726,7 @@ export function App() {
                   tone={briefTone}
                   onToneChange={setBriefTone}
                   triggerGenerate={triggerBriefGenerate}
+                  startExpanded
                 />
               ) : (
                 <Column
