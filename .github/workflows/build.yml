@@ -121,6 +121,10 @@ jobs:
       - run: npm run lint
       # tsc + vite build
       - run: npm run build
+      # The rules the feed editor and Add form share (src/lib), run
+      # straight from the TypeScript source with Node's type stripping.
+      - name: Unit tests
+        run: node --experimental-strip-types --test 'scripts/unit/*.test.ts'
       # Playwright is installed for this run only: --no-save plus the
       # diff check prove package.json, the lockfile and the Docker
       # build stay untouched.

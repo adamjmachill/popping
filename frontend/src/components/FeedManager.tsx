@@ -35,6 +35,17 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, type Source } from '../api'
 import { SourceIcon } from './SourceIcon'
 import { categoryLabel, sourceLabel } from '../lib/labels'
+import {
+  PODCAST_DEFAULT_REFRESH,
+  REFRESH_PRESETS,
+  YOUTUBE_DEFAULT_REFRESH,
+  isBuiltIn,
+  isStale,
+  refreshLabel,
+  timeAgo,
+} from '../lib/feedRules'
+import { CATEGORY_OPTIONS } from '../lib/categories'
+import { friendlyTestError, parseApiError } from '../lib/apiErrors'
 import { toast } from './Toast'
 
 type Props = {
@@ -49,165 +60,6 @@ type Props = {
 }
 
 type Tab = 'mine' | 'recommended' | 'add'
-
-// Refresh interval presets the user picks from. Values are seconds;
-// the dropdown renders the human label. Keeps the UI to a single
-// choice rather than a freeform input — typos would silently break
-// scheduling otherwise.
-const REFRESH_PRESETS: Array<{ value: number; label: string }> = [
-  { value: 900,   label: '15 min' },
-  { value: 3600,  label: '1 hour' },
-  { value: 21600, label: '6 hours' },
-  { value: 86400, label: '24 hours' },
-]
-
-// Mirrors the backend's _PODCAST_DEFAULT_REFRESH (routes/sources.py)
-// — episodes publish far less often than news, so the "Podcast"
-// radio bumps the refresh dropdown to this instead of the 1h
-// plain-RSS default.
-const PODCAST_DEFAULT_REFRESH = 21600
-
-// Mirrors the backend's _YOUTUBE_DEFAULT_REFRESH — same rationale as
-// podcasts, most channels post far less than hourly.
-const YOUTUBE_DEFAULT_REFRESH = 21600
-
-// Categories the user can pick from when adding a custom source.
-// Existing source categories + a couple of common extras the
-// recommendations list uses. Free-form text is also accepted in the
-// backend (the column is just a 40-char string), but a dropdown is
-// friendlier than asking the user to type "tech" vs "news" — and it
-// matches existing column groupings.
-const CATEGORY_OPTIONS = [
-  'news',
-  'tech',
-  'vulns',
-  'science',
-  'finance',
-  'policy',
-  'longform',
-  'deals',
-  'podcast',
-  'video',
-  // Leisure categories (0019_leisure_feed_recommendations) — kept
-  // after the original work-adjacent set so the dropdown reads as
-  // "the usual suspects, then the fun stuff" rather than an
-  // alphabetical shuffle that'd bury either group.
-  'sports',
-  'entertainment',
-  'gaming',
-  'food',
-  'music',
-  'other',
-]
-
-// Names of the registered plugin sources (BBC, HN, GitHub Releases,
-// NVD, CISA, Wikipedia OTD). These rows ARE user-deletable — the
-// "delete" button isn't gated by this set. It only drives the
-// "built-in" badge (url/name locked, managed by the plugin's own
-// schedule) and the row/url-field lock in the edit form below.
-const KNOWN_BUILT_INS = new Set([
-  'bbc_news',
-  'hn_top',
-  'github_releases',
-  'wikipedia_on_this_day',
-  'nvd_recent',
-  'cisa_kev',
-])
-
-function isBuiltIn(source: Source): boolean {
-  return KNOWN_BUILT_INS.has(source.name)
-}
-
-function refreshLabel(seconds: number): string {
-  const preset = REFRESH_PRESETS.find((p) => p.value === seconds)
-  if (preset) return preset.label
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.round(seconds / 60)} min`
-  if (seconds < 86400) return `${Math.round(seconds / 3600)} h`
-  return `${Math.round(seconds / 86400)} d`
-}
-
-// Same shape as Card.tsx's ``timeAgo`` — kept duplicated rather than
-// extracted to a shared module because the function is six lines
-// and the call sites are UI-local. If a third caller appears, lift
-// it to ``frontend/src/lib/format.ts``.
-function timeAgo(iso: string | null): string {
-  if (!iso) return 'never'
-  const ms = Date.now() - new Date(iso).getTime()
-  if (ms < 0) return 'just now'
-  const mins = Math.floor(ms / 60000)
-  if (mins < 60) return `${mins}m ago`
-  const hours = Math.floor(mins / 60)
-  if (hours < 24) return `${hours}h ago`
-  const days = Math.floor(hours / 24)
-  return `${days}d ago`
-}
-
-// True when ``last_fetch_at`` is older than 2× the configured
-// refresh interval — heuristic for "the scheduler should have run by
-// now but hasn't (or just ran and didn't update last_fetch_at
-// because of a fetch error)." The 2× grace is generous because
-// scheduler jobs queue up if multiple sources hit at once.
-function isStale(source: Source): boolean {
-  if (!source.last_fetch_at) return true
-  const ageMs = Date.now() - new Date(source.last_fetch_at).getTime()
-  return ageMs > source.refresh_interval_seconds * 2 * 1000
-}
-
-// Friendly message lookup for the Test step. Maps the backend's
-// ``error_kind`` enum (see ``SourceTestResult`` in api.ts and
-// ``SourceTestResult`` in backend/app/schemas.py) to user-facing
-// copy. The ``name`` slot in name_conflict / invalid_url messages
-// is interpolated by the caller via the raw ``error`` string when
-// it adds info beyond the kind.
-function friendlyTestError(
-  kind: string | null,
-  raw: string | null,
-): string {
-  switch (kind) {
-    case 'not_found':
-      return "Couldn't find a feed at that URL. Double-check the address."
-    case 'forbidden':
-      return 'This site blocks automated access. Try adding a User-Agent header (Advanced → Custom headers).'
-    case 'timeout':
-      return 'Feed took too long to respond. The site may be slow or down.'
-    case 'parse_error':
-      return "Got a response but it didn't look like a feed. Is this a valid RSS/Atom URL?"
-    case 'name_conflict':
-      return raw ? `Name conflict — ${raw}` : 'A source with this name already exists.'
-    case 'invalid_url':
-      return raw ? `Invalid URL — ${raw}` : "That URL isn't valid."
-    case 'unsupported_type':
-      return raw ? `Unsupported type — ${raw}` : "This feed type isn't supported yet."
-    case 'network_error':
-      return "Couldn't reach the URL. Check your network or the site's status."
-    case 'unknown':
-    default:
-      return raw ? `Something went wrong — ${raw}` : 'Something went wrong. Try again.'
-  }
-}
-
-function parseApiError(err: unknown, fallback: string): string {
-  // FastAPI returns 422 with `{detail: [{loc: [...], msg: "..."}, ...]}`
-  // (validation errors) or `{detail: "..."}` (a plain HTTPException).
-  // ``jsonFetch`` (api.ts) attaches that parsed `detail` to the thrown
-  // ``ApiError``, so check it before falling back to the generic
-  // "<status> <statusText>" message — otherwise the specific,
-  // useful reason never gets a chance to show.
-  const e = err as { message?: string; detail?: unknown }
-  if (Array.isArray(e.detail)) {
-    return e.detail
-      .map((d: unknown) =>
-        d && typeof d === 'object' && typeof (d as { msg?: unknown }).msg === 'string'
-          ? (d as { msg: string }).msg
-          : JSON.stringify(d),
-      )
-      .join('; ')
-  }
-  if (typeof e.detail === 'string') return e.detail
-  if (typeof e.message === 'string') return e.message
-  return fallback
-}
 
 export function FeedManager({ sources, onRefresh, onError, onSourceRenamed }: Props) {
   const [tab, setTab] = useState<Tab>('mine')
@@ -412,7 +264,7 @@ function SourceRow({
     // Inline two-tap — the first tap set ``confirmingDelete`` to
     // true (button became "confirm delete"). This is the second tap.
     // Works the same for built-in and dynamic rows — see
-    // ``KNOWN_BUILT_INS`` above.
+    // ``KNOWN_BUILT_INS`` in lib/feedRules.ts.
     setBusy(true)
     try {
       await api.deleteSource(source.id)
