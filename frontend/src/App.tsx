@@ -18,6 +18,7 @@
 //   - Source filter chips in the header
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import { api, type Brief, type CurrentUser, type Entry, type Health, type Source } from './api'
 import { BriefCard } from './components/BriefCard'
 import { Card } from './components/Card'
@@ -108,6 +109,8 @@ function deepEqual(a: unknown, b: unknown): boolean {
 // any row that's structurally unchanged — lets the memo comparators
 // actually bail out on the common "nothing changed for this row"
 // case.
+type BriefTone = 'terse' | 'narrative' | 'alert'
+
 // How long a feed saved, added or deleted in this tab overrides what a
 // poll says about it (see ``sourceChangesRef``).
 const SOURCE_CHANGE_TTL_MS = 120_000
@@ -297,7 +300,61 @@ function PresetChip({
   // button is the one guaranteed to work everywhere — long-press
   // isn't wired up here, so right-click alone would leave touch
   // users with no way to rename or delete a chip at all.
-  const [mode, setMode] = useState<'idle' | 'actions' | 'confirmDelete'>('idle')
+  const [mode, setMode] = useState<'idle' | 'actions' | 'confirmDelete' | 'rename'>('idle')
+  const [draft, setDraft] = useState(preset.name)
+  const renameRef = useRef<HTMLInputElement>(null)
+  // An unchanged or empty name does nothing, as before.
+  const finishRename = () => {
+    const trimmed = draft.trim()
+    setMode('idle')
+    if (!trimmed || trimmed === preset.name) return
+    onRename(trimmed)
+    toast(`Renamed to “${trimmed}”.`, 'info')
+  }
+
+  if (mode === 'rename') {
+    return (
+      <div className="shrink-0 flex items-center gap-1.5">
+        <input
+          ref={renameRef}
+          type="text"
+          aria-label={`new name for ${preset.name}`}
+          enterKeyHint="done"
+          autoCorrect="off"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              finishRename()
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              setMode('idle')
+            }
+          }}
+          className="w-44 min-h-[44px] rounded-ios bg-bg-elevated border border-hairline px-3 text-ios-body text-label-primary"
+        />
+        <button
+          type="button"
+          onPointerDown={(e) => e.preventDefault()}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={finishRename}
+          className={CHIP_BUTTON}
+          aria-label={`save the new name for ${preset.name}`}
+        >
+          <span className={chipPill('bg-accent border-accent text-white font-semibold')}>Done</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setMode('idle')}
+          className="shrink-0 w-11 h-11 flex items-center justify-center text-label-tertiary active:opacity-60"
+          aria-label="cancel rename"
+        >
+          ✕
+        </button>
+      </div>
+    )
+  }
 
   if (mode === 'confirmDelete') {
     return (
@@ -326,15 +383,12 @@ function PresetChip({
       <div className="shrink-0 flex items-center gap-1.5">
         <button
           onClick={() => {
-            // Native prompt, pre-filled with the current name —
-            // same low-ceremony pattern "Save current view" uses.
-            const name = window.prompt('Rename this view', preset.name)
-            setMode('idle')
-            if (name === null) return
-            const trimmed = name.trim()
-            if (!trimmed || trimmed === preset.name) return
-            onRename(trimmed)
-            toast(`Renamed to “${trimmed}”.`, 'info')
+            // An inline field prefilled with the name, focused in the
+            // same tap so the keyboard comes up.
+            setDraft(preset.name)
+            flushSync(() => setMode('rename'))
+            renameRef.current?.focus()
+            renameRef.current?.select()
           }}
           className={CHIP_BUTTON}
           aria-label={`rename preset ${preset.name}`}
@@ -519,7 +573,16 @@ export function App() {
   // Brief tone — lifted from BriefCard so the header Brief button,
   // the Drawer "Generate brief now" button, and the BriefCard pills
   // all stay in sync.
-  const [briefTone, setBriefTone] = useState<'terse' | 'narrative' | 'alert'>('terse')
+  // The Brief tone survives a reload on this device; anything stored
+  // that isn't one of the three tones reads as 'terse'.
+  const [briefTone, setBriefToneState] = useState<BriefTone>(() => {
+    const stored = safeGetItem(STORAGE_KEYS.briefTone)
+    return stored === 'narrative' || stored === 'alert' ? stored : 'terse'
+  })
+  const setBriefTone = useCallback((tone: BriefTone) => {
+    setBriefToneState(tone)
+    safeSetItem(STORAGE_KEYS.briefTone, tone)
+  }, [])
   // Kick off brief generation + poll the job-status endpoint until
   // the LLM call lands. Shared between the header Brief button and
   // BriefCard's Regenerate/Generate buttons so both surfaces get
@@ -2610,14 +2673,14 @@ export function App() {
             <button
               onClick={() => void refresh()}
               disabled={refreshing}
-              className="min-h-[32px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+              className="min-h-[44px] -my-1.5 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
             >
               {refreshing ? '…' : 'Refresh'}
             </button>
             <button
               onClick={() => void triggerBriefGenerate(briefTone, setError)}
               disabled={generatingBrief}
-              className="min-h-[32px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+              className="min-h-[44px] -my-1.5 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
               title="Generate today's brief now"
             >
               {generatingBrief ? '…' : 'Brief'}
@@ -3089,24 +3152,7 @@ export function App() {
         onCategoryJump={jumpToCategory}
         onOpenSettings={(tab) => openSettings(tab ?? 'feeds')}
         onEditSource={(id) => openSettings('feeds', id)}
-        onSavePreset={() => {
-          // Use a native prompt for the preset name.
-          // Simple, no extra state, no overlay. A
-          // custom modal would be 80 lines of code
-          // and not noticeably better UX. The
-          // savePreset callback returns the new
-          // preset id; we just toast the name.
-          //
-          // ``window.prompt`` returns ``null`` when
-          // the user dismisses (Esc / Cancel) —
-          // skip the save in that case. An empty
-          // string falls through to the default
-          // "Untitled preset" label that savePreset
-          // already provides.
-          const name = window.prompt(
-            'Name this view (e.g. “AI safety”, “Hockey + deals”, “muted everything”)',
-          )
-          if (name === null) return
+        onSavePreset={(name) => {
           savePreset(name)
           toast(`Saved view “${name.trim() || 'Untitled preset'}”`, 'info')
         }}
@@ -3141,9 +3187,21 @@ export function App() {
         }}
         starredEntries={starredEntries}
         onUnstarAll={() => {
-          if (starredEntriesRef.current.length === 0) return
+          const cleared = starredEntriesRef.current
+          if (cleared.length === 0) return
           setStarredEntries([])
-          toast('All saved entries cleared.', 'info')
+          // Undo puts back what was cleared and keeps anything saved
+          // since the toast appeared.
+          toast('All saved entries cleared.', {
+            kind: 'info',
+            action: {
+              label: 'Undo',
+              onClick: () => {
+                const now = starredEntriesRef.current
+                setStarredEntries([...cleared.filter((id) => !now.includes(id)), ...now])
+              },
+            },
+          })
         }}
         onUnstarEntry={(entryId) => {
           // Per-row unstar from the Settings → Saved
@@ -3159,12 +3217,21 @@ export function App() {
         onHideAllDownvoted={() => {
           const ids = downvotedEntries
           if (ids.length === 0) return
+          const before = hiddenEntriesRef.current
+          // Only the ones this hid; Undo leaves the rest as they are now.
+          const added = ids.filter((id) => !before.includes(id))
           setHiddenEntries(
-            [...hiddenEntriesRef.current, ...ids].slice(-MAX_HIDDEN),
+            [...before, ...ids].slice(-MAX_HIDDEN),
           )
           toast(
             `Hid ${ids.length} downvoted ${ids.length === 1 ? 'entry' : 'entries'}.`,
-            'info',
+            {
+              kind: 'info',
+              action: {
+                label: 'Undo',
+                onClick: () => setHiddenEntries(hiddenEntriesRef.current.filter((id) => !added.includes(id))),
+              },
+            },
           )
         }}
       />

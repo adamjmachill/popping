@@ -26,8 +26,10 @@
 //     ``setX(...)`` and the provider handles the network.
 //   - Optimistic updates: a write is reflected in the in-memory
 //     state immediately, the network call goes out in the
-//     background. A failed write reverts. The UX feels
-//     localStorage-fast while the truth lives on the server.
+//     background. A failed write is retried once; if that fails
+//     too, one error toast per burst of failures says so. The
+//     in-memory state is not reverted, so the screen keeps what
+//     the user did, but the next load reads the server's state.
 //
 // Why not just call the API from each consumer?
 //
@@ -67,6 +69,7 @@ import {
 } from 'react'
 import { api } from '../api'
 import { safeGetItem, safeRemoveItem } from './storage'
+import { toast } from '../components/Toast'
 
 // ---------------------------------------------------------------------------
 // Key registry. Single source of truth for which preference keys exist
@@ -513,6 +516,28 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   // debounce coalesces them and the final value is the truth.
   const pendingRef = useRef<Map<string, unknown>>(new Map())
   const timerRef = useRef<number | null>(null)
+  // When the last "couldn't save" toast showed: one per burst.
+  const failureToastAt = useRef(0)
+
+  // One PUT, retried once after 2 s. A newer value for the key that is
+  // already queued replaces both the retry and the failure notice.
+  const put = useCallback((key: string, value: unknown, retried = false) => {
+    void api.setPreference(key, value).catch((err) => {
+      if (import.meta.env.DEV) console.warn(`preferences: PUT ${key} failed`, err)
+      if (pendingRef.current.has(key)) return
+      if (!retried) {
+        window.setTimeout(() => {
+          if (!pendingRef.current.has(key)) put(key, value, true)
+        }, 2000)
+        return
+      }
+      const now = Date.now()
+      if (now - failureToastAt.current > 30_000) {
+        failureToastAt.current = now
+        toast("Couldn't save your latest changes to Popping. They'll be lost when the app reloads.", 'error')
+      }
+    })
+  }, [])
 
   const scheduleSync = useCallback(() => {
     if (timerRef.current !== null) return
@@ -520,18 +545,9 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       timerRef.current = null
       const batch = Array.from(pendingRef.current.entries())
       pendingRef.current.clear()
-      for (const [key, value] of batch) {
-        // Fire-and-forget. Failure logs in dev; the in-memory
-        // state is still the truth for this session, and the
-        // next mount's GET will reconcile.
-        void api.setPreference(key, value).catch((err) => {
-          if (import.meta.env.DEV) {
-            console.warn(`preferences: PUT ${key} failed`, err)
-          }
-        })
-      }
+      for (const [key, value] of batch) put(key, value)
     }, 250)
-  }, [])
+  }, [put])
 
   // Flush on tab close. ``fetch`` with ``keepalive`` survives the
   // page unloading. (``sendBeacon`` can't be used: it always POSTs,

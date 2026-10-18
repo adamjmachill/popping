@@ -20,14 +20,10 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 
-// Files already cleaned of the patterns that break on an iPhone.
-// The list grows PR by PR until it covers all of src/ (REDESIGN_PLAN.md,
-// section 4, "Lint bans"). Core rules only, no extra dependency.
-const MOBILE_SCOPE = [
-  'src/components/{Card,Toast,BriefCard,FramingWatch,SourceIcon,SearchResults,Drawer,Hamburger,FeedManager,Column,ShortcutsSheet,LoginPage,Settings}.tsx',
-  'src/lib/**',
-  'src/components/feeds/**',
-]
+// The patterns that break on an iPhone are banned across all of src/
+// (REDESIGN_PLAN.md, section 4, "Lint bans"; the scope grew PR by PR and
+// covers everything from PR9). Core rules only, no extra dependency.
+const MOBILE_SCOPE = ['src/**/*.{ts,tsx}']
 
 // A class-name pattern banned in string literals and template text.
 const ban = (re, message) => [
