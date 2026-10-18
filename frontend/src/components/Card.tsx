@@ -41,7 +41,7 @@ type Props = {
   selected?: boolean
   // Ref-callback so App can focus/scroll into view on keyboard nav.
   // Optional — most cards never need it.
-  cardRef?: (el: HTMLElement | null) => void
+  cardRef?: (el: HTMLElement | null, prev?: HTMLElement | null) => void
   onActivate?: () => void
   // Source category — drives the colored left stripe. Optional; when
   // absent the card just renders without a stripe. The Column passes
@@ -321,9 +321,13 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   // polls that don't change any of its data props.
   const cardRefLatest = useRef<typeof cardRef>(cardRef)
   cardRefLatest.current = cardRef
+  // On detach it also passes the element going away, so the registry
+  // only drops the entry if it still points at this card (the same
+  // story can be on screen twice, in the phone and desktop layouts).
   const stableCardRef = useRef((el: HTMLElement | null) => {
+    const prev = articleRef.current
     articleRef.current = el
-    cardRefLatest.current?.(el)
+    cardRefLatest.current?.(el, prev)
   }).current
 
   // Summary panel state. ``null`` means we haven't loaded yet (or
