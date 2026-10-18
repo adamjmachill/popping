@@ -232,21 +232,21 @@ export function ColumnInner({
   }, [])
 
   // Click-outside dismissal. The popover is small and short-lived;
-  // a backdrop div would be overkill. ``mousedown`` (not ``click``)
-  // so the act of opening the popover doesn't immediately close it
-  // — the click that opened it lands before the listener is
-  // attached, but if the user re-clicks on the ⋯ button to dismiss
-  // it, that's already handled by the button's own onClick.
+  // a backdrop div would be overkill. ``pointerdown``, not
+  // ``mousedown``: iOS sends no mousedown for a tap on empty space,
+  // so the popover would stay open. The ⋯ button is left to its own
+  // onClick toggle; closing here too would reopen it on the click.
   useEffect(() => {
     if (!popoverOpen) return
-    const onDocMouseDown = (e: MouseEvent) => {
+    const onDocPointerDown = (e: PointerEvent) => {
       const target = e.target as Node
+      if (prefsButtonRef.current?.contains(target)) return
       if (popoverRef.current && !popoverRef.current.contains(target)) {
         setPopoverOpen(false)
       }
     }
-    document.addEventListener('mousedown', onDocMouseDown)
-    return () => document.removeEventListener('mousedown', onDocMouseDown)
+    document.addEventListener('pointerdown', onDocPointerDown)
+    return () => document.removeEventListener('pointerdown', onDocPointerDown)
   }, [popoverOpen])
 
   // Esc closes the popover. Same effect slot as click-outside.
@@ -394,7 +394,7 @@ export function ColumnInner({
               e.stopPropagation()
               setPopoverOpen((p) => !p)
             }}
-            className="shrink-0 w-8 h-8 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated"
+            className="shrink-0 w-11 h-11 -mr-1 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated"
             aria-label="column preferences"
             aria-expanded={popoverOpen}
           >
@@ -424,16 +424,16 @@ export function ColumnInner({
                 onChange={(e) =>
                   onPrefsChange({ ...prefs, sort: e.target.value as ColumnPrefs['sort'] })
                 }
-                className="w-full min-h-[36px] rounded-ios bg-bg-surface border border-hairline px-2 text-label-primary"
+                className="select-ios w-full min-h-[44px] rounded-ios bg-bg-surface border border-hairline pl-3 pr-8 text-ios-body text-label-primary"
               >
-                <option value="top">Top (composite score)</option>
+                <option value="top">Best first</option>
                 <option value="newest">Newest first</option>
                 <option value="oldest">Oldest first</option>
               </select>
             </div>
             <div>
               <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
-                Min score: {prefs.minScore}
+                Minimum score: {prefs.minScore}
               </label>
               <input
                 type="range"
@@ -472,7 +472,7 @@ export function ColumnInner({
                     maxAgeHours: v === 'all' ? null : Number(v),
                   })
                 }}
-                className="w-full min-h-[36px] rounded-ios bg-bg-surface border border-hairline px-2 text-label-primary"
+                className="select-ios w-full min-h-[44px] rounded-ios bg-bg-surface border border-hairline pl-3 pr-8 text-ios-body text-label-primary"
               >
                 <option value="all">All</option>
                 <option value="1">1 hour</option>
@@ -698,7 +698,7 @@ function ColumnSection({
         disabled={!onToggle}
         aria-expanded={!collapsed}
         data-section-header={label.toLowerCase()}
-        className="w-full flex items-center gap-1.5 px-1 py-1.5 min-h-[28px]
+        className="w-full flex items-center gap-1.5 px-1 py-1.5 min-h-[44px]
                    text-ios-caption uppercase tracking-wide text-label-tertiary
                    hover:text-label-secondary active:text-label-primary
                    transition-colors select-none
@@ -830,7 +830,7 @@ function EmptyColumnMessage({
   if (!source) {
     return (
       <p className="text-ios-body text-label-secondary italic px-1">
-        no entries in this column yet — the scheduler will fetch the first batch shortly
+        no entries in this column yet — new stories show up after the next check
       </p>
     )
   }
@@ -839,17 +839,17 @@ function EmptyColumnMessage({
   //   2. transient error (last_error set, error_count < threshold)
   //   3. fetched but found nothing (last_fetch_at set, no error)
   //   4. never fetched yet (last_fetch_at null)
-  if (source.error_count >= AUTO_DISABLE_THRESHOLD && !source.active) {
+  if (source.auto_disabled || (source.error_count >= AUTO_DISABLE_THRESHOLD && !source.active)) {
     return (
       <p className="text-ios-body text-label-secondary italic px-1">
-        auto-disabled after {source.error_count} consecutive errors — re-enable from Feed Manager
+        Popping stopped checking this feed after {source.error_count} failed tries — resume it in Menu → Settings → Feeds
       </p>
     )
   }
   if (source.last_error) {
-    // Truncate to keep the message terse — the full traceback lives
-    // in the Feed Manager. 80 chars is enough to identify the kind
-    // of error without scrolling.
+    // Truncate to keep the message terse — the full error lives in
+    // Menu → Settings → Feeds. 80 chars is enough to identify the
+    // kind of error without scrolling.
     const snippet = source.last_error.slice(0, 80)
     return (
       <p className="text-ios-body text-label-secondary italic px-1">

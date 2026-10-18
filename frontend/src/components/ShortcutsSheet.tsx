@@ -91,7 +91,7 @@ export function ShortcutsSheet({ open, onClose }: Props) {
             type="button"
             onClick={onClose}
             aria-label="close shortcuts"
-            className="text-label-secondary active:text-label-primary min-h-[32px] min-w-[32px] flex items-center justify-center"
+            className="w-11 h-11 -mr-3 text-label-secondary active:text-label-primary flex items-center justify-center"
           >
             ✕
           </button>

@@ -61,8 +61,8 @@ const PAGE_RULES = ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C11', 'C12', 'C13
 // after the screenshot.
 const MUTATING_RULES = ['C2b', 'C6']
 
-// C7 scopes: controls inside these are measured. PR7 adds 'main.md\\:hidden article'.
-const C7_SCOPES = ['[role="dialog"]', 'aside[aria-label="menu"]', 'header', '[role="tablist"]']
+// C7 scopes: controls inside these are measured (the phone's cards from PR7).
+const C7_SCOPES = ['[role="dialog"]', 'aside[aria-label="menu"]', 'header', '[role="tablist"]', 'main.md\\:hidden article']
 // C12 scopes: the phone's content surfaces.
 const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]', 'aside[aria-label="menu"]']
 
@@ -309,6 +309,55 @@ const STATES = [
       await addr.scrollIntoViewIfNeeded()
     },
   }),
+  {
+    // PR7: a column's ⋯ popover on the phone (sort, minimum score, age).
+    name: 'column-popover',
+    setup: async ({ page }) => {
+      await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').filter({ hasText: /^News/ }).first().click()
+      await page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`).click()
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+    },
+    run: async ({ page, fail }) => {
+      const POPOVER = `${MOBILE_MAIN} [data-column-popover]`
+      const more = page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`)
+      // iOS sends pointer events but no mousedown for a tap on empty
+      // space, so the popover must close on pointerdown.
+      await page.evaluate(() => document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })))
+      await page.waitForTimeout(150)
+      if (await page.locator(POPOVER).count()) fail('POPOVER', 'a pointerdown outside left the popover open')
+      // Tapping ⋯ again closes it instead of closing and reopening.
+      await more.click()
+      await page.locator(POPOVER).waitFor({ state: 'visible' })
+      await more.click()
+      await page.waitForTimeout(150)
+      if (await page.locator(POPOVER).count()) fail('POPOVER', 'tapping ⋯ while open did not close the popover')
+    },
+  },
+  {
+    // PR7: the sign-in page with the local form and a refused password.
+    name: 'login',
+    wait: 'input[autocomplete="username"]',
+    expectedFailedLoads: ['/auth/local'],
+    before: async ({ page }) => {
+      const reply = (status, body) => (route) => route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) })
+      await page.route((u) => new URL(u).pathname === '/auth/me', reply(401, { detail: 'not logged in' }))
+      await page.route((u) => new URL(u).pathname === '/auth/local/availability', reply(200, { enabled: true }))
+      await page.route((u) => new URL(u).pathname === '/auth/local', reply(401, { detail: 'invalid credentials' }))
+    },
+    setup: async ({ page }) => {
+      await page.fill('input[autocomplete="username"]', 'adam')
+      await page.fill('input[autocomplete="current-password"]', 'not-the-password')
+      await page.getByRole('button', { name: 'Sign in', exact: true }).click()
+      await page.getByText("That username and password don't match.").waitFor({ state: 'visible' })
+    },
+    run: async ({ page, fail }) => {
+      // iOS must not capitalise "adam" to "Adam".
+      const attrs = await page
+        .locator('input[autocomplete="username"]')
+        .evaluate((el) => ({ cap: el.getAttribute('autocapitalize'), correct: el.getAttribute('autocorrect'), spell: el.getAttribute('spellcheck') }))
+      if (attrs.cap !== 'none' || attrs.correct !== 'off' || attrs.spell !== 'false') fail('LOGIN', `username field attributes are ${JSON.stringify(attrs)}`)
+    },
+  },
   settingsState('llm'), // "AI"
   settingsState('notifications'),
   settingsState('history'),

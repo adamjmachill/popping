@@ -37,7 +37,7 @@ import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
 import { recordImmediate } from './lib/interactions'
 import { categoryLabel, sourceLabel } from './lib/labels'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
-import { fieldSaveMessage, isRetryable } from './lib/apiErrors'
+import { briefFailureMessage, errorMessage, fieldSaveMessage, isRetryable } from './lib/apiErrors'
 import { sameHeaders, type HeaderMap } from './lib/headers'
 // Per-user server-backed preferences. Replaces the 8 localStorage
 // keys the dashboard used to write (readEntries, lastViewed,
@@ -243,7 +243,7 @@ function PresetChips({
   return (
     <div
       data-hscroll
-      className="flex gap-1.5 overflow-x-auto px-4 sm:px-6 py-2 border-b border-hairline bg-bg-app"
+      className="flex gap-1.5 overflow-x-auto px-4 sm:px-6 border-b border-hairline bg-bg-app"
       role="toolbar"
       aria-label="saved filter presets"
     >
@@ -272,6 +272,11 @@ function PresetChips({
   )
 }
 
+// A 44px tap target around a smaller pill: the strip keeps its compact
+// look while every chip and action is easy to hit on a phone.
+const CHIP_BUTTON = 'group shrink-0 min-h-[44px] flex items-center'
+const chipPill = (tone: string) => `rounded-full border px-3 py-1 text-ios-caption whitespace-nowrap group-active:opacity-60 ${tone}`
+
 function PresetChip({
   preset,
   onApply,
@@ -296,21 +301,21 @@ function PresetChip({
 
   if (mode === 'confirmDelete') {
     return (
-      <div className="shrink-0 flex items-center gap-1.5 rounded-full bg-red-500/10 border border-red-500/30 pl-2.5 pr-1 py-0.5">
+      <div className="shrink-0 flex items-center gap-1.5">
         <span className="text-ios-caption text-red-400">Delete?</span>
         <button
           onClick={onDelete}
-          className="text-ios-caption text-red-400 active:opacity-60 font-semibold"
+          className={CHIP_BUTTON}
           aria-label={`confirm delete preset ${preset.name}`}
         >
-          Yes
+          <span className={chipPill('bg-red-500/10 border-red-500/30 text-red-400 font-semibold')}>Yes</span>
         </button>
         <button
           onClick={() => setMode('idle')}
-          className="text-ios-caption text-label-secondary active:opacity-60"
+          className={CHIP_BUTTON}
           aria-label={`cancel delete preset ${preset.name}`}
         >
-          No
+          <span className={chipPill('border-hairline text-label-secondary')}>No</span>
         </button>
       </div>
     )
@@ -318,7 +323,7 @@ function PresetChip({
 
   if (mode === 'actions') {
     return (
-      <div className="shrink-0 flex items-center gap-2 rounded-full bg-bg-elevated border border-hairline pl-2.5 pr-1.5 py-0.5">
+      <div className="shrink-0 flex items-center gap-1.5">
         <button
           onClick={() => {
             // Native prompt, pre-filled with the current name —
@@ -331,10 +336,10 @@ function PresetChip({
             onRename(trimmed)
             toast(`Renamed to “${trimmed}”.`, 'info')
           }}
-          className="text-ios-caption text-label-primary active:opacity-60"
+          className={CHIP_BUTTON}
           aria-label={`rename preset ${preset.name}`}
         >
-          Rename
+          <span className={chipPill('bg-bg-elevated border-hairline text-label-primary')}>Rename</span>
         </button>
         <button
           onClick={() => {
@@ -342,22 +347,22 @@ function PresetChip({
             setMode('idle')
             toast(`“${preset.name}” updated to the current view.`, 'info')
           }}
-          className="text-ios-caption text-label-primary active:opacity-60"
+          className={CHIP_BUTTON}
           aria-label={`update preset ${preset.name} to the current filter and column settings`}
           title="Overwrite this view with the current filter + per-column settings"
         >
-          Update
+          <span className={chipPill('bg-bg-elevated border-hairline text-label-primary')}>Update</span>
         </button>
         <button
           onClick={() => setMode('confirmDelete')}
-          className="text-ios-caption text-red-400 active:opacity-60"
+          className={CHIP_BUTTON}
           aria-label={`delete preset ${preset.name}`}
         >
-          Delete
+          <span className={chipPill('bg-bg-elevated border-hairline text-red-400')}>Delete</span>
         </button>
         <button
           onClick={() => setMode('idle')}
-          className="text-label-tertiary active:opacity-60 px-0.5"
+          className="shrink-0 w-11 h-11 flex items-center justify-center text-label-tertiary active:opacity-60"
           aria-label="cancel"
         >
           ✕
@@ -379,17 +384,21 @@ function PresetChip({
           setMode('actions')
         }}
         title={`Apply preset "${preset.name}". Tap ⋯ to rename, update, or delete.`}
-        className="shrink-0 rounded-full bg-accent-soft text-accent border border-accent-soft hover:bg-accent-soft/80 active:opacity-60 pl-3 pr-2 py-0.5 text-ios-caption font-medium"
+        className={CHIP_BUTTON}
       >
-        {preset.name}
+        <span className="rounded-full bg-accent-soft text-accent border border-accent-soft group-hover:bg-accent-soft/80 group-active:opacity-60 pl-3 pr-2 py-1 text-ios-caption font-medium whitespace-nowrap">
+          {preset.name}
+        </span>
       </button>
       <button
         onClick={() => setMode('actions')}
         aria-label={`options for preset ${preset.name}`}
         title="Rename, update, or delete this view"
-        className="shrink-0 rounded-full bg-accent-soft text-accent/70 border border-accent-soft hover:bg-accent-soft/80 active:opacity-60 px-2 py-0.5 text-ios-caption"
+        className={`${CHIP_BUTTON} min-w-[44px] justify-center`}
       >
-        ⋯
+        <span className="rounded-full bg-accent-soft text-accent/70 border border-accent-soft group-hover:bg-accent-soft/80 group-active:opacity-60 px-2 py-1 text-ios-caption">
+          ⋯
+        </span>
       </button>
     </div>
   )
@@ -545,7 +554,7 @@ export function App() {
         const startedAt = Date.now()
         while (!ac.signal.aborted) {
           if (Date.now() - startedAt > TIMEOUT_MS) {
-            onError?.('brief generation timed out')
+            onError?.('The brief took too long. Try again.')
             return
           }
           await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS))
@@ -574,7 +583,7 @@ export function App() {
             } catch {
               // fall through to the error path
             }
-            onError?.('brief job no longer tracked — please try again')
+            onError?.('Popping lost track of that brief. Try again.')
             return
           }
           if (status.status === 'completed' && status.brief) {
@@ -589,12 +598,12 @@ export function App() {
             return
           }
           if (status.status === 'failed') {
-            onError?.(status.error ?? 'brief generation failed')
+            onError?.(briefFailureMessage(status.error))
             return
           }
         }
       } catch (err) {
-        onError?.((err as Error).message)
+        onError?.(errorMessage(err))
       } finally {
         if (generationAbortRef.current === ac) {
           setGeneratingBrief(false)
@@ -1204,8 +1213,10 @@ export function App() {
         : e.reduce((acc, row) => (prevSeen.has(row.id) ? acc : acc + 1), 0)
       if (!opts?.silent) toast(newCount > 0 ? `${newCount} new since last refresh` : 'refreshed', 'info')
     } catch (err) {
-      setError((err as Error).message)
-      if (!opts?.silent) toast((err as Error).message, 'error')
+      // Plain words, never the raw "<status> for <url>" text.
+      const message = errorMessage(err)
+      setError(message)
+      if (!opts?.silent) toast(message, 'error')
     } finally {
       setRefreshing(false)
     }
@@ -1534,10 +1545,10 @@ export function App() {
       .catch((err: Error) => {
         if (cancelled) return
         setSearchResults([])
-        // Surface the error verbatim — the user can tell the
-        // difference between "no matches" (results=[], error=null)
-        // and "the request failed" (results=[], error="…").
-        setSearchError(err?.message ?? 'search failed')
+        // An error, not an empty list, so the user can tell "no
+        // matches" (results=[], error=null) from "the request failed"
+        // (results=[], error="…"). Plain words, not the raw text.
+        setSearchError(errorMessage(err))
       })
       .finally(() => {
         if (!cancelled) setSearching(false)
@@ -1725,7 +1736,7 @@ export function App() {
           setHiddenEntries([...cur, entryId].slice(-MAX_HIDDEN))
         }
         markEntryRead(columnName, entryId)
-        toast('Entry moved to history.', {
+        toast('Hidden.', {
           kind: 'info',
           action: {
             label: 'Undo',
@@ -1733,7 +1744,7 @@ export function App() {
             // this used to only call restoreHiddenEntry, which
             // unhid the entry but left it marked read, so it stayed
             // sitting in History instead of returning to Fresh. A
-            // user hitting Undo on "Entry moved to history" expects
+            // user hitting Undo on "Hidden." expects
             // the entry back where it was, not half-moved.
             onClick: () => {
               restoreHiddenEntry(entryId)
@@ -2617,7 +2628,7 @@ export function App() {
       </header>
 
       {activeSources.size > 0 && (
-        <div data-hscroll className="px-4 py-2 border-b border-hairline bg-bg-surface flex items-center gap-2 text-ios-caption overflow-x-auto whitespace-nowrap">
+        <div data-hscroll className="px-4 border-b border-hairline bg-bg-surface flex items-center gap-2 text-ios-caption overflow-x-auto whitespace-nowrap">
           <span className="text-label-secondary shrink-0">filtering by:</span>
           {Array.from(activeSources).map((src) => (
             // ``animate-fade-in`` fires on every mount (the animation
@@ -2630,17 +2641,21 @@ export function App() {
             <button
               key={src}
               onClick={() => toggleSource(src)}
-              className="shrink-0 rounded-full bg-accent-soft px-2.5 py-0.5 text-accent text-ios-caption motion-safe:animate-fade-in"
+              className="group shrink-0 min-h-[44px] flex items-center motion-safe:animate-fade-in"
               aria-label={`remove ${sourceLabel(src)} from filter`}
             >
-              {sourceLabel(src)} ✕
+              <span className="rounded-full bg-accent-soft px-2.5 py-1 text-accent text-ios-caption group-active:opacity-60">
+                {sourceLabel(src)} ✕
+              </span>
             </button>
           ))}
           <button
             onClick={() => setActiveSources(new Set())}
-            className="shrink-0 ml-auto text-ios-caption text-accent active:opacity-60"
+            className="group shrink-0 ml-auto min-h-[44px] flex items-center"
           >
-            clear all
+            <span className="rounded-full border border-hairline px-2.5 py-1 text-ios-caption text-accent group-active:opacity-60">
+              clear all
+            </span>
           </button>
         </div>
       )}
@@ -2654,7 +2669,7 @@ export function App() {
           <span className="break-words">{error}</span>
           <button
             onClick={() => setError(null)}
-            className="shrink-0 text-red-200/80 active:text-red-200"
+            className="shrink-0 w-11 h-11 -my-2 -mr-3 flex items-center justify-center text-red-200/80 active:text-red-200"
             aria-label="dismiss error"
           >
             ✕
@@ -2743,7 +2758,7 @@ export function App() {
           </div>
         ) : (
           <div className="flex-1 flex items-center justify-center text-ios-body text-label-secondary px-4 text-center">
-            no entries yet — the scheduler will fetch the first batch shortly, or hit Refresh
+            No stories yet. Tap Refresh to check now, or add feeds in Menu → Settings → Feeds.
           </div>
         )
       ) : (
@@ -2922,20 +2937,26 @@ export function App() {
               role="tablist"
               aria-label="dashboard sections"
               data-hscroll
-              className="shrink-0 flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1"
+              className="shrink-0 flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1"
             >
+              {/* Each tab is a 44px button around a smaller pill, so the
+                  strip stays compact while every tab is easy to hit. */}
               <button
                 type="button"
                 role="tab"
                 aria-selected={mobileCol === -1}
                 onClick={() => selectMobileCol(-1)}
-                className={`shrink-0 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                  mobileCol === -1
-                    ? 'bg-accent text-white'
-                    : 'bg-bg-surface text-label-secondary active:bg-bg-elevated'
-                }`}
+                className="group shrink-0 min-h-[44px] flex items-center"
               >
-                Brief
+                <span
+                  className={`rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
+                    mobileCol === -1
+                      ? 'bg-accent text-white'
+                      : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
+                  }`}
+                >
+                  Brief
+                </span>
               </button>
               {columns.map((c, i) => {
                 const newCount = newCountByColumn.get(c.name)
@@ -2951,22 +2972,26 @@ export function App() {
                     role="tab"
                     aria-selected={i === mobileCol}
                     onClick={() => selectMobileCol(i)}
-                    className={`shrink-0 flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                      i === mobileCol
-                        ? 'bg-accent text-white'
-                        : 'bg-bg-surface text-label-secondary active:bg-bg-elevated'
-                    }`}
+                    className="group shrink-0 min-h-[44px] flex items-center"
                   >
-                    {categoryLabel(c.name)}
-                    {!!newCount && (
-                      <span
-                        className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
-                          i === mobileCol ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
-                        }`}
-                      >
-                        {newCount}
-                      </span>
-                    )}
+                    <span
+                      className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
+                        i === mobileCol
+                          ? 'bg-accent text-white'
+                          : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
+                      }`}
+                    >
+                      {categoryLabel(c.name)}
+                      {!!newCount && (
+                        <span
+                          className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
+                            i === mobileCol ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
+                          }`}
+                        >
+                          {newCount}
+                        </span>
+                      )}
+                    </span>
                   </button>
                 )
               })}

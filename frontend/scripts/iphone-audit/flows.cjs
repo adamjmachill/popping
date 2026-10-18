@@ -132,13 +132,16 @@ const field = (page, id, label) => page.locator(ROW(id)).getByLabel(label, { exa
 const rowButton = (page, id, name) => page.locator(ROW(id)).getByRole('button', { name, exact: true })
 const savedShown = (page, id) => page.locator(ROW(id)).getByText('Saved ✓').first().isVisible()
 
-// Holds each PATCH to /api/sources/<id> for `ms` before it goes on.
+// Holds each PATCH to /api/sources/<id> for `ms` before it goes on;
+// page._patchesReleased counts the ones let through.
 async function delayPatches(page, id, ms) {
+  page._patchesReleased = 0
   await page.route(
     (u) => new URL(u).pathname === `/api/sources/${id}`,
     async (route) => {
       if (route.request().method() !== 'PATCH') return route.fallback()
       await sleep(ms)
+      page._patchesReleased++
       return route.fallback()
     },
   )
@@ -586,19 +589,21 @@ module.exports = [
 
   editorFlow('flow-ff-done-while-saving', 6, {
     before: async ({ page }) => {
-      await delayPatches(page, 6, 1500)
+      await delayPatches(page, 6, 4000)
       page._patches = await record(page, 'PATCH', '/api/sources/6')
     },
     run: async ({ page, fail }) => {
       await waitEditor(page, 6)
       const typed = 'https://slickdeals.net/ff.xml'
       await field(page, 6, 'Address').fill(typed)
-      const t0 = Date.now()
       await page.locator('button[aria-label="close settings"]').click()
-      await page.locator(SETTINGS).waitFor({ state: 'detached', timeout: 3000 })
-      if (Date.now() - t0 > 1000) fail('FF', `the sheet took ${Date.now() - t0} ms to close`)
+      await page.locator(SETTINGS).waitFor({ state: 'detached', timeout: 6000 })
+      // Done must not wait for the save: the sheet is gone while the
+      // server is still holding the PATCH (whatever the machine's load).
+      if (page._patchesReleased) fail('FF', 'the sheet closed only after the save finished')
       if (!(await waitFor(() => page._patches.length === 1, 2000))) return fail('FF', 'Done did not save the address')
-      await sleep(1800)
+      if (!(await waitFor(() => page._patchesReleased === 1, 6000))) return fail('FF', 'the delayed save never finished')
+      await sleep(300)
       await openEditor(page, 6)
       const value = await field(page, 6, 'Address').inputValue()
       if (value !== typed) fail('FF', `reopened with ${JSON.stringify(value)}`)
