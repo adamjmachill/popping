@@ -78,7 +78,7 @@ export function SearchResults({
       <div className="flex-1 overflow-x-clip overflow-y-auto overscroll-contain space-y-2 pr-1">
         {error ? (
           <p className="text-ios-body text-red-400 px-1" role="alert">
-            search failed — {error}
+            Search failed. {error}
           </p>
         ) : entries.length === 0 ? (
           <p className="text-ios-body text-label-secondary italic px-1">

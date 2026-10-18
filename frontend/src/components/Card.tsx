@@ -585,6 +585,10 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
       // Don't arm the timer at all — saves the cleanup path too.
       return
     }
+    // Long-press to copy is for touchscreens on hover-capable devices
+    // (touch laptops). On a phone the press belongs to the system's
+    // own link menu (open, share, copy), which the copy would fight.
+    if (!window.matchMedia('(hover: hover)').matches) return
     clearLongPress()
     longPressTimer.current = window.setTimeout(() => {
       // Re-check the touch is still the same finger and roughly in
@@ -924,7 +928,10 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
             recordImmediate({ entry_id: entry.id, type: 'click' })
             onActivate?.()
           }}
-          className="flex-1 min-w-0 flex items-start gap-1.5 text-ios-body font-medium text-label-primary hover:text-white"
+          // On a phone the headline is how a story opens, so the link
+          // fills its row and is at least 44px tall even for a
+          // one-line title.
+          className="flex-1 min-w-0 flex items-start gap-1.5 max-md:self-stretch max-md:min-h-[44px] text-ios-body font-medium text-label-primary hover:text-white"
         >
           {/* Full title, no line-clamp — a long headline just wraps
               and grows the card rather than getting cut off with an
@@ -1283,7 +1290,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               aria-label={vote === 'up' ? 'remove upvote' : 'upvote — more like this'}
               aria-pressed={vote === 'up'}
               title="more like this"
-              className={`h-10 px-3 rounded-full flex items-center justify-center transition-colors
+              className={`h-11 min-w-[44px] px-3 rounded-full flex items-center justify-center transition-colors
                           ${vote === 'up'
                             ? 'bg-amber-400/15 text-amber-400'
                             : 'text-label-secondary hover:text-amber-400 active:text-amber-400'}`}
@@ -1310,7 +1317,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               aria-label={vote === 'down' ? 'remove downvote' : 'downvote — less like this'}
               aria-pressed={vote === 'down'}
               title="less like this"
-              className={`h-10 px-3 rounded-full flex items-center justify-center transition-colors
+              className={`h-11 min-w-[44px] px-3 rounded-full flex items-center justify-center transition-colors
                           ${vote === 'down'
                             ? 'bg-sky-400/15 text-sky-400'
                             : 'text-label-secondary hover:text-sky-400 active:text-sky-400'}`}
@@ -1350,7 +1357,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={expanded ? 'hide summary' : 'show summary'}
                 aria-expanded={!!expanded}
                 title={expanded ? 'hide summary (s)' : 'show summary (s)'}
-                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated
+                className={`shrink-0 w-11 h-11 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated
                             ${expanded ? 'opacity-100 text-accent' : 'opacity-0 group-hover:opacity-100 [@media(hover:none)]:opacity-100'}`}
               >
                 {/* Rotate 180° when expanded so the chevron flips up —
@@ -1388,7 +1395,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={unread ? 'mark this card as read' : 'mark this card as unread'}
                 aria-pressed={!unread}
                 title={unread ? 'mark as read (m)' : 'mark as unread'}
-                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
+                className={`shrink-0 w-11 h-11 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${unread ? 'text-label-secondary' : 'text-accent'}`}
               >
                 <CheckIcon className="w-4 h-4" filled={!unread} />
@@ -1416,7 +1423,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={starred ? 'remove from saved' : 'save for later'}
                 aria-pressed={!!starred}
                 title="save for later (s)"
-                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
+                className={`shrink-0 w-11 h-11 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${starred ? 'text-accent' : 'text-label-secondary'}`}
               >
                 <StarIcon className="w-4 h-4" filled={!!starred} />
@@ -1451,7 +1458,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 aria-label={hidden ? 'unhide' : 'hide'}
                 aria-pressed={!!hidden}
                 title="hide (h)"
-                className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
+                className={`shrink-0 w-11 h-11 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${hidden ? 'text-accent' : 'text-label-secondary'}`}
               >
                 <EyeIcon className="w-4 h-4" closed={!!hidden} />

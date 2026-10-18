@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  briefFailureMessage,
   errorMessage,
   fieldSaveMessage,
   friendlyTestError,
@@ -68,6 +69,15 @@ test('errorMessage for other call sites', () => {
   assert.equal(errorMessage(new TypeError('x')), "Couldn't reach Popping. Check your connection.")
   assert.equal(errorMessage(api(418)), 'Something went wrong. Try again.')
   assert.equal(errorMessage('boom'), 'Something went wrong. Try again.')
+})
+
+test('briefFailureMessage names the one reason the user can fix', () => {
+  assert.equal(
+    briefFailureMessage('no LLM provider configured (set ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY, or run Ollama)'),
+    'No AI provider is set up yet. Pick one in Menu → Settings → AI.',
+  )
+  assert.equal(briefFailureMessage('LLM call failed or returned empty content (check backend logs)'), "Popping couldn't write the brief. Try again.")
+  assert.equal(briefFailureMessage(null), "Popping couldn't write the brief. Try again.")
 })
 
 test('lastErrorMessage for each scheduler prefix', () => {

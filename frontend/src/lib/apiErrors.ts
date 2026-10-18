@@ -137,6 +137,16 @@ export function errorMessage(err: unknown): string {
   return 'Something went wrong. Try again.'
 }
 
+/** Plain words for a failed brief job's ``error``. The backend's
+ *  reasons name environment variables and logs; only "no provider" is
+ *  something the user can act on from the app. */
+export function briefFailureMessage(error: string | null | undefined): string {
+  if ((error ?? '').startsWith('no LLM provider configured')) {
+    return 'No AI provider is set up yet. Pick one in Menu → Settings → AI.'
+  }
+  return "Popping couldn't write the brief. Try again."
+}
+
 /** Plain words for a feed's ``last_error``, which the scheduler writes
  *  as "[<category>] <ExceptionType>: <message>". */
 export function lastErrorMessage(lastError: string | null | undefined): string {
