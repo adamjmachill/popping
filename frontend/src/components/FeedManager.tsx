@@ -275,7 +275,7 @@ function TabButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      className={`flex-1 min-w-0 min-h-[44px] px-1.5 rounded-ios text-ios-body whitespace-nowrap truncate transition ${
+      className={`flex-1 min-w-0 min-h-[44px] px-1 rounded-ios text-ios-body whitespace-nowrap truncate transition ${
         active
           ? 'bg-bg-elevated text-accent'
           : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
@@ -709,7 +709,6 @@ function SourceRow({
         >
           {sourceLabel(source.name)}
         </span>
-        <span className="text-label-tertiary shrink-0 text-ios-caption">{categoryLabel(source.category)}</span>
         <span
           aria-hidden="true"
           className={`ml-auto shrink-0 text-label-tertiary transition-transform ${open ? 'rotate-90' : ''}`}
@@ -717,10 +716,12 @@ function SourceRow({
           ›
         </span>
       </button>
-      {/* Caption line, always shown. Status chips live here rather
-          than beside the name, so a feed's name keeps the width it
-          needs on a phone; the line wraps when there are several. */}
+      {/* Caption line, always shown: category, freshness, then status
+          chips. They live here rather than beside the name, so a feed's
+          name keeps the width it needs on a phone; the line wraps when
+          it runs long. */}
       <div className="-mt-2 pb-2 pl-[22px] flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ios-caption">
+        <span className="max-w-full truncate text-label-secondary">{categoryLabel(source.category)}</span>
         <span className={isStale(source) ? 'text-amber-400' : 'text-label-tertiary'}>
           updated {timeAgo(source.last_fetch_at)} · every {refreshLabel(source.refresh_interval_seconds)}
         </span>

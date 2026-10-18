@@ -577,7 +577,7 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
             </div>
             {/* Own row on a phone, so the text block beside the chevron
                 keeps its width instead of being crushed by the pills. */}
-            <div className="flex items-center gap-2 basis-full sm:basis-auto">
+            <div className="flex flex-wrap items-center gap-2 basis-full sm:basis-auto">
               <TonePicker
                 tone={tone}
                 onToneChange={onToneChange}

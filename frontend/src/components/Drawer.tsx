@@ -464,7 +464,10 @@ export function Drawer({
                       <span className="flex-1 min-w-0 truncate text-ios-body text-label-primary">
                         {sourceLabel(s.name)}
                       </span>
-                      <span className="shrink-0 text-ios-caption text-label-tertiary">
+                      {/* Hidden on phones, where the panel is too narrow
+                          for a name and a long category side by side;
+                          the name matters more for picking a filter. */}
+                      <span className="hidden sm:block shrink min-w-0 max-w-[40%] truncate text-ios-caption text-label-tertiary">
                         {s.category}
                       </span>
                     </label>
