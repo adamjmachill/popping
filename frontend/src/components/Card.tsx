@@ -533,9 +533,12 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   // identical outcome.
   const commitMarkRead = () => {
     if (!onMarkRead) return
-    const dwellMs = Math.min(Date.now() - mountTime.current, 5 * 60 * 1000)
-    recordImmediate({ entry_id: entry.id, type: 'view' })
-    recordBatched({ entry_id: entry.id, type: 'dwell', value: dwellMs })
+    // On a read card this is "mark unread": no engagement to record.
+    if (unread) {
+      const dwellMs = Math.min(Date.now() - mountTime.current, 5 * 60 * 1000)
+      recordImmediate({ entry_id: entry.id, type: 'view' })
+      recordBatched({ entry_id: entry.id, type: 'dwell', value: dwellMs })
+    }
     onMarkRead()
   }
 
@@ -849,7 +852,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
           className="absolute inset-0 rounded-ios-lg bg-emerald-600 flex items-center pl-5 pointer-events-none opacity-0"
         >
           <CheckIcon className="w-5 h-5 text-white" filled />
-          <span className="ml-2 text-ios-body font-medium text-white">Read</span>
+          <span className="ml-2 text-ios-body font-medium text-white">{unread ? 'Read' : 'Unread'}</span>
         </div>
       )}
       {onHideToggle && (
@@ -1351,20 +1354,14 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 onClick={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
-                  // "view" + manual read flip + dwell. Three signals in
-                  // one click: "view" (same signal headline/thumbnail
-                  // clicks send), "dwell" (read-time, capped at 5 min so
-                  // a backgrounded tab doesn't dominate the ranker's
-                  // read-time average), and the manual readEntries flip
-                  // that dims the card.
-                  const dwellMs = Math.min(Date.now() - mountTime.current, 5 * 60 * 1000)
-                  recordImmediate({ entry_id: entry.id, type: 'view' })
-                  recordBatched({ entry_id: entry.id, type: 'dwell', value: dwellMs })
-                  onMarkRead()
+                  // Same path as swipe-right: on an unread card, "view" +
+                  // "dwell" (capped at 5 min) + the read flip that dims
+                  // it; on a read card, just the flip back to unread.
+                  commitMarkRead()
                 }}
-                aria-label="mark this card as read"
+                aria-label={unread ? 'mark this card as read' : 'mark this card as unread'}
                 aria-pressed={!unread}
-                title="mark as read (m)"
+                title={unread ? 'mark as read (m)' : 'mark as unread'}
                 className={`shrink-0 w-10 h-10 flex items-center justify-center rounded-full active:bg-bg-elevated
                             ${unread ? 'text-label-secondary' : 'text-accent'}`}
               >
