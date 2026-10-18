@@ -309,7 +309,7 @@ function TonePicker({
               e.stopPropagation()
               onToneChange(t.value)
             }}
-            className={`shrink-0 min-h-[28px] rounded-ios px-3 text-ios-body transition disabled:opacity-40 ${
+            className={`shrink-0 min-h-[44px] rounded-ios px-3 text-ios-body transition disabled:opacity-40 ${
               active
                 ? 'bg-bg-elevated text-accent'
                 : 'text-label-primary active:bg-bg-elevated'
@@ -540,7 +540,7 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
                 onGenerate()
               }}
               disabled={generating}
-              className="shrink-0 min-h-[36px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+              className="shrink-0 min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
               aria-label="generate brief"
             >
               {generating ? '…' : "Generate"}
@@ -559,7 +559,7 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
                 toggleCollapsed()
               }
             }}
-            className="px-4 py-3 flex items-center gap-3 cursor-pointer select-none min-h-[44px]"
+            className="px-4 py-3 flex flex-wrap items-center gap-3 cursor-pointer select-none min-h-[44px]"
           >
             <span
               aria-hidden="true"
@@ -575,19 +575,23 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
                 No brief generated yet for today.
               </p>
             </div>
-            <TonePicker
-              tone={tone}
-              onToneChange={onToneChange}
-              disabled={generating}
-            />
-            <button
-              data-brief-action="generate"
-              onClick={onGenerate}
-              disabled={generating}
-              className="shrink-0 min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
-            >
-              {generating ? '…' : "Generate"}
-            </button>
+            {/* Own row on a phone, so the text block beside the chevron
+                keeps its width instead of being crushed by the pills. */}
+            <div className="flex items-center gap-2 basis-full sm:basis-auto">
+              <TonePicker
+                tone={tone}
+                onToneChange={onToneChange}
+                disabled={generating}
+              />
+              <button
+                data-brief-action="generate"
+                onClick={onGenerate}
+                disabled={generating}
+                className="shrink-0 ml-auto min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+              >
+                {generating ? '…' : "Generate"}
+              </button>
+            </div>
           </div>
         )}
         {!collapsed && error && (
@@ -648,7 +652,7 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
               onGenerate()
             }}
             disabled={generating}
-            className="shrink-0 min-h-[36px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+            className="shrink-0 min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
             aria-label={generating ? 'generating brief' : 'regenerate brief'}
           >
             {generating ? '…' : 'Regenerate'}
@@ -721,7 +725,7 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
             data-brief-action="regenerate"
             onClick={onGenerate}
             disabled={generating}
-            className="min-h-[36px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+            className="min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
           >
             {generating ? '…' : 'Regenerate'}
           </button>

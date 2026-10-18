@@ -78,7 +78,7 @@ export function FramingWatch() {
                 {c.articles.length} framings
               </span>
               {c.wire_source && (
-                <span className="shrink-0 inline-flex items-center rounded-full bg-accent-soft px-1.5 text-[10px] uppercase tracking-wide text-accent">
+                <span className="shrink-0 inline-flex items-center rounded-full bg-accent-soft px-1.5 text-[11px] uppercase tracking-wide text-accent">
                   {c.wire_source} wire
                 </span>
               )}
@@ -108,7 +108,7 @@ export function FramingWatch() {
                         </span>
                         {a.framing_tone && a.framing_tone !== 'neutral' && (
                           <span
-                            className={`shrink-0 text-[9px] uppercase tracking-wide border rounded-full px-1 ${TONE_STYLES[a.framing_tone] ?? ''}`}
+                            className={`shrink-0 text-[11px] uppercase tracking-wide border rounded-full px-1 ${TONE_STYLES[a.framing_tone] ?? ''}`}
                           >
                             {a.framing_tone}
                           </span>

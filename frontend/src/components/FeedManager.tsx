@@ -225,13 +225,13 @@ export function FeedManager({ sources, onRefresh, onError, onSourceRenamed }: Pr
     <div className="space-y-2">
       <div className="flex gap-1" role="tablist" aria-label="feed manager tabs">
         <TabButton active={tab === 'mine'} onClick={() => setTab('mine')}>
-          My feeds ({sources.length})
+          My feeds
         </TabButton>
         <TabButton active={tab === 'recommended'} onClick={() => setTab('recommended')}>
-          Recommended
+          Suggested
         </TabButton>
         <TabButton active={tab === 'add'} onClick={() => setTab('add')}>
-          Add custom
+          Add
         </TabButton>
       </div>
 
@@ -275,7 +275,7 @@ function TabButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      className={`flex-1 min-h-[36px] rounded-ios text-ios-body transition ${
+      className={`flex-1 min-w-0 min-h-[44px] px-1.5 rounded-ios text-ios-body whitespace-nowrap truncate transition ${
         active
           ? 'bg-bg-elevated text-accent'
           : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
@@ -682,7 +682,7 @@ function SourceRow({
   }
 
   return (
-    <div className={`px-3 py-0.5 text-ios-caption border-b border-hairline last:border-b-0 ${busy ? 'opacity-60' : ''}`}>
+    <div className={`py-0.5 text-ios-caption border-b border-hairline last:border-b-0 ${busy ? 'opacity-60' : ''}`}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -694,7 +694,7 @@ function SourceRow({
             w-3.5 h-3.5 img (14px). */}
         <SourceIcon src={source.favicon_path} name={source.name} size={14} />
         <span
-          className={`truncate font-medium ${
+          className={`min-w-0 truncate font-medium ${
             !source.active
               ? 'text-label-secondary line-through'
               : isStale(source)
@@ -709,7 +709,21 @@ function SourceRow({
         >
           {sourceLabel(source.name)}
         </span>
-        <span className="text-label-tertiary shrink-0 text-[11px]">{categoryLabel(source.category)}</span>
+        <span className="text-label-tertiary shrink-0 text-ios-caption">{categoryLabel(source.category)}</span>
+        <span
+          aria-hidden="true"
+          className={`ml-auto shrink-0 text-label-tertiary transition-transform ${open ? 'rotate-90' : ''}`}
+        >
+          ›
+        </span>
+      </button>
+      {/* Caption line, always shown. Status chips live here rather
+          than beside the name, so a feed's name keeps the width it
+          needs on a phone; the line wraps when there are several. */}
+      <div className="-mt-2 pb-2 pl-[22px] flex flex-wrap items-center gap-x-2 gap-y-0.5 text-ios-caption">
+        <span className={isStale(source) ? 'text-amber-400' : 'text-label-tertiary'}>
+          updated {timeAgo(source.last_fetch_at)} · every {refreshLabel(source.refresh_interval_seconds)}
+        </span>
         {/* Auto-disabled chips take precedence over the plain
             "paused" chip — the distinction matters: a paused source
             is a user choice (no action needed); an auto-disabled
@@ -773,18 +787,7 @@ function SourceRow({
             {source.net_vote_score}
           </span>
         )}
-        <span
-          aria-hidden="true"
-          className={`ml-auto shrink-0 text-label-tertiary transition-transform ${open ? 'rotate-90' : ''}`}
-        >
-          ›
-        </span>
-      </button>
-      {!open && (
-        <div className={`-mt-2 pb-2 pl-[22px] text-[11px] ${isStale(source) ? 'text-amber-400' : 'text-label-tertiary'}`}>
-          updated {timeAgo(source.last_fetch_at)} · every {refreshLabel(source.refresh_interval_seconds)}
-        </div>
-      )}
+      </div>
       {open && (
       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pb-2 pl-[22px]">
         <button
@@ -1092,7 +1095,7 @@ function RecommendedTab({
       <>
         {findMoreHeader}
         <p className="text-ios-body text-label-secondary italic px-3 py-2">
-          you've added all the recommended feeds — try Find more feeds or the Add custom tab
+          you've added all the recommended feeds — try Find more feeds or the Add tab
         </p>
       </>
     )
@@ -1111,7 +1114,7 @@ function RecommendedTab({
               <span className="text-label-tertiary shrink-0 text-[11px]">{r.category}</span>
               {r.source === 'llm' && (
                 <span
-                  className="shrink-0 inline-flex items-center rounded-full bg-accent-soft px-1.5 text-[10px] uppercase tracking-wide text-accent"
+                  className="shrink-0 inline-flex items-center rounded-full bg-accent-soft px-1.5 text-[11px] uppercase tracking-wide text-accent"
                   title="found via AI feed discovery"
                 >
                   found for you
@@ -1243,7 +1246,12 @@ function AutoFeedBlock({
       </p>
       <div className="flex items-center gap-2">
         <input
-          type="text"
+          type="url"
+          inputMode="url"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
+          enterKeyHint="go"
           value={autoUrl}
           onChange={(e) => setAutoUrl(e.target.value)}
           onKeyDown={(e) => {
@@ -1254,13 +1262,13 @@ function AutoFeedBlock({
           }}
           placeholder="https://example.com"
           disabled={autoSubmitting}
-          className="flex-1 min-h-[36px] rounded-ios bg-bg-surface border border-hairline px-2 text-label-primary placeholder:text-label-tertiary disabled:opacity-50"
+          className="flex-1 min-w-0 min-h-[44px] rounded-ios bg-bg-surface border border-hairline px-3 text-ios-body text-label-primary placeholder:text-label-tertiary disabled:opacity-50"
         />
         <button
           type="button"
           onClick={() => void autoAdd()}
           disabled={autoSubmitting}
-          className="shrink-0 min-h-[36px] rounded-ios bg-accent text-white px-3 text-ios-caption font-medium active:opacity-70 disabled:opacity-40"
+          className="shrink-0 min-h-[44px] rounded-ios bg-accent text-white px-3 text-ios-caption font-medium active:opacity-70 disabled:opacity-40"
         >
           {autoSubmitting ? 'Looking…' : 'Auto-add'}
         </button>

@@ -63,11 +63,11 @@ export function SearchResults({
 }: Props) {
   return (
     <section className="flex flex-col h-full overflow-hidden">
-      <header className="flex items-center justify-between px-1 pb-2 border-b border-hairline">
-        <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
+      <header className="flex items-center justify-between gap-2 px-1 pb-2 border-b border-hairline">
+        <h2 className="shrink-0 whitespace-nowrap text-ios-caption uppercase tracking-wide text-label-tertiary">
           Search results
         </h2>
-        <span className="text-ios-caption text-label-secondary">
+        <span className="min-w-0 truncate text-ios-caption text-label-secondary">
           {error
             ? 'failed'
             : searching
@@ -75,7 +75,7 @@ export function SearchResults({
               : `${entries.length} for "${query}"`}
         </span>
       </header>
-      <div className="flex-1 overflow-x-clip overflow-y-auto space-y-2 pr-1">
+      <div className="flex-1 overflow-x-clip overflow-y-auto overscroll-contain space-y-2 pr-1">
         {error ? (
           <p className="text-ios-body text-red-400 px-1" role="alert">
             search failed — {error}

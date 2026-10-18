@@ -101,11 +101,17 @@ jobs:
   frontend-checks:
     name: frontend lint + build
     runs-on: ubuntu-latest
+    # Read-only token, and not left in the checkout: this job downloads
+    # Playwright and browsers, and must not be able to push an image.
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: frontend
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
@@ -115,6 +121,27 @@ jobs:
       - run: npm run lint
       # tsc + vite build
       - run: npm run build
+      # Playwright is installed for this run only: --no-save plus the
+      # diff check prove package.json, the lockfile and the Docker
+      # build stay untouched.
+      - name: Install Playwright (not saved)
+        run: |
+          npm install --no-save --no-audit --no-fund --ignore-scripts playwright@1.56.1
+          git diff --exit-code package.json package-lock.json
+          npx playwright install --with-deps chromium webkit
+      - name: Start preview
+        run: |
+          nohup ./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173 --strictPort > /tmp/preview.log 2>&1 &
+          for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:4173/ && exit 0; sleep 0.5; done
+          cat /tmp/preview.log; exit 1
+      # Renders the main screens at iPhone sizes against a mocked API and
+      # fails on text or boxes running past their container
+      # (frontend/scripts/iphone-audit/README.md).
+      - name: iPhone layout smoke test
+        run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp
+      - name: iPhone layout smoke test (Safari engine, report only)
+        continue-on-error: true
+        run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit
 
   build-backend:
     name: backend image

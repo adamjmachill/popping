@@ -254,22 +254,16 @@ export function Drawer({
         }`}
       />
 
-      {/* Mobile: bottom sheet, slides up to fill the viewport (the iOS
-          Settings app presentation). Desktop (md+): slides in from
-          the left as a 360px sidebar. The two animations are
-          independent CSS classes so the swap is breakpoint-clean —
-          the mobile sheet never shows on desktop and vice versa. */}
+      {/* A panel anchored to the right edge on every width: 88vw (max
+          420px) on phones, 360px on desktop. It slides in from the
+          right with a transform; the same classes serve both widths. */}
       <aside
         ref={(el) => {
           drawerRef.current = el
-          // First focusable child: the Done button is rendered
-          // before everything else in the header so it lands as
-          // ``focusables[0]`` above. We capture it explicitly
-          // because ``querySelectorAll`` runs against the live
-          // tree which is fine for the Tab cycle but the
-          // initial focus wants the explicit Done button —
-          // not a child that may not exist on first render
-          // (e.g. the "Clear local state" row is conditional).
+          // Initial focus goes to the Done button, found by its label
+          // rather than by position (it sits after the title in the
+          // header), so focus never starts on a row that may not
+          // exist on first render.
           firstFocusableRef.current = el?.querySelector<HTMLElement>(
             'button[aria-label="close menu"]',
           ) ?? null
@@ -304,24 +298,21 @@ export function Drawer({
           aria-hidden="true"
           className="md:hidden absolute top-3 left-2 h-10 w-1 rounded-full bg-label-tertiary"
         />
-        {/* Header row — large title "Menu" on the right (matches
-            the right-anchored panel), Done button on the left. The
-            hairlines at the bottom is the standard iOS grouped-list
-            section break. We use ``flex-row-reverse``-equivalent
-            ordering by simply swapping the children: Done first,
-            then the title. ``pl-10 md:pl-4`` on the Done button
-            leaves room for the vertical grabber on mobile. */}
-        <div className="flex items-center justify-between px-4 pt-3 pb-3 md:pt-5 md:pb-4 border-b border-hairline shrink-0">
+        {/* Header row — iOS sheet layout: title "Menu" on the leading
+            edge, Done on the trailing edge, with the standard hairline
+            under it. ``pl-10 md:pl-0`` on the title leaves room for the
+            vertical grabber on phones. */}
+        <div className="flex items-center justify-between gap-3 px-4 pt-3 pb-3 md:pt-5 md:pb-4 border-b border-hairline shrink-0">
+          <h2 className="min-w-0 flex-1 truncate pl-10 md:pl-0 text-2xl md:text-ios-large-title font-bold text-label-primary tracking-tight">
+            Menu
+          </h2>
           <button
             onClick={onClose}
             aria-label="close menu"
-            className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-ios text-accent active:bg-bg-elevated pl-10 md:pl-0"
+            className="shrink-0 min-h-[44px] min-w-[44px] px-2 flex items-center justify-center rounded-ios text-ios-body font-semibold text-accent active:bg-bg-elevated"
           >
-            <span className="text-ios-body font-normal">Done</span>
+            Done
           </button>
-          <h2 className="text-2xl md:text-ios-large-title font-bold text-label-primary tracking-tight">
-            Menu
-          </h2>
         </div>
 
         {/* Body. ``min-h-0`` lets the nav actually shrink below its
@@ -331,7 +322,7 @@ export function Drawer({
             the viewport). ``p-4`` matches iOS grouped-list left/
             right margins. Background ``bg-bg-app`` keeps the section
             gaps from showing the sheet's underlying surface. */}
-        <nav className="flex-1 min-h-0 overflow-y-auto bg-bg-app pb-8">
+        <nav className="flex-1 min-h-0 overflow-y-auto overscroll-contain bg-bg-app pb-8">
           <GroupedSection label="Quick settings">
             <GroupedRow
               onClick={() => {
