@@ -762,7 +762,15 @@ export function App() {
     return grouped
   }, [visibleEntries, categoriesBySourceId])
 
-  const categories = useMemo(() => Array.from(byCategory.keys()).sort(), [byCategory])
+  // Sorted by what the column shows, so a typed "Hockey" or "NHL" sits
+  // among the lower-case categories, in the same order as the picker.
+  const categories = useMemo(
+    () =>
+      Array.from(byCategory.keys()).sort((a, b) =>
+        categoryLabel(a).localeCompare(categoryLabel(b), undefined, { sensitivity: 'base' }),
+      ),
+    [byCategory],
+  )
   const visibleForYou = useMemo(
     () => forYou.filter((e) => !hiddenSet.has(e.id)),
     [forYou, hiddenSet],
@@ -1055,7 +1063,10 @@ export function App() {
     return out
   }, [columns, unreadIdsByColumn])
 
-  const refresh = useCallback(async () => {
+  // ``silent`` skips the toasts (errors still set the banner): Settings
+  // refreshes after adding a feed, and its own "Added …" toast should
+  // stay up instead of being replaced by "refreshed".
+  const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     setRefreshing(true)
     try {
       const sourceArg = activeSources.size > 0 ? Array.from(activeSources) : undefined
@@ -1110,10 +1121,10 @@ export function App() {
       const newCount = prevSeen == null
         ? 0
         : e.reduce((acc, row) => (prevSeen.has(row.id) ? acc : acc + 1), 0)
-      toast(newCount > 0 ? `${newCount} new since last refresh` : 'refreshed', 'info')
+      if (!opts?.silent) toast(newCount > 0 ? `${newCount} new since last refresh` : 'refreshed', 'info')
     } catch (err) {
       setError((err as Error).message)
-      toast((err as Error).message, 'error')
+      if (!opts?.silent) toast((err as Error).message, 'error')
     } finally {
       setRefreshing(false)
     }
@@ -2818,7 +2829,7 @@ export function App() {
         onClose={() => setDrawerOpen(false)}
         categories={categories}
         sources={sources}
-        onRefreshSources={async () => { void refresh() }}
+        onRefreshSources={() => refresh({ silent: true })}
         activeSources={activeSources}
         onSourceToggle={toggleSourceAndMaybeClose}
         onClearAllFilters={clearSourceFilters}
@@ -2851,7 +2862,7 @@ export function App() {
         open={settingsOpen}
         tab={settingsTab}
         sources={sources}
-        onRefreshSources={async () => { void refresh() }}
+        onRefreshSources={() => refresh({ silent: true })}
         onError={setError}
         onClose={closeSettings}
         briefTone={briefTone}

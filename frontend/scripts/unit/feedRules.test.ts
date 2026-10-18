@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   checkName,
+  classifyPaste,
   isBuiltIn,
   isYouTubeVideoLink,
   normalizeFeedInput,
@@ -70,6 +71,20 @@ test('isYouTubeVideoLink', () => {
   assert.equal(isYouTubeVideoLink('https://www.youtube.com/live/abcdefghijk'), true)
   assert.equal(isYouTubeVideoLink('https://www.youtube.com/@mkbhd'), false)
   assert.equal(isYouTubeVideoLink('https://example.com/watch?v=abcdefghijk'), false)
+})
+
+test('classifyPaste', () => {
+  assert.equal(classifyPaste('@mkbhd'), 'youtube')
+  assert.equal(classifyPaste(ID), 'youtube')
+  assert.equal(classifyPaste('youtube.com/@mkbhd'), 'youtube')
+  assert.equal(classifyPaste('https://youtu.be/abcdefghijk'), 'youtube')
+  assert.equal(classifyPaste('r/python'), 'reddit')
+  assert.equal(classifyPaste('https://www.reddit.com/r/python/'), 'reddit')
+  assert.equal(classifyPaste('old.reddit.com/r/python'), 'reddit')
+  assert.equal(classifyPaste('https://www.reddit.com/user/someone'), 'other')
+  assert.equal(classifyPaste('https://podcasts.apple.com/ca/podcast/x/id123'), 'podcast')
+  assert.equal(classifyPaste('theverge.com'), 'other')
+  assert.equal(classifyPaste('youtube.com.evil.example/@x'), 'other')
 })
 
 test('normalizeName and checkName', () => {

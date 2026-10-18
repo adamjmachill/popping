@@ -98,6 +98,13 @@ async function waitForSettingsTab(page) {
   await page.locator(`${SETTINGS} [role="tab"][aria-selected="true"]`).first().waitFor({ state: 'visible' })
 }
 
+// Settings, Feeds, then the feed-manager tab at `index`
+// (0 "My feeds", 1 "Suggested", 2 "Add").
+async function openFeedTab(page, index) {
+  await waitForSettingsTab(page)
+  await page.locator(`${FEED_TABS} [role="tab"]`).nth(index).click()
+}
+
 const settingsState = (tab, name = `settings-${tab}`) => ({
   name,
   url: `/?view=settings&tab=${tab}`,
@@ -159,6 +166,73 @@ const STATES = [
       await page.fill('#fm-name', 'veritasium_clips_and_extras_channel_uploads')
       await page.fill('#fm-url', 'https://www.youtube.com/channel/UCHnyfMqiRRG1u-2MsSQLbXA/videos?view=0&sort=dd&shelf_id=0')
       await page.locator('#fm-url').blur()
+    },
+  },
+  {
+    // A Test that failed with YouTube's longest message.
+    name: 'settings-add-error',
+    url: '/?view=settings&tab=feeds',
+    before: async ({ page }) => {
+      await page.route((u) => new URL(u).pathname === '/api/sources/test', (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            ok: false,
+            status_code: null,
+            item_count: null,
+            sample_titles: [],
+            error_kind: 'invalid_url',
+            error: F.YOUTUBE_BLOCKED_MESSAGE,
+            resolved_url: null,
+          }),
+        }),
+      )
+    },
+    setup: async ({ page }) => {
+      await openFeedTab(page, 2)
+      await page.locator('input[type="radio"][value="youtube_channel"]').check({ force: true })
+      await page.fill('#fm-url', '@veritasium')
+      await page.getByRole('button', { name: 'Test', exact: true }).click()
+      const result = page.locator('[data-test-result="err"]')
+      await result.waitFor({ state: 'visible' })
+      await result.scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    // The category picker in New-category mode with a long name.
+    name: 'settings-add-newcat',
+    url: '/?view=settings&tab=feeds',
+    setup: async ({ page }) => {
+      await openFeedTab(page, 2)
+      await page.getByRole('button', { name: 'New category', exact: true }).click()
+      await page.fill('#fm-category', 'Ice hockey and other winter sports')
+      await page.getByText('Shows as', { exact: false }).waitFor({ state: 'visible' })
+      await page.locator('#fm-category').scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    // Advanced headers open: a browser identity and a refused header.
+    name: 'settings-add-headers',
+    url: '/?view=settings&tab=feeds',
+    setup: async ({ page }) => {
+      await openFeedTab(page, 2)
+      await page.locator('button[aria-controls="fm-headers"]').click()
+      await page.getByRole('button', { name: 'Use a browser identity', exact: true }).click()
+      await page.getByRole('button', { name: 'Add header', exact: true }).click()
+      await page.locator('#fm-headers input[aria-label="header name"]').last().fill('Cookie')
+      await page.locator('#fm-headers input[placeholder="Value"]').last().fill('session=abc')
+      await page.locator('#fm-url').focus()
+      await page.getByText("Popping can't send a Cookie header.").waitFor({ state: 'visible' })
+      await page.locator('#fm-headers').scrollIntoViewIfNeeded()
+    },
+  },
+  {
+    name: 'settings-suggested',
+    url: '/?view=settings&tab=feeds',
+    setup: async ({ page }) => {
+      await openFeedTab(page, 1)
+      await page.locator(`${SETTINGS} button[aria-label^="add "]`).first().waitFor({ state: 'visible' })
     },
   },
   settingsState('llm'), // "AI"

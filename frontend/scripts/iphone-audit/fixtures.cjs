@@ -54,6 +54,10 @@ const LAST_ERROR_300 = padToLength(
 )
 // the_verge (id 4): blocked by the site's bot filter.
 const VERGE_BLOCKED_ERROR = "[blocked] HTTPStatusError: Client error '403 Forbidden' for url 'https://www.theverge.com/rss/index.xml'"
+// The longest message the YouTube lookup can answer with (backend/app/youtube.py MSG_BLOCKED).
+const YOUTUBE_BLOCKED_MESSAGE =
+  "YouTube didn't let Popping look this channel up. Paste the channel ID instead: open the channel in YouTube, " +
+  'tap \u201cmore about this channel\u201d, then Share channel, then Copy channel ID. It starts with UC.'
 if (SEARCH_QUERY_60.length !== 60 || /\s|-/.test(SEARCH_QUERY_60)) throw new Error('SEARCH_QUERY_60 must be 60 unbroken chars')
 if (CATEGORY_40.length !== 40) throw new Error(`CATEGORY_40 is ${CATEGORY_40.length} chars, expected 40`)
 if (LAST_ERROR_300.length !== 300) throw new Error('LAST_ERROR_300 must be 300 chars')
@@ -218,6 +222,7 @@ module.exports = {
   CATEGORY_40,
   LAST_ERROR_300,
   VERGE_BLOCKED_ERROR,
+  YOUTUBE_BLOCKED_MESSAGE,
 }
 
 if (require.main === module) {

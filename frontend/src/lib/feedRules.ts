@@ -164,6 +164,22 @@ export function isYouTubeVideoLink(url: string): boolean {
   return ['shorts', 'live', 'embed'].includes(first) && segs.length >= 2
 }
 
+/** What an Auto-add paste is: YouTube (a link, @handle or channel ID)
+ *  goes to the backend's YouTube branch; a subreddit or an Apple
+ *  Podcasts page fills in the Add form; anything else is looked up as
+ *  a site. */
+export function classifyPaste(raw: string): 'youtube' | 'reddit' | 'podcast' | 'other' {
+  const v = raw.trim()
+  if (BARE_HANDLE_RE.test(v) || CHANNEL_ID_RE.test(v)) return 'youtube'
+  if (/^\/?r\/[A-Za-z0-9_]+\/?$/.test(v)) return 'reddit'
+  const u = parseUrl(v.includes('://') ? v : 'https://' + v)
+  if (!u) return 'other'
+  if (isYouTubeHost(u.hostname)) return 'youtube'
+  if (/(^|\.)reddit\.com$/i.test(u.hostname) && /^\/r\/[A-Za-z0-9_]+/.test(u.pathname)) return 'reddit'
+  if (u.hostname.toLowerCase() === 'podcasts.apple.com') return 'podcast'
+  return 'other'
+}
+
 // The playlist or channel a link names without any lookup, mirroring
 // the "feed" rows of the backend's _classify.
 function playlistIds(id: string): { channel?: string; playlist?: string } {
