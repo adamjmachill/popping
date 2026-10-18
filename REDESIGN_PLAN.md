@@ -143,3 +143,10 @@ Facts established so far in this environment:
 - Deep-dive workflow launched: 10 code readers, 3 designs (minimal change, iOS-native UX, structural), 3 judges, 1 synthesis, 7 adversarial verifiers, 1 completeness critic.
 - Read directly: App.tsx settings routing (lines 380 to 445: `?view=settings&tab=` drives the overlay via pushState/popstate), top bar (gear at 2272 to 2301, hamburger at 2306), FeedManager inline edit form (436 to 700: text category with a datalist, JSON textarea for headers, tiny "save" link), Drawer "All settings..." row (384 to 387), native `window.prompt` for presets (App.tsx 306 and 2826) and `window.confirm` for reset (Settings.tsx 413).
 - Deployment surface read: docker-compose.yml, nginx.conf.template, egress-proxy, ops/popping-update.sh. See section 2.
+- Reader reports done so far: feed editor, Settings overlay. Constraints they pinned down (each must hold in the redesign):
+  - Settings tab identity is URL state (`?view=settings&tab=`), parsed by an allow-list in App.tsx 394 to 428 and set by pushState in 430 to 444. Settings.tsx 238 to 246 switches tabs with replaceState plus a synthetic popstate that App listens to. Any new tab or rename must be added in both places, and the Drawer deep-links by tab id (Drawer.tsx 345 and 384).
+  - Stacking order to keep: Settings z-50, Drawer z-30/z-40, ShortcutsSheet z-40, Toast z-50 rendered after Settings.
+  - The mobile Settings sheet is pinned by its top edge with env(safe-area-inset-top), never a vh height (PR #11), and keeps env(safe-area-inset-bottom) at the bottom.
+  - On touch screens every input, textarea and select is forced to 16px by styles.css 24 to 26 (`!important`). New controls must be designed at 16px or more so that rule can go.
+  - FeedManager's PATCH surface is `api.updateSource(id, { refresh_interval_seconds?, active?, category?, name?, url?, custom_headers? })` (api.ts 424 to 434); custom_headers is a flat string-to-string map and null clears it.
+  - Desktop breakpoint is md (768px); iPads get the 480px right-hand panel.
