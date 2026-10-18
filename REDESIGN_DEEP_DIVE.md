@@ -2,7 +2,7 @@
 
 Generated from the deep-dive workflow journal. Raw agent output, not edited. REDESIGN_PLAN.md is the curated plan; this file is the evidence behind it and survives if the session ends.
 
-Progress: 10 code readers, 3 designs, 3 judges, synthesis done, 4 verifiers, critic not yet.
+Progress: 10 code readers, 3 designs, 3 judges, synthesis done, 6 verifiers, critic not yet.
 
 ## Verifier findings
 
@@ -349,6 +349,251 @@ Additions:
 - §9 'Where Settings lives' should also list the onFailedAway toast 'Open' action (PR 4) as an entry point. It is the case that needs the openSettings re-entry guard.
 - Optional: Drawer swipe-to-dismiss is leftward (Drawer.tsx:11-13, 175) on a right-anchored panel that slides out to the right. Consider dismissing on a rightward drag, or document it as intentional.
 - Optional, desktop: removing the gear makes Settings 2 clicks on desktop. A ',' keyboard shortcut in App.tsx:1753-1894 and ShortcutsSheet.tsx:29 would restore one-step access without adding a top-bar button.
+
+### iPhone checklist and the 13 overflow defects (REDESIGN_PLAN.md §4). Checked against origin/main 721713e. The frontend/src tree is identical on claude/redesign-plan. Inputs: styles.css, index.html, manifest, PR #11 (002ff64), PR #8 (9823be6), the shots/*.png and analysis.txt, and two scratch experiments in the scratchpad twtest/ folder (Tailwind 3.4.19 CSS output order; Chromium layout measurements).
+
+- [needs_change] Defect 1 / R2: the Feeds tab wrapper has no side gutter (Settings.tsx:265). Fix: pt-4 px-4.
+  - Evidence: Settings.tsx:265 is `<div className="pt-4">`. Every other tab wrapper is `pt-4 px-4` (:275, :331, :401, :1105, :1137, :1390). shots/320-06-add-youtube.png shows the pills, the Name input and the Auto feed box touching both screen edges. But SourceRow already has its own `px-3` (FeedManager.tsx:684), and 320-05a-feed-row.png shows the feed rows inset 12px. Adding px-4 on the wrapper puts the rows at 28px while the pills and the Add form sit at 16px.
+  - Correction: Keep `pt-4 px-4` on Settings.tsx:265. In the same PR, remove `px-3` from the SourceRow wrapper (FeedManager.tsx:684), or turn the list into an inset grouped list (`rounded-ios bg-bg-surface` with px-3 inside). Rows, pills and inputs then share one 16px gutter. Add guard rule C12 (see additions) so a missing gutter is detected; C3 allows left >= -1, so today's edge-touching layout passes it.
+- [confirmed] Defect 2 / R1+R7: the search row at 320 (App.tsx:2220-2262). Hide the h1 and refresh while searching; the pill becomes flex-1 min-w-0; clear 44px; type=text inputMode=search.
+  - Evidence: App.tsx:2229 pill `w-44 sm:w-72` beside the refresh button (:2283, sm:hidden), the gear and the hamburger. analysis.txt 320 09-search: body.scrollWidth=336 while html=320. The header cluster is 16px beyond the header. 390-09-search.png shows the title collapsed to 'P..'. The clear button (:2246-2258) has no size class, so the 16px icon is its whole hit area. type="search" (:2233) draws the native ⊗ next to the app's ✕ (both visible in 390-09-search.png).
+  - Correction: None for the fix. One addition: the cluster div (:2224) is `pb-1` inside an `items-end` row. When the h1 is hidden, the row height comes from the 44px pill, so check the 390 PNG for vertical jump on open and close (the header height changes from 41+ to 44).
+- [needs_change] Defect 3 / R4: the thumbnail ribbon. The container-query CSS in styles.css `@layer components` (.card-body/.card-title-row/.card-thumb), with card-thumb on the Thumbnail wrapper at Card.tsx:1734.
+  - Evidence: Two defects, both measured. (a) Tailwind 3.4.19 emits `@layer components` rules before utilities. The scratch build placed `.card-thumb{width:72px;aspect-ratio:1/1}` (inside @container) at output line 115, before `.aspect-video` (line 122) and `.w-28` (line 126), at equal specificity. The element at Card.tsx:1734 carries `w-28 sm:w-40 aspect-video`, so the override never applies and the ribbon stays. (b) The thumbnail sits inside an unclassed `<div className="shrink-0">` (Card.tsx:946-947). In the <300px column mode with `items-start`, a `width:100%` child of a shrink-to-fit parent is cyclic. A Chromium measurement of that structure gave a 20px-wide thumbnail. The arbitrary at-rule variant already works in this codebase (`[@media(hover:none)]:opacity-100` is used), and the scratch build emitted `[@container(max-width:379px)]:w-[72px]` after `.w-28`.
+  - Correction: Don't put the overrides in @layer components. Either (1) use utilities on the elements themselves: the article (Card.tsx:890) gets `max-md:[container-type:inline-size]` or a plain `.card-body` rule. The outer wrapper (Card.tsx:946) gets `[@container(max-width:299px)]:w-full [@container(max-width:299px)]:self-stretch`. Thumbnail (:1734) gets `[@container(max-width:379px)]:w-[72px] [@container(max-width:379px)]:aspect-square [@container(max-width:299px)]:w-full [@container(max-width:299px)]:aspect-video`. The title row (:905) gets `[@container(max-width:299px)]:flex-col`. Or (2) write the rules outside any @layer after `@tailwind utilities`, with the w-28/aspect-video base moved into the same rule, and target the outer wrapper (Card.tsx:946), not only :1734. Keep `items-center` on desktop (`max-md:items-start`) so the md+ look doesn't change. Add guard rule C13 (title measure) so the ribbon is detected.
+- [confirmed] Defect 4 / R1: the meta row (Card.tsx:955-963). Source min-w-0 truncate; dot and time shrink-0 whitespace-nowrap.
+  - Evidence: Card.tsx:955 `flex items-center gap-2`. :960 source span has no min-w-0/truncate. :962 `<time>` has no shrink-0. 390-09-search.png shows '14m / ago' wrapped beside a two-line source name with a stray dot.
+  - Correction: None. Note that no guard rule catches it: the text wraps, it is not clipped. See C11.
+- [needs_change] Defect 5 / R3: inline actions (Card.tsx:976-1135). Rows flex-wrap gap-x-4 gap-y-1; each action inline-flex whitespace-nowrap min-h-[44px] -my-2.
+  - Evidence: Rows at :976, :1052, :1122 are `mt-1.5 flex items-center gap-3` with no wrap. Each link is `inline-flex items-center gap-1`, so its inner spans ('Discussed on Reddit', '· 403 comments') shrink and wrap one by one. 390-02-card-summary.png shows this at 390, not only at 320. The fix is right, but min-h-[44px] -my-2 gives a 28px layout box. With mt-1.5 between rows and gap-y-1 inside a wrapped row, hit areas of adjacent rows and lines overlap by about 10-12px, and the later DOM node takes the tap.
+  - Correction: Use `gap-y-2` and, between consecutive action rows, `mt-2` (or put the three rows in one `flex flex-wrap gap-x-4 gap-y-2` container) so 44px boxes with -my-2 never overlap. Add C11 so a mid-phrase wrap is detected.
+- [confirmed] Defect 6 / R1: Auto-add off-screen; Settings body 369/320 (FeedManager.tsx:1245-1266).
+  - Evidence: FeedManager.tsx:1245-1257: input `type="text"` with `flex-1 min-h-[36px]`, no min-w-0. Button :1263 min-h-[36px]. analysis.txt 320: Settings body scrollWidth 369 > 320; Auto-add 62px beyond its parent. 320-06-add-youtube.png shows 'Aut' clipped.
+  - Correction: None.
+- [confirmed] Defect 7: feed names clipped by five shrink-0 chips (FeedManager.tsx:695-786). Move status chips to the caption line.
+  - Evidence: Category (:712), auto-disabled/paused (:722-736), ⚠ (:744), score (:762), chevron (:774) are all shrink-0. 320-05a-feed-row.png shows 'Risky B...' at about 55px. The 'VISIBLE OVERFLOW 373>366' on these rows in analysis.txt is the rotate-90 chevron's transformed box, not real overflow.
+  - Correction: Fix is right. But the name has `truncate`, and C5 exempts ellipsis, so no guard rule detects this defect or its return. Add C14 (ellipsis floor).
+- [needs_change] Defect 8: title 'Pop…' at 320, solved by removing the gear in PR 3 (title gets 148px); C5 asserts the h1 is not ellipsized at 320.
+  - Evidence: App.tsx:2221 h1 `truncate`. analysis.txt 320: h1 scrollWidth 140 vs clientWidth 100. After removing the gear: 288 - 3x44 - 2x4 = 148px, an 8px margin in Inter. At Page Zoom 125% (312 CSS px, the plan's own R8) the room is 140px, which is exactly the measured need with no margin. In standalone mode SF Pro Display Bold plus 0.37px tracking is about as wide. The plan's C5 exempts elements with text-overflow: ellipsis, and the h1 has `truncate`, so the 'h1 not ellipsized' assertion can never fail. PR 2's acceptance ('The h1 is not truncated at 320 on the dashboard') also can't pass in PR 2, because the gear is only removed in PR 3.
+  - Correction: Move that acceptance line to PR 3. Make it an explicit check (`h1.scrollWidth <= h1.clientWidth` at 320 and at 312) rather than C5. Make the title robust with `shrink-0` instead of truncate, plus `max-[359px]:text-[28px] max-[359px]:leading-[34px]`. Or keep truncate and add a smoke state at 312 width. Remove the 'h1 not ellipsized' sentence from C5.
+- [confirmed] Defect 9: Settings header (Settings.tsx:211-222). Title first min-w-0 flex-1 truncate, always 'Settings'; Done trailing 44px.
+  - Evidence: Settings.tsx:211 `flex items-center justify-between`. Done :215 `min-h-[32px] min-w-[32px]` with no shrink-0. h2 :219 shows `Settings → ${label}` with no min-w-0. analysis.txt 320 shows Done 1.4px beyond its parent.
+  - Correction: None.
+- [needs_change] Defect 10: FeedManager TabButton (FeedManager.tsx:264-287): flex-1 min-w-0 min-h-[44px] px-2 whitespace-nowrap truncate text-ios-caption.
+  - Evidence: TabButton :278 is `flex-1 min-h-[36px] rounded-ios text-ios-body` with no padding and no nowrap. 320-06-add-youtube.png shows 'My feeds (14)' on two lines and 'Add custom' touching the pill edges. Dropping to 13px text-ios-caption fixes the fit, but makes these 44px controls smaller text than the 17px Settings tab pills directly above them.
+  - Correction: Keep text-ios-body and use shorter labels instead: 'Mine (14)' / 'Suggested' / 'Add'. At 320 with the 16px gutter each pill is about 92px, and 'Suggested' at 17px is about 80px. Or keep text-ios-caption only if the owner accepts it. Either way add C11 so a two-line pill fails the guard. Without C11, a pill that wraps is not clipped and passes C5.
+- [confirmed] Defect 11 / R5: the !important 16px rule (styles.css:22-26) is duct tape; delete it in PR 5 after authoring every control at text-ios-body, and add a non-important 17px/22px base default.
+  - Evidence: styles.css:24-26 `@media (pointer: coarse){input,textarea,select{font-size:16px !important}}` inside @layer base, from PR #11 (002ff64). analysis.txt shows a textarea at '16px / lh 18px' and selects at '16px / lh normal' (mismatch). Every control without a text class is listed by grep: Settings.tsx:779,801,809,815,852,858,903; Column.tsx:423,471; FeedManager.tsx:1257,1538,1698,1715,1727,1740. FeedManager.tsx:642 (textarea, text-ios-caption) and :829 (select, text-ios-caption) are deleted in PR 4. A base rule in custom @layer base comes after preflight's `font-size:100%`, so it wins and utilities still override it.
+  - Correction: None. Make sure the new inline inputs (Drawer 'Save this view', preset rename at App.tsx:306, the CategoryPicker new-category field, HeadersEditor) are in the C6 states.
+- [needs_change] Defect 12 / R6: 9-10px text. Card.tsx:1171 and 1174, App.tsx:2709 and FramingWatch.tsx:81, 106, 111 become text-[11px]; SourceIcon.tsx:68 stays at 9px.
+  - Evidence: Card.tsx:1171 and FramingWatch.tsx:106 are already text-[11px]. The real sub-11px sites are Card.tsx:1174 (9px), FramingWatch.tsx:81 (10px) and :111 (9px), App.tsx:2709 (10px), SourceIcon.tsx:68 (9px), and FeedManager.tsx:1114 (10px 'new' chip in Suggested). The last one is missing from the plan, and FeedManager.tsx is outside MOBILE_SCOPE until PR 5. FeedManager.tsx:598, 645, 650 (10px) are deleted with the old form.
+  - Correction: List the six real sites. Add FeedManager.tsx:1114 to PR 2 (class-only), or to PR 4's Suggested rewrite.
+- [confirmed] Defect 13: double clear button (App.tsx:2233-2235), type=search -> type=text inputMode=search enterKeyHint=search.
+  - Evidence: App.tsx:2233 `type="search"` plus the app's ClearIcon button (:2246). Both are visible in 390-09-search.png.
+  - Correction: None. Add a guard assertion that there is no `input[type=search]` (C15), because C1-C10 cannot see the native ⊗.
+- [refuted] The guard (C1-C10) will catch these defects and stop them coming back; PR 2 step 1 expects 'C5 on the feed rows and pills' to fail today.
+  - Evidence: Of the 13 measured defects, C2/C3/C4 catch only #2 (search 336/320) and #6 (Settings body 369/320). #1 is undetected (left=0 passes C3's left >= -1). #3 too: a tall ribbon is neither overflow nor clipping. #4 and #5 wrap without clipping. #7 and #8 are exempt because of `truncate`. #9 wraps. #10 wraps inside the pill and the pill grows. #13 is a native shadow control. So step 1's expected C5 failures on feed rows and pills will not occur. C5 as written also flags the sr-only legend (FeedManager.tsx:1555) and every below-the-fold text node in a vertical scroller, unless it compares only the horizontal extent.
+  - Correction: C5 compares only left and right extents. Exempt clippers whose rect is <= 1px or that have `clip: rect(0,0,0,0)` (sr-only). Add C11-C15 (see additions). Rewrite step 1's expected failures to the rules that actually fire.
+- [confirmed] C2 measures body.scrollWidth and #root.scrollWidth because html hides overflow via overflow-x: clip (styles.css:36).
+  - Evidence: styles.css:36 `html, body { overflow-x: clip; }`. analysis.txt 320 09-search: html.scrollWidth=320, body=336.
+  - Correction: Also add a vertical page check: `document.scrollingElement.scrollHeight <= innerHeight + 1` on the dashboard. See the minHeight addition.
+- [confirmed] C1 and one fresh context per state, because long sessions gave false pointer: coarse readings.
+  - Evidence: analysis.txt 320 09-search reports `media coarse=false hoverNone=false`, while every other state reports coarse=true. capture.cjs:428/431 call setViewportSize mid-session.
+  - Correction: None.
+- [confirmed] Card swipe lags the finger (Card.tsx:513): transition '' during the drag lets the class's 200ms transition apply.
+  - Evidence: Card.tsx:513 `el.style.transition = animate ? 'transform 180ms ease-out' : ''`. The class at :893 is `transition-[transform,...] duration-200`.
+  - Correction: None. It is a one-line fix and could go in PR 2 rather than PR 5.
+- [needs_change] Inline minHeight: 100dvh fights the height:100% chain (App.tsx:2188) -> remove in PR 5.
+  - Evidence: styles.css:17 `html, body, #root { height: 100% }` and :20 `#root { padding-bottom: env(safe-area-inset-bottom) }` with preflight border-box, so the App div's h-full is 100% minus 34px. App.tsx:2188 `minHeight: '100dvh'` forces the full height, so in standalone mode on a Face ID iPhone the document gets a 34px vertical scroll range: the whole UI, header included, can be dragged. It is an overflow root cause, not polish. The plan's new `html,body{overscroll-behavior-y:none}` only hides the bounce, which is the symptom.
+  - Correction: Move the minHeight removal to PR 2. Add guard C2b: inject `#root{padding-bottom:34px}` in one state, because Chromium's env() is 0, then assert `scrollingElement.scrollHeight <= innerHeight + 1`.
+- [needs_change] Settings 'Done re-pushes history, so Back reopens Settings' is high severity; on-phone check after PR 3: '≡ → Settings, then Done, then the back gesture'.
+  - Evidence: App.tsx:430-444 is confirmed: closeSettings calls pushState(null). But manifest.webmanifest has `display: standalone`, and index.html:15 sets apple-mobile-web-app-capable. iOS home-screen web apps have no Back button and no edge-swipe back, so the owner cannot reproduce this in the app the plan says is primary. It only shows in Safari tab mode.
+  - Correction: Keep the fix; lower the severity to medium. Reword the §13 PR 3 phone check to 'in Safari (not the home-screen icon): ≡ → Settings → Done → swipe back', and drop 'the browser's Back' from the home-screen F1 step 5.
+- [confirmed] The closed Drawer is still focusable (Drawer.tsx:262-295); the grabber sits under the status bar (Drawer.tsx:303-306).
+  - Evidence: The aside is only `translate-x-full` when closed (:290-293), with no inert or visibility. A repo grep for inert/visualViewport/overscroll finds nothing. The grabber is `absolute top-3` inside an aside whose safe area is padding (:288), and absolute positioning ignores padding.
+  - Correction: None.
+- [confirmed] Settings sheet ignores the keyboard (Settings.tsx:204); fix with useVisualViewport top/bottom while keyboardOpen.
+  - Evidence: Settings.tsx:204 `absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)]` inside `fixed inset-0` (:189). No visualViewport code anywhere in src.
+  - Correction: None. Make sure the document itself is not scrollable first (the minHeight item). Otherwise iOS scrolls the document on focus and offsetTop includes that scroll.
+- [needs_change] Overscroll: overscroll-contain on Settings.tsx:263, Drawer.tsx:334, Column.tsx:489, App.tsx:2720.
+  - Evidence: These scrollers are missing: SearchResults.tsx:78 (the phone search list), App.tsx:2437 (search main), App.tsx:2490 (skeleton), ShortcutsSheet.tsx:79. The phone scroller is at App.tsx:2721, not :2720.
+  - Correction: Apply overscroll-contain to every overflow-y-auto element, or enforce it in the guard: C4 can assert computed `overscroll-behavior-y` is contain on every visible vertical scroller.
+- [needs_change] BriefCard first-run header (BriefCard.tsx:562): flex-wrap like :673; Generate becomes w-full sm:w-auto.
+  - Evidence: Row :562 holds the chevron (44px, shrink-0), a `flex-1 min-w-0` text block (:570), TonePicker (shrink-0, three 17px pills, :297) and Generate. In a wrapping flex row, a flex-1 min-w-0 item has a hypothetical width of 0, so it stays on line 1 and is crushed. A Chromium reproduction at 288px measured the text block at 12.7px wide. Row :673 avoids this with `basis-full sm:basis-auto` on its trailing group (the :713 div).
+  - Correction: Wrap TonePicker and Generate in one `<div className="flex items-center gap-2 basis-full sm:basis-auto">` (Generate `ml-auto`). Or give the text block `basis-[calc(100%-56px)] sm:basis-0`. Add a smoke state for the empty Brief tab at 320.
+- [confirmed] Toast (Toast.tsx:117, 122, 93): line-clamp-3, 3 s/5 s, z-[60], keyboard offset.
+  - Evidence: Toast.tsx:122 `truncate`. :93 `current.action ? 5000 : 1500`. :117 z-50. The file has 143 lines, so the earlier §10 citation of :256-261 is wrong, as the plan says. ToastHost (App.tsx:2894) already renders after Settings (:2834), so z-[60] only removes the dependence on DOM order.
+  - Correction: None.
+- [needs_change] Drawer Sources rows get a 44px › edit button beside the existing label (PR 3).
+  - Evidence: analysis.txt 320 03-drawer: names already ellipsize at 98-115px ('Slickdeals Fr…', 'Krebs on S…'; 320-03-drawer-tall.png). The drawer is w-[88vw] = 281.6px (Drawer.tsx:287). The available width is 281.6 - mx-4 (32) - pl-4 (16) - checkbox 16 - icon 18 - 3 gaps (36) - category (about 50) - 44 (new ›) ≈ 67px. That truncates almost every feed name.
+  - Correction: In the same change, drop the trailing category text (Drawer.tsx:476-478) on phones (`hidden md:inline`), or group Sources under category sub-headers. That gives names about 117px. Add C14 (ellipsis floor >= 96px) so the regression fails CI.
+- [needs_change] New Menu row: Settings, subtitle 'Feeds, AI, notifications, saved and hidden'.
+  - Evidence: The GroupedRow subtitle is `truncate` text-ios-caption. analysis.txt 320 already ellipsizes the 32-character 'keep this layout to come back to' at 190px. The new 41-character subtitle is about 255px at 13px, which truncates at 320 (about 190px available) and is borderline at 390 (drawer 343px, about 255px available).
+  - Correction: Shorten it to 'Feeds, AI, alerts, saved' (about 24 characters) or drop the subtitle.
+- [needs_change] F2: picking 'New category…' shows the field with the keyboard up (autoFocus; 'Focus is allowed because the user asked for the field').
+  - Evidence: The select's `change` fires when the native iOS picker wheel is dismissed. Focus set from that handler, or by autoFocus on mount in the resulting render, is not inside a DOM touch/click gesture. iOS Safari shows the keyboard only for focus() called synchronously inside a user-gesture handler. Likely result: the field is focused, or not, and the keyboard stays down. PLAUSIBLE; it cannot be verified in Chromium.
+  - Correction: Don't promise 'keyboard up'. Render the new-category input as a normal field the user taps (one extra tap), or replace the select's 'New category…' option with a separate 44px 'New category' button whose onClick does flushSync, then input.focus(). The same rule applies to 'Save this view' (Drawer) and preset rename: flushSync then focus() inside the click handler. Add it to the PR 4 phone checklist.
+- [confirmed] FeedManager TabButton, Settings pills, mobile tabs, Done, card icons: tap targets raised to 44px (PR 2/PR 5).
+  - Evidence: Settings.tsx:248 min-h-[36px]; Drawer.tsx:318 and Settings.tsx:215 min-h-[32px]; App.tsx:2677/:2703 py-1.5 text-ios-caption (about 30px); Column.tsx:393 w-8 h-8; BriefCard.tsx:312 min-h-[28px]; Column.tsx:349 py-0.5. Card icons at 40px: six icons at 44px need 264px, and at 320 the action row has about 280px including the -ml-3/-mr-2, so it fits.
+  - Correction: None.
+- [confirmed] Column popover closes on document mousedown, which iOS does not send for taps on empty space (Column.tsx:244).
+  - Evidence: Column.tsx:238-245 adds a 'mousedown' listener on document. iOS sends compatibility mouse events only to clickable targets.
+  - Correction: None (pointerdown).
+- [confirmed] False positive removed: 'the draft guard's beyond-parent rule' flags the intentional -ml-3/-mr-2 hit areas.
+  - Evidence: analysis.txt: `div.mt-2.-mb-1.flex` scrollWidth 332 > 324 with children `-ml-3` (x:12) and `-mr-2` (x:8) on every state. These stay inside the article's p-4 pl-5 padding.
+  - Correction: None.
+- [confirmed] False positive removed: 'The rAF focus fallback (App.tsx:2270) fails on iOS; autoFocus already opens the keyboard. No change.'
+  - Evidence: The search opens from a click handler. React 18 flushes discrete-event updates in a microtask inside the same event dispatch, so autoFocus runs inside the gesture. The rAF fallback is redundant but harmless.
+  - Correction: None. It does not generalise to focus after a select change (see F2).
+- [refuted] CI: 'The preview server started in the first step survives into the second step only if both steps run in one shell.'
+  - Evidence: On GitHub-hosted runners, background processes started with `&` keep running across later steps of the same job; the runner kills them at job end ('Cleaning up orphan processes').
+  - Correction: Either layout works. Keep the single step with `|| echo` for simplicity, but remove the incorrect rationale.
+- [confirmed] ESLint bans (text-[<11px], min-h-[<44px], h-screen/vh, datalist, mousedown, native dialogs) through no-restricted-syntax with regex attribute selectors.
+  - Evidence: esquery supports `[value=/re/]`. JSX string attributes are Literal nodes and template classNames are TemplateElement (value.raw). `\d+vh\]` does not match `100dvh`, and the inline style at App.tsx:2188 is not a class, so it is not caught.
+  - Correction: Add `Property[key.name=/^(min|max)?[hH]eight$/][value.value=/\d+(d|s|l)?vh$/]` if inline vh/dvh heights should also be banned.
+- [needs_change] PR 6 landscape: theme.screens.md raw '(min-width: 768px) and (min-height: 560px), (min-width: 1024px)'; BriefCard.tsx:372 uses the same PHONE_QUERY.
+  - Evidence: BriefCard.tsx:372 and :385 use `(max-width: 639px)` (the sm breakpoint), not 767. Switching to PHONE_QUERY changes the default collapse for 640-767px widths too. Tailwind 3.4 ordering with a raw md entry between plain sm/lg screens also needs checking.
+  - Correction: State the 639 → PHONE_QUERY change as intended. After the config change, grep the built CSS to confirm the `md` media blocks come after `sm` and before `lg` (override order).
+
+Additions:
+- Sticky hover on iOS (missed). frontend/tailwind.config.js:7-123 has no `future: { hoverOnlyWhenSupported: true }`. On a touch device, hover styles persist after a tap: the card's `hover:-translate-y-px hover:shadow-glow-md` (Card.tsx:891), the thumbnail's `group-hover:scale-105` (Card.tsx:1745), the title's `hover:text-white` (Card.tsx:919), plus `hover:bg-accent-soft/80` and others (about 14 hover utilities). Fix: add `future: { hoverOnlyWhenSupported: true }`. This needs tailwind.config.js in PR 2, which widens §2's 'PR 6 only' rule for that file.
+- New guard rule C11, wrap inside a control. For every visible text node inside button, a, [role=tab], time, and any element with white-space:nowrap expected (mark these with data-one-line), count distinct line boxes via Range.getClientRects() tops. More than 1 fails. This catches defects #4 ('12m / ago'), #5 (mid-phrase action wraps), #9 (Settings header) and #10 (two-line pills), none of which C1-C10 detect.
+- New guard rule C12, gutter. Inside the phone main, the Settings sheet and the Drawer, every visible text node's rect and every input/select/button rect must have left >= 8 and right <= innerWidth - 8, unless an ancestor has data-bleed (full-width hairlines and backgrounds) or data-hscroll. This catches defect #1 (Settings.tsx:265), which passes C3's left >= -1.
+- New guard rule C13, measure. A headline anchor (article a[aria-label='open in new tab']) narrower than 55% of its article's content box, or any text block taller than 8 lines while narrower than 160px, fails. This catches defect #3 (the ribbon) and is the guard the plan's own PR 2 acceptance ('headline uses at least 60% of the card width') needs.
+- New guard rule C14, ellipsis floor. An element with text-overflow: ellipsis whose clientWidth is under min(96px, scrollWidth) fails. This catches defect #7 (feed names, FeedManager.tsx:697), the h1 (App.tsx:2221) and the PR 3 Drawer › regression (Drawer.tsx:473).
+- New guard rule C15. No visible `input[type=search]`, because the native cancel button is invisible to DOM checks (defect #13, App.tsx:2233).
+- C5 fix. Compare only the horizontal extent against scroll containers. Exempt sr-only clippers (FeedManager.tsx:1555 `<legend className="sr-only">`) by skipping clippers whose rect width or height is <= 1px or whose computed clip is rect(0px, 0px, 0px, 0px).
+- SearchResults header (missed). SearchResults.tsx:66-76: an h2 'Search results' and a span `${n} for "${query}"` both shrink, so at 320 both wrap to two lines and a long query wraps many lines (320-09-search.png). Fix: h2 `shrink-0 whitespace-nowrap`; span `min-w-0 truncate`, or drop the query echo because the field shows it. Add a smoke state with a 60-character query.
+- Filter chip bar (missed). App.tsx:2384 renders raw `{src} ✕` (for example 'the_verge ✕') while every other surface uses sourceLabel. The chips are `py-0.5` (about 22px) and the strip at :2369 needs data-hscroll. Fix: `{sourceLabel(src)}`, and 44px buttons with an inner pill (PR 2 for the label, PR 5 for the size).
+- Phone renders the desktop grid hidden (missed, iPhone performance). App.tsx:2594 `<main className="hidden md:grid ...">` maps every Column with all its Cards even on a phone, in addition to the phone's own column (App.tsx:2655). That doubles React work and listeners on the iPhone. Fix: render the desktop main only when `matchMedia(PHONE_QUERY)` does not match (a useMediaQuery hook in lib/visualViewport.ts), in PR 6 where PHONE_QUERY is introduced.
+- Move the swipe transition fix (Card.tsx:513, `'' → 'none'`) and the App.tsx:2188 minHeight removal from PR 5 to PR 2. Both are one-line root causes of the 'wonky' feel and are independent of the later PRs.
+- PR 2 acceptance: 'The h1 is not truncated at 320 on the dashboard' belongs to PR 3, because the gear (App.tsx:2296-2331) is only removed there. In PR 2, record the h1 as a known failure, or temporarily hide the refresh icon below 360px.
+- Container-query thumbnail. Card.tsx:946-947's unclassed `<div className="shrink-0">` wrapper must also get the narrow-width override (w-full / self-stretch). Otherwise the column-mode image collapses (measured: 20px).
+- Settings Feeds gutter. When adding px-4 at Settings.tsx:265, remove px-3 at FeedManager.tsx:684 (or -mx-3 the list) so rows don't sit at 28px while the pills sit at 16px.
+- Guard states to add: the empty Brief tab at 320 (BriefCard.tsx:562), a 60-character search query (SearchResults header), the Drawer at 320 after PR 3 (› plus names), and a 312px-wide run (Page Zoom 125%, R8), at least for the dashboard and Menu.
+- On-phone checklist (§13): run the history/back check in Safari, not the home-screen app (manifest display: standalone has no back gesture). After PR 4, also check: 'New category…' brings the keyboard up (or does not), and Add header focuses with the keyboard up.
+
+### Ease-of-use checklist (§11 and the [ease-of-use] audit items). I checked each item against frontend/src at origin/main 721713e; frontend/src is identical on claude/redesign-plan. For each one I asked three things: is it real for a normal phone user, is the fix proportionate, and does it fit the feed-editor plan.
+
+- [confirmed] FeedManager.tsx:657: edits save only through a tiny 'save' link; nothing autosaves; errors go behind the sheet
+  - Evidence: FeedManager.tsx:657-662 is a text-ios-caption 'save' button with no height, disabled while the headers JSON fails to parse. Errors go to onError, which is App's setError (App.tsx:2839). The banner is sticky z-15 in the page (App.tsx:2398-2411), under the z-50 sheet.
+  - Correction: None. FeedEditor with field autosave (PR 4) is proportionate.
+- [confirmed] FeedManager.tsx:635: custom headers are typed as JSON
+  - Evidence: FeedManager.tsx:446-498: the editHeaders string goes through JSON.parse, with the errors 'invalid JSON' and 'must be a flat {"Header": "value"} map'.
+  - Correction: None.
+- [confirmed] App.tsx:2305: gear plus Menu plus 'All settings…' duplicate the same overlay
+  - Evidence: App.tsx:2308-2309 is the gear (aria-label 'open settings', data-settings-gear). Drawer.tsx:387 is the 'All settings…' row. App.tsx:2811 wires Drawer's onOpenSettings to the same openSettings.
+  - Correction: None.
+- [confirmed] App.tsx:2839: Settings and FeedManager errors go to App's banner, hidden under the z-50 sheet
+  - Evidence: App.tsx:2839 passes onError={setError}. The banner at App.tsx:2398-2411 uses z-15, which Tailwind does not generate, so it is in normal flow under the fixed z-50 Settings overlay.
+  - Correction: None. reportError to a toast plus inline errors is right.
+- [confirmed] App.tsx:1112: the 'refreshed' toast fires on every 60 s poll and every return to the app
+  - Evidence: refresh() always calls toast(newCount>0 ? 'N new since last refresh' : 'refreshed') at App.tsx:1112. The interval (App.tsx:1247-1249), visibility return (:1263), initial load (:1271) and the filter debounce (:1342-1344) all call refresh(). The error toast at :1115 also fires every 60 s while offline.
+  - Correction: Keep refresh({silent}). Also say explicitly that a silent poll must not toast errors either; the plan says this in §6, but the checklist line only mentions 'refreshed'.
+- [needs_change] FeedManager.tsx:465: the re-seed effect keyed on the custom_headers object overwrites in-progress edits on polls
+  - Evidence: The effect (FeedManager.tsx:463-475) re-seeds only while isEditing and depends on source.custom_headers. reconcileById (App.tsx:106-113) keeps the old object when the row is deepEqual. So it does not fire on every poll, only on a poll after the row changed. That happens whenever the feed was fetched (last_fetch_at or error_count change), which is every refresh interval.
+  - Correction: Reword it as 'on any poll after the feed was fetched'. The fix (delete it) stands.
+- [confirmed] FeedManager.tsx:108: KNOWN_BUILT_INS lacks rfd_hot_deals, so its name and address look editable and the backend returns 400
+  - Evidence: FeedManager.tsx:108-115 lists 6 names. backend/app/sources/rfd.py:177 registers name='rfd_hot_deals'. routes/sources.py:765 rejects a rename or re-URL of any registered name.
+  - Correction: None. The no_db guard test against registered_plugin_names() is proportionate.
+- [refuted] Built-ins can still be paused, recategorised, re-intervaled and deleted (§6 Built-in detection); the editor shows 'Check for new items' with the stored value first for HN's 5 minutes
+  - Evidence: Changing the interval of a built-in does nothing. scheduler.py:1800-1810 schedules built-in jobs with IntervalTrigger(seconds=plugin_cls.refresh_interval_seconds). scheduler.py:500 and :565 restore or back off from plugin_cls.refresh_interval_seconds. update_source returns early for registered names (scheduler.py:2439-2441) after writing only the DB column. The UI would show 'Saved ✓' for a change that never takes effect. This affects HN (300), GitHub (1800), Wikipedia (43200), RFD (900), NVD, CISA and BBC.
+  - Correction: For built-ins, make 'Check for new items' read-only: 'Checks every 5 min (built-in feed)'. Pause, category and delete stay editable. Add a flow assertion in FK: no interval select on the built-in fixture. Today's FeedManager has the same dead control (the 'every X' link), so this is not new scope.
+- [confirmed] FeedManager.tsx:379: the delete confirm cancels itself after 4 s
+  - Evidence: FeedManager.tsx:379 sets CONFIRM_TIMEOUT_MS = 4000. The effect at :431-435 calls setConfirmingDelete(false).
+  - Correction: None.
+- [confirmed] FeedManager.tsx:740: a feed's last_error, the auto-disable reason and staleness exist only in title tooltips
+  - Evidence: last_error appears only inside title= attributes (FeedManager.tsx:725-727, 748-750). Staleness is a title on the name (:703-707) and on 'fetched' (:816-819). Nothing in the expanded row renders last_error.
+  - Correction: None.
+- [confirmed] FeedManager.tsx:1372: the Add form requires an invented slug; nameError and urlError are never rendered, so Add stays grey with no reason
+  - Evidence: nameError and urlError are set at :1399-1420 and are read only in the disabled= props at :1792 and :1799. No JSX renders them. validateForm requires a name matching ^[a-z0-9_]{1,120}$ (:1371-1374).
+  - Correction: None.
+- [confirmed] FeedManager.tsx:1446: Add sends the original URL instead of Test's resolvedUrl
+  - Evidence: submit sends url: trimmedUrl (:1446-1450). testResult.resolvedUrl is set at :1504 and :1510 and is only displayed (:1768-1770).
+  - Correction: None.
+- [confirmed] FeedManager.tsx:174: the forbidden hint points at 'Advanced → Custom headers', which does not exist in the Add form
+  - Evidence: The hint is at FeedManager.tsx:171, not 174. AddCustomTab (:1320-1800) has no headers input. custom_headers appears only in the edit form and the recommendation add (:1050).
+  - Correction: Change the line reference to :171. The fix stands.
+- [confirmed] FeedManager.tsx:1110: the Suggested list shows raw slugs and categories; buttons are 28px
+  - Evidence: :1110 renders {r.name} and :1111 renders {r.category} raw. min-h-[28px] is on the Add button (:1123) and the find-more button (:1072).
+  - Correction: Also fix the 'found for you' chip at FeedManager.tsx:1114 (text-[10px]). It is not in the R6 list, and once PR 5 puts all of src/** under the lint ban it will fail.
+- [needs_change] FeedManager.tsx:825: the interval select shows the wrong value when the stored interval is not a preset (HN 5 min)
+  - Evidence: REFRESH_PRESETS (FeedManager.tsx:57-62) is 900/3600/21600/86400. The select (:825-836) has no option for 300, 1800 or 43200. The only rows that store those values are built-ins, whose interval the scheduler ignores (see the built-in verdict).
+  - Correction: The 'current value first' option is needed only for dynamic rows whose stored value is not a preset. Built-ins get read-only text instead of a select.
+- [confirmed] App.tsx:1358: the phone tab is remembered by index; Saved/For You insertion or a category change moves the user to another column
+  - Evidence: App.tsx:1358-1367 persists the index only. Saved is pushed first only when visibleStarred.length>0, then For You (App.tsx:833-841). Starring the first card therefore shifts every tab index by one.
+  - Correction: None. The name-based state with a one-time migration is proportionate.
+- [confirmed] App.tsx:1994: rename remaps the active filter but not saved views' activeSources
+  - Evidence: onSourceRenamed (App.tsx:1994-2003) touches only activeSources. filterPresets[].activeSources is a string[] of names (preferences.tsx:125).
+  - Correction: None.
+- [confirmed] api.ts:446: deleteSource throws a plain Error with no detail; api.ts:284 raw '<status> for <url>' text is shown
+  - Evidence: api.ts:446-452 throws new Error(`${status} ${statusText} for /api/sources/${id}`). jsonFetch builds the same message at :284.
+  - Correction: None.
+- [needs_change] Settings.tsx:928: the AI tab needs Edit, then a lowercase 'save'; make it autosave (provider and model selects save on change, keys on blur)
+  - Evidence: The problem is real: Edit/Cancel at Settings.tsx:763-768 and 'save' at :928-934. The fix as written is not safe. changeProvider (Settings.tsx:625-638) clears modelBrief and modelScoring and reloads the model list. save() (:669-694) sends provider, both models and any typed keys in one updateLLMSettings call. Autosaving the provider on its own would leave a model name from the old provider (a 404 on the new one). Picking Anthropic, OpenAI or Groq before a key exists would also make every brief and scoring call fail until the key field is blurred. The keys copy at :886-890 says 'saved when you tap save below' and mentions .env.
+  - Correction: Spell out the AI save rules: (1) a provider change sends {provider, model_brief:'', model_scoring:''} in one request; (2) a provider that needs a key with none set shows the key field first, and the provider is saved only once a key is saved (or Ollama is picked); (3) rewrite the key hint at Settings.tsx:886-890 ('Paste a key; it saves when you leave the field.'). SaveStatus can be reused, but not the per-source store.
+- [needs_change] App.tsx:457: brief tone is plain useState and resets on reload; persist it in localStorage popping.v1.brief.tone
+  - Evidence: App.tsx:457: useState<'terse'|'narrative'|'alert'>('terse'). The UI labels are 'Brief tone' with Short/Story/Alerts (Settings.tsx:289-298, BriefCard.tsx:46-50). The plan calls it 'Brief length' (§5 F12, §11). storage.ts:46-58 says only two device keys remain.
+  - Correction: Call it 'Brief tone' in the plan. Validate the stored value against the three tones on read (an unknown value falls back to 'terse'), and update the storage.ts header comment. Proportionate otherwise.
+- [needs_change] App.tsx:2826 and :306: window.prompt for Save this view and preset rename; window.confirm for reset at Settings.tsx:413
+  - Evidence: All three are confirmed (App.tsx:306, :2826; Settings.tsx:413). Today's handler keeps the fallback toast(`Saved view “${name.trim() || 'Untitled preset'}”`) (App.tsx:2830-2831). The plan's new onSavePreset is (name) => { savePreset(name); toast(`Saved view “${name}”`) }, which would show 'Saved view “”' for an empty name.
+  - Correction: Keep the trim and the 'Untitled preset' fallback in the toast, or disable the inline Save while the field is empty. The rename field should prefill preset.name and do nothing on an unchanged or empty value, as :307-310 does today.
+- [confirmed] App.tsx:2860: Saved 'Clear all' and 'Hide all downvoted' act at once with no Undo
+  - Evidence: onUnstarAll (App.tsx:2860-2864) runs setStarredEntries([]) with an info toast and no action. onHideAllDownvoted (:2876-2887) has no action either.
+  - Correction: None. An Undo toast restoring the captured previous array is proportionate. Capture the array before the setter, not from the ref after it.
+- [confirmed] Column.tsx:314: the whole column header is a hidden mark-all-read button with only a tooltip
+  - Evidence: Column.tsx:314-320 is a <header role=button tabIndex=0 onClick={onHeaderClick}> with title='tap to mark this column read'.
+  - Correction: When the header is made static on touch, also drop role=button and tabIndex there, so VoiceOver does not announce a dead button.
+- [confirmed] Column.tsx:341: the '+N new' chip refreshes and the count never changes
+  - Evidence: Column.tsx:340-357 calls onRefresh(). newCountByColumn (App.tsx:962-979) is computed from lastViewed and globalReadIds, which refresh() does not change.
+  - Correction: None.
+- [confirmed] App.tsx:1615: the hide toast says 'Entry moved to history.' while the card is filtered out of every column
+  - Evidence: App.tsx:1615 shows the toast. visibleEntries filters hiddenSet out of everything (App.tsx:749), so the card is in no column's History section. Undo already exists (App.tsx:1615-1630).
+  - Correction: Only the wording changes ('Hidden.'). The Undo is already there; say so, so the implementer does not rebuild it.
+- [needs_change] Column.tsx:425/432-456: 'Top (composite score)' wording, and the 0-100 Min score slider becomes 'Show: All / Top half / Top stories' (0/40/70)
+  - Evidence: The wording is confirmed (Column.tsx:425). The slider (:432-456) stores any multiple of 5. App.tsx:908-909 filters composite_score >= minScore. A user who saved 25 or 55 would see a select with no matching option. The owner did not complain about the slider, which is already a native touch control (and exempt from C6/C7). Replacing it widens scope.
+  - Correction: Keep the slider. Relabel it ('Hide weaker stories: <n>' or 'Minimum score') and rename the sort option to 'Best first'. If a select is still wanted, include the stored non-preset value as its first option, the same rule as the interval select.
+- [confirmed] Settings.tsx:1526/1598/1683: empty states tell phone users to right-click or press keys
+  - Evidence: The emptyHint strings at Settings.tsx:1526, :1598 and :1683 say 'Right-click a card → …' and 'press h/b'.
+  - Correction: None.
+- [needs_change] Settings.tsx:1165 (and :1110): the History row renders the literal text '◯ with strike'
+  - Evidence: Settings.tsx:1165 is inside a JS expression, so it renders '◯ with strike'. Settings.tsx:1110-1112 is JSX text, where JS escapes are not processed: the user sees the characters '✓', '◯ with strike' and '—'. I checked with esbuild, which compiles JSX text 'read (✓)' to the string "read (\\u2713)". Settings.tsx:1092 'loading history…' has the same bug.
+  - Correction: Replace the escapes in JSX text at Settings.tsx:1092 and 1110-1112 with real characters ({'…'} or the literal glyph), and use the eye-off icon at :1165. Add a lint selector JSXText[value=/\\u[0-9a-fA-F]{4}/] to the mobile bans.
+- [confirmed] Settings.tsx:1436: Hidden and Saved titles are truncated to one line
+  - Evidence: Settings.tsx:1436 has className '… truncate' on the entry link in EntryIdListContent.
+  - Correction: None.
+- [needs_change] Settings.tsx:361: the Notifications tab tells the user to edit .env and restart the backend
+  - Evidence: Settings.tsx:364 and :370 are confirmed. The proposed copy, 'Whoever runs your Popping server can turn them on.', addresses a third party, but the owner is the server operator. config.py and .env.example are off-limits, so the app cannot turn notifications on.
+  - Correction: Use copy that names where it is done without jargon, for example 'Push notifications are off. They are turned on in the server's settings file; see Notifications in the README.' Point it at an existing README section (README.md is in the allow-list).
+- [confirmed] UserBadge.tsx:37: shows '(local bypass)'; the desktop health line shows a raw status (App.tsx:2344)
+  - Evidence: UserBadge.tsx:36-38 shows the suffix. App.tsx:2344 renders health.status raw. Both sit in the 'hidden sm:flex' desktop sub-row (App.tsx:2341), so no phone user sees them.
+  - Correction: Fine as a cheap copy fix, but mark it desktop-only and low priority.
+- [confirmed] Card.tsx:1392: the star tooltip names shortcut (s); it is b
+  - Evidence: Card.tsx:1392 has title='save for later (s)'. App.tsx:1826 binds s to toggleSummary and :1833 binds b to the star.
+  - Correction: None (desktop tooltip, trivial).
+- [confirmed] preferences.tsx:527: preference write failures are swallowed; the header comment claims they revert
+  - Evidence: preferences.tsx:524-529 is a fire-and-forget .catch that only logs in dev. The comment at :28-30 says 'A failed write reverts.'
+  - Correction: None. One toast per burst is proportionate.
+- [needs_change] Card.tsx:961: no touch path from a card to its feed's settings; the source name becomes a button opening the editor
+  - Evidence: Card.tsx:961 is a plain <span> inside a flex meta row. The planned -my-3 py-3 grows its hit area 12px into the title and thumbnail row above, where taps belong to the card.
+  - Correction: Keep the feature. Limit the hit area to the meta row's own height (min-h-[44px] on the meta row instead of a negative-margin overlap), and add a smoke assertion that elementFromPoint at the headline's bottom edge is not the source button.
+- [confirmed] Drawer.tsx:477: the Menu shows raw categories and raw names in the footnote (:415)
+  - Evidence: Drawer.tsx:477 renders {s.category}. The footnote at :415 joins raw activeSources names.
+  - Correction: None. Also use sourceLabel in the checkbox aria-label 'filter by ${s.name}' (Drawer.tsx:466).
+- [confirmed] Raw developer wording: 'Feed Manager' and 'scheduler' (Column.tsx:824, 836; App.tsx:2495), 'generic_scrape' (FeedManager.tsx:1281)
+  - Evidence: Column.tsx:824 says '…the scheduler will fetch…' and :836 says 're-enable from Feed Manager'. FeedManager.tsx:1281 has a title tooltip mentioning generic_scrape.
+  - Correction: None. Keep the 'Track page' / 'no RSS' radio literals (slice15).
+
+Additions:
+- Built-in feeds' check interval cannot be changed: scheduler.py:1800-1810, :500 and :565 always use plugin_cls.refresh_interval_seconds, and update_source returns early for registered names (scheduler.py:2439-2441). In FeedEditor, show the interval as read-only text for isBuiltIn rows and add a check to flow FK. Today's 'every X' link (FeedManager.tsx:825-836) has the same dead control.
+- JSX text renders escape codes literally. Settings.tsx:1092 shows 'loading history…' and Settings.tsx:1110-1112 show '✓', '◯ with strike' and '—' as raw characters (verified with esbuild). Fix them in PR 5 and add a no-restricted-syntax selector JSXText[value=/\\u[0-9a-fA-F]{4}/] to the mobile lint bans.
+- Hard-coded targets under 44px that the plan does not list will break the PR 5 src/** min-h lint ban. Its allowed disables cover only SourceIcon.tsx:68 and the Card context menu. The unlisted ones: BriefCard.tsx:543, :651 and :724 (Generate/Regenerate at 36px); Column.tsx:693 (section header at 28px); FeedManager.tsx:1280 ('Track this URL anyway' at 32px, in the Add tab, so PR 4); App.tsx:2351 and :2358 (desktop sub-row at 32px; raise them or give them a reasoned disable). Add them to the PR 5 list (FeedManager:1280 to PR 4).
+- FeedManager.tsx:1114 'found for you' chip is text-[10px] and missing from the R6 list. Raise it to text-[11px] in PR 4 (Suggested tab), or it fails the PR 5 lint ban.
+- Toasts and messages in the feed flow still show raw slugs and jargon, and §11 plain words does not list them: FeedManager.tsx:1462 'Feed Added: <slug>', :1193 'Tracking: <slug> — scraping for new articles', :1215-1218 'Feed added: <slug> — no native feed found, tracking via periodic scraping instead', :871 '<slug>: <raw error>', :874 'Fetched N from <r.source>', and friendlyTestError 'Is this a valid RSS/Atom URL?' (FeedManager.tsx:166). Use sourceLabel and plain wording ('Added The Verge', 'No feed found, so Popping will check the page for new articles').
+- After Auto-add or 'Track this URL anyway', the new feed lands in a fixed category: api.ts:409 defaults to 'other', the plan proposes 'news'/'video', and FeedManager.tsx:1190 hard-codes 'news'. Nothing lets the user change it without going to the editor. Give the success toast an 'Edit' action that runs openSettings('feeds', source.id). Resolve the default category through resolveNewCategory against existing categories, so 'news' reuses an existing 'News' instead of creating a second column labelled 'News' (columns group by the raw string, App.tsx:841; categoryLabel makes both look the same).
+- The AI tab autosave needs its own coupling rules, not the per-source store. A provider change must send provider plus cleared models in one updateLLMSettings call (Settings.tsx:625-638, 669-685). A provider that needs a key is saved only after its key is saved. The key hint at Settings.tsx:886-890 ('saved when you tap save below', '.env') must be rewritten. Add a smoke flow: switching provider sends exactly one request containing provider, model_brief and model_scoring.
+- Settings.tsx:285 shows llmError raw ((e as Error).message, i.e. '<status> for /api/...'). Add it to the errorMessage call-site list in §11, next to :336/923/926/1099/1416.
+- Brief tone persistence: validate the stored value on read and update the storage.ts:46-58 header comment ('two remaining entries'). Call it 'Brief tone' in §5 F12 and §11, matching the UI label (Settings.tsx:289).
 
 ## Synthesized plan
 
