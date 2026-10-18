@@ -76,7 +76,7 @@ export function ShortcutsSheet({ open, onClose }: Props) {
         // treatment for visual consistency. ``onClick`` is a no-op
         // so a click inside the card doesn't bubble to the backdrop
         // and close the sheet.
-        className="w-full max-w-md max-h-[80vh] overflow-y-auto bg-bg-elevated rounded-ios-lg p-4 space-y-4"
+        className="w-full max-w-md max-h-[80dvh] overflow-y-auto bg-bg-elevated rounded-ios-lg p-4 space-y-4"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
         aria-modal="true"

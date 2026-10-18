@@ -195,10 +195,13 @@ export function Settings({
     >
       <div
         // Right-side panel on desktop, full-viewport sheet on mobile.
+        // The mobile sheet is pinned by its top edge, not a vh height:
+        // iOS Safari's vh counts the space behind its toolbar, so a
+        // 92vh sheet ran off the top of the visible screen.
         // The desktop panel is wider than the Drawer (480px) because
         // the LLM tab needs room for the provider/model pickers and
         // the Feeds tab's add-custom form has a wide textarea.
-        className="absolute inset-x-0 bottom-0 top-auto h-[92vh] rounded-t-ios-lg bg-bg-app shadow-2xl flex flex-col
+        className="absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)] rounded-t-ios-lg bg-bg-app shadow-2xl flex flex-col
                    md:inset-y-0 md:right-0 md:left-auto md:top-0 md:bottom-auto md:h-full md:w-[480px] md:rounded-none"
       >
         {/* Header — same shape as Drawer but with the tab strip
