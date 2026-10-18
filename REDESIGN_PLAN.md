@@ -1526,3 +1526,12 @@ If there is quota for only one PR, start with PR1 and PR2: PR1 fixes YouTube on 
 - 11:40 UTC: merge pass done. The editor applied all 314 findings (191 directly, 123 folded into related changes, none rejected); two reviewers found 10 misses and 7 new errors; the fixer resolved all 17. Sections 2 to 14 above are that result. The plan grew from six PRs to ten so each stays reviewable; YouTube moved to PR1 (server) and PR4 (app) because it is the most urgent problem. Six items the owner did not ask for moved to open decisions in section 12.
 - Section 1 now recommends Opus 5.5 at xhigh, with Fable 5.1 for PR6, because the plan is detailed enough to execute and the org hit its monthly spend limit during planning.
 
+- 2026-10-18, implementation. The owner said to keep going without asking for each merge ("You don't need to ask me. It's already scoped"), so each PR merges once its four checks are green, the section 2 checks pass and a security review finds nothing.
+  - PR1 (#14) merged as d2358e8; PR2 (#15) as 0c7575d; PR3 (#16) as 3f3ea20; PR4 (#17) as 2d5e3aa. PR5 is #18.
+  - Local smoke runs: CI's runner renders text in DejaVu Sans, wider than this container's Inter. `FONTCONFIG_FILE=frontend/scripts/iphone-audit/fonts-ci.conf` before `smoke.cjs` measures with CI's font (PR2 needed `max-[359px]:text-[15px]` on the feed tabs because of it).
+  - Local backend tests after a container restart: /etc/hosts loses the section 13 step 4 entries and Postgres stops; re-add the entries and run `su postgres -c "/usr/lib/postgresql/16/bin/pg_ctl -D /var/lib/postgresql/popping-test -l /tmp/pg.log start"`.
+  - Deviation, PR4: App's `refresh({ silent })` (planned for PR6) was brought forward for Settings' `onRefreshSources` only. Without it the "Added …" toast was replaced by "refreshed" a moment later (flow FS caught it).
+  - Deviation, PR4: CategoryPicker reports a pending new-category draft from its event handlers, not an effect, so "Add feed" is disabled in the same render as the keystroke (flow FQ caught the gap).
+  - Deviation, PR5: Settings re-entry keeps `history.state` as it is (the plan had `state ?? { popping: 'settings' }`). After a deep link to `?view=settings` the plan's rule would mark the link's entry as ours, and Done would then step back out of the app.
+  - PR5: until PR6 deletes the old edit form, the Menu's › opens the row in that form, so flow FT treats the form's inputs as "open".
+  - Next: PR6 (the autosave editor) on Fable 5.1 at xhigh, per section 1. The owner asked to be told when PR6 is next.
