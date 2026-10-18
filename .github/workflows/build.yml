@@ -142,7 +142,7 @@ jobs:
       # fails on text or boxes running past their container
       # (frontend/scripts/iphone-audit/README.md).
       - name: iPhone layout smoke test
-        run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp
+        run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp --strict
       - name: iPhone layout smoke test (Safari engine, report only)
         continue-on-error: true
         run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit

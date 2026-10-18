@@ -1030,4 +1030,38 @@ module.exports = [
       if (dialogs) fail('FZ', `a browser dialog opened ${dialogs} time(s)`)
     },
   }),
+  // --- PR9: no browser prompts ---------------------------------------------
+
+  // Save current view names the view in the Menu itself; renaming a
+  // chip is the same inline field.
+  dashFlow('flow-fpr-save-view-inline', {
+    run: async ({ page, fail }) => {
+      let dialogs = 0
+      page.on('dialog', () => dialogs++)
+      await openMenu(page)
+      await page.locator(MENU).getByRole('button', { name: /^Save current view/ }).click()
+      const name = page.locator(`${MENU} input[aria-label="name for this view"]`)
+      await name.waitFor({ state: 'visible' })
+      const focused = await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))
+      if (focused !== 'name for this view') fail('FPR', `focus is on ${JSON.stringify(focused)} after the tap, expected the name field`)
+      if (!(await page.locator(MENU).getByRole('button', { name: 'Save', exact: true }).isDisabled())) fail('FPR', 'Save is enabled with an empty name')
+      await name.fill('Hockey')
+      await name.press('Enter')
+      const chip = page.locator('[role="toolbar"][aria-label="saved filter presets"]').getByRole('button', { name: 'Hockey', exact: true })
+      if (!(await waitFor(() => chip.isVisible(), 3000))) return fail('FPR', 'no "Hockey" chip after saving')
+      if (!(await page.getByText('Saved view “Hockey”').isVisible())) fail('FPR', 'no "Saved view “Hockey”" toast')
+
+      // Rename: the field starts with the name; leaving it unchanged does nothing.
+      await page.getByRole('button', { name: 'options for preset Hockey', exact: true }).click()
+      await page.getByRole('button', { name: 'rename preset Hockey', exact: true }).click()
+      const rename = page.locator('input[aria-label="new name for Hockey"]')
+      await rename.waitFor({ state: 'visible' })
+      if ((await rename.inputValue()) !== 'Hockey') fail('FPR', `the rename field holds ${JSON.stringify(await rename.inputValue())}`)
+      await rename.press('Enter')
+      await sleep(200)
+      if (await page.getByText(/^Renamed to/).count()) fail('FPR', 'an unchanged name was saved as a rename')
+      if (!(await chip.isVisible())) fail('FPR', 'the chip is gone after an unchanged rename')
+      if (dialogs) fail('FPR', `a browser dialog opened ${dialogs} time(s)`)
+    },
+  }),
 ]

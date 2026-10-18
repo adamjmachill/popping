@@ -18,7 +18,8 @@
 // Rows are at least 44px tall, the iOS HIG minimum tap target. While
 // closed the panel is inert, so Tab never lands in it.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { Source } from '../api'
 import { SourceIcon } from './SourceIcon'
 import { categoryLabel, sourceLabel } from '../lib/labels'
@@ -58,7 +59,8 @@ type Props = {
   // native prompt and calls the callback with the
   // trimmed name. Caller is responsible for actually
   // writing the preset to localStorage.
-  onSavePreset?: () => void
+  // Save the current filter and column settings as a named view.
+  onSavePreset?: (name: string) => void
 }
 
 
@@ -81,6 +83,22 @@ export function Drawer({
   // Set by a row that hands over to Settings, which takes focus
   // itself; otherwise closing returns focus to the ≡ button.
   const handingOff = useRef(false)
+
+  // Save current view: an inline name field, no browser prompt.
+  const [namingView, setNamingView] = useState(false)
+  const [viewName, setViewName] = useState('')
+  const viewNameRef = useRef<HTMLInputElement>(null)
+  useEffect(() => {
+    if (open) return
+    setNamingView(false)
+    setViewName('')
+  }, [open])
+  const saveView = () => {
+    const name = viewName.trim()
+    if (!name || !onSavePreset) return
+    onSavePreset(name)
+    onClose()
+  }
 
   // Esc dismisses the drawer. Mirrors the iOS sheet pattern where
   // the swipe-down and back-tap gestural dismiss are also Esc on a
@@ -318,17 +336,50 @@ export function Drawer({
             />
             {/* Saves the current source filter and column settings as
                 a named view; its chip appears above the dashboard. */}
-            {onSavePreset && (
-              <GroupedRow
-                onClick={() => {
-                  onSavePreset()
-                  onClose()
-                }}
-                title="Save current view"
-                subtitle="keep this layout to come back to"
-                showChevron
-              />
-            )}
+            {onSavePreset &&
+              (namingView ? (
+                <div className="flex items-center gap-2 px-4 py-1 border-b border-hairline last:border-b-0">
+                  <input
+                    ref={viewNameRef}
+                    type="text"
+                    aria-label="name for this view"
+                    placeholder="Name this view"
+                    enterKeyHint="done"
+                    autoCorrect="off"
+                    value={viewName}
+                    onChange={(e) => setViewName(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault()
+                        saveView()
+                      }
+                    }}
+                    className="flex-1 min-w-0 min-h-[44px] rounded-ios bg-bg-elevated border border-hairline px-3 text-ios-body text-label-primary placeholder:text-label-tertiary"
+                  />
+                  <button
+                    type="button"
+                    onPointerDown={(e) => e.preventDefault()}
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={saveView}
+                    disabled={!viewName.trim()}
+                    className="shrink-0 min-h-[44px] px-3 rounded-ios bg-accent text-white text-ios-body font-medium active:opacity-80 disabled:opacity-40"
+                  >
+                    Save
+                  </button>
+                </div>
+              ) : (
+                <GroupedRow
+                  onClick={() => {
+                    // Focus inside the same tap, or iOS won't raise the
+                    // keyboard.
+                    flushSync(() => setNamingView(true))
+                    viewNameRef.current?.focus()
+                  }}
+                  title="Save current view"
+                  subtitle="keep this layout to come back to"
+                  showChevron
+                />
+              ))}
           </GroupedSection>
 
           {categories.length > 0 && (

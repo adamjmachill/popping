@@ -4,8 +4,8 @@
 // What lives here now
 // -------------------
 //
-// Only two keys remain in localStorage as of the server-side
-// preferences migration (2026-07-02):
+// Three keys live in localStorage (two kept through the server-side
+// preferences migration of 2026-07-02, one added later):
 //
 //   - ``mobileColLast`` -- the column index the user was last
 //     viewing on the mobile swipe layout. Per-device because
@@ -15,6 +15,9 @@
 //   - ``briefCollapsed`` -- whether the BriefCard is collapsed
 //     in the drawer. Same argument: a screen position, not
 //     data.
+//
+//   - ``briefTone`` -- the Brief tone picked on this device
+//     (Short, Story or Alerts), so a reload keeps it.
 //
 // What moved off localStorage
 // ---------------------------
@@ -37,8 +40,8 @@
 //   - historyGroupBy  -> History tab group-by mode
 //
 // ``STORAGE_KEYS`` is kept as a frozen record so the namespacing
-// is still centralised. The two remaining entries are device-
-// only; new server-backed keys should NOT be added here.
+// is still centralised. The entries are device-only; new
+// server-backed keys should NOT be added here.
 
 const SCHEMA = 'v1'
 const NAMESPACE = 'popping'
@@ -53,6 +56,8 @@ export const STORAGE_KEYS = {
   // BriefCard collapse preference. Boolean stored as '0' / '1' to
   // match the codebase's storage convention.
   briefCollapsed: `${NAMESPACE}.${SCHEMA}.brief.collapsed`,
+  // The Brief tone ('terse' | 'narrative' | 'alert'), checked on read.
+  briefTone: `${NAMESPACE}.${SCHEMA}.brief.tone`,
 } as const
 
 export function safeGetItem(key: string): string | null {
