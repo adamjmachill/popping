@@ -54,6 +54,9 @@ _MAX_NEW_PER_POLL = 10
 # of a full burst of 10.
 _FETCH_CONCURRENCY = 3
 
+# Upper bound on probe() (the Add/Test preview), in seconds.
+_PROBE_BUDGET = 45.0
+
 # How many candidate URLs to even ask the sitemap for. Independent of
 # _MAX_NEW_PER_POLL — we want to see enough of the sitemap to find
 # _MAX_NEW_PER_POLL genuinely new ones even once the easy/recent
@@ -241,15 +244,25 @@ async def probe(url: str, limit: int = 3) -> list[dict]:
     than ``limit`` in case the first couple don't extract cleanly
     (e.g. a listing/index page that slipped into the sitemap), so the
     preview isn't overly pessimistic about a genuinely workable site."""
-    candidates = await _section_candidates(url, url, max(limit * 3, 10))
     items: list[dict] = []
-    for candidate in candidates:
-        if len(items) >= limit:
-            break
-        item = await _extract_one(candidate)
-        if item is not None:
-            items.append(item)
-    return items
+
+    async def _run() -> None:
+        candidates = await _section_candidates(url, url, max(limit * 3, 10))
+        # A few pages at a time: one slow page shouldn't hold up the rest.
+        for start in range(0, len(candidates), _FETCH_CONCURRENCY):
+            if len(items) >= limit:
+                return
+            chunk = candidates[start:start + _FETCH_CONCURRENCY]
+            results = await asyncio.gather(*(_extract_one(c) for c in chunk))
+            items.extend(r for r in results if r is not None)
+
+    # Add waits on this, so a slow site returns what it has (or
+    # nothing) after _PROBE_BUDGET instead of spinning for minutes.
+    try:
+        await asyncio.wait_for(_run(), _PROBE_BUDGET)
+    except asyncio.TimeoutError:
+        logger.info("generic_scrape: probe of %s hit the %ss budget", url, _PROBE_BUDGET)
+    return items[:limit]
 
 
 def _extract_links_from_html(html: str, page_url: str, pattern: str) -> list[str]:
