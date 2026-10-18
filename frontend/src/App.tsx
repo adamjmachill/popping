@@ -3187,12 +3187,20 @@ export function App() {
         }}
         starredEntries={starredEntries}
         onUnstarAll={() => {
-          const before = starredEntriesRef.current
-          if (before.length === 0) return
+          const cleared = starredEntriesRef.current
+          if (cleared.length === 0) return
           setStarredEntries([])
+          // Undo puts back what was cleared and keeps anything saved
+          // since the toast appeared.
           toast('All saved entries cleared.', {
             kind: 'info',
-            action: { label: 'Undo', onClick: () => setStarredEntries(before) },
+            action: {
+              label: 'Undo',
+              onClick: () => {
+                const now = starredEntriesRef.current
+                setStarredEntries([...cleared.filter((id) => !now.includes(id)), ...now])
+              },
+            },
           })
         }}
         onUnstarEntry={(entryId) => {
@@ -3210,12 +3218,20 @@ export function App() {
           const ids = downvotedEntries
           if (ids.length === 0) return
           const before = hiddenEntriesRef.current
+          // Only the ones this hid; Undo leaves the rest as they are now.
+          const added = ids.filter((id) => !before.includes(id))
           setHiddenEntries(
             [...before, ...ids].slice(-MAX_HIDDEN),
           )
           toast(
             `Hid ${ids.length} downvoted ${ids.length === 1 ? 'entry' : 'entries'}.`,
-            { kind: 'info', action: { label: 'Undo', onClick: () => setHiddenEntries(before) } },
+            {
+              kind: 'info',
+              action: {
+                label: 'Undo',
+                onClick: () => setHiddenEntries(hiddenEntriesRef.current.filter((id) => !added.includes(id))),
+              },
+            },
           )
         }}
       />
