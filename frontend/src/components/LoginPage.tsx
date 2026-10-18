@@ -81,8 +81,8 @@ export function LoginPage({ returnTo, onSignedIn }: Props) {
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
                   autoComplete="username"
-                  // iOS would capitalise "adam" to "Adam" and the
-                  // sign-in would fail.
+                  // iOS capitalises the first letter by default, so a
+                  // lowercase username would fail to sign in.
                   autoCapitalize="none"
                   autoCorrect="off"
                   spellCheck={false}

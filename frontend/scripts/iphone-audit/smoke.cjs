@@ -350,13 +350,13 @@ const STATES = [
       await page.route((u) => new URL(u).pathname === '/auth/local', reply(401, { detail: 'invalid credentials' }))
     },
     setup: async ({ page }) => {
-      await page.fill('input[autocomplete="username"]', 'adam')
+      await page.fill('input[autocomplete="username"]', 'someone')
       await page.fill('input[autocomplete="current-password"]', 'not-the-password')
       await page.getByRole('button', { name: 'Sign in', exact: true }).click()
       await page.getByText("That username and password don't match.").waitFor({ state: 'visible' })
     },
     run: async ({ page, fail }) => {
-      // iOS must not capitalise "adam" to "Adam".
+      // iOS must not capitalise the first letter of a lowercase username.
       const attrs = await page
         .locator('input[autocomplete="username"]')
         .evaluate((el) => ({ cap: el.getAttribute('autocapitalize'), correct: el.getAttribute('autocorrect'), spell: el.getAttribute('spellcheck') }))
