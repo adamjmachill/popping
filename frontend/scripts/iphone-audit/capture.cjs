@@ -48,9 +48,27 @@ function json(route, body, status = 200) {
 }
 
 const log = []
-function mockApi(context) {
+// Mock the backend for one browser context.
+//   mockApi(context, { onUnmocked })
+// The route is anchored on the pathname, so a page path such as
+// /static/assets-x.js or a query string containing "/api/" is never caught.
+// Each call gets its own deep copy of F.SOURCES and F.ENTRIES: POST, PATCH and
+// DELETE on /api/sources mutate that copy and every GET reads it, so a flow
+// sees its own edits and contexts never share state.
+// onUnmocked({ method, path, url }) is called for any request under
+// /api, /auth or /assets that no branch below answers (smoke.cjs rule C8).
+function mockApi(context, opts = {}) {
+  const onUnmocked = typeof opts.onUnmocked === 'function' ? opts.onUnmocked : null
+  const db = {
+    sources: structuredClone(F.SOURCES),
+    entries: structuredClone(F.ENTRIES),
+  }
+  const forYouIds = F.FOR_YOU.map((e) => e.id)
+  const sourceById = (id) => db.sources.find((s) => s.id === id)
+  const sourceName = (id) => (sourceById(id) || {}).name || 'unknown'
+  const entryById = (id) => db.entries.find((e) => e.id === id)
   let interactionId = 1000
-  return context.route(/\/(api|auth|assets)\//, async (route) => {
+  return context.route((u) => /^\/(api|auth|assets)\//.test(new URL(u).pathname), async (route) => {
     const req = route.request()
     const u = new URL(req.url())
     const p = u.pathname
@@ -77,58 +95,67 @@ function mockApi(context) {
 
     // ---- api ----
     if (p === '/api/health') {
-      return json(route, { status: 'ok', sources: F.SOURCES.length, entries: F.ENTRIES.length, db: 'ok', last_fetch: new Date(F.NOW - 120000).toISOString() })
+      return json(route, { status: 'ok', sources: db.sources.length, entries: db.entries.length, db: 'ok', last_fetch: new Date(F.NOW - 120000).toISOString() })
     }
-    if (p === '/api/sources' && m === 'GET') return json(route, F.SOURCES)
+    if (p === '/api/sources' && m === 'GET') return json(route, db.sources)
     if (p === '/api/sources' && m === 'POST') {
       const body = req.postDataJSON() || {}
-      return json(route, { ...F.SOURCES[0], id: 99, name: body.name || 'new_source', type: body.type || 'rss', category: body.category || 'other', url: body.url || '', favicon_path: null, net_vote_score: 0 })
+      const id = Math.max(0, ...db.sources.map((s) => s.id)) + 1
+      const row = { ...structuredClone(F.SOURCES[0]), id, name: body.name || 'new_source', type: body.type || 'rss', category: body.category || 'other', url: body.url || '', refresh_interval_seconds: body.refresh_interval_seconds || 3600, custom_headers: body.custom_headers || null, sitemap_url: body.sitemap_url || null, link_pattern: body.link_pattern || null, favicon_path: null, favicon_url: null, last_fetch_at: null, net_vote_score: 0 }
+      db.sources.push(row)
+      return json(route, row)
     }
     if (p === '/api/sources/test') {
       return json(route, { ok: true, status_code: 200, item_count: 15, sample_titles: ['Sample one', 'Sample two', 'Sample three'], error_kind: null, error: null, resolved_url: null })
     }
-    if (p === '/api/sources/auto') return json(route, { found: true, kind: 'rss', source: F.SOURCES[0] })
+    if (p === '/api/sources/auto') return json(route, { found: true, kind: 'rss', source: db.sources[0] })
     let mm = p.match(/^\/api\/sources\/(\d+)$/)
     if (mm) {
-      if (m === 'DELETE') return route.fulfill({ status: 204 })
-      const src = F.SOURCES.find((s) => s.id === Number(mm[1])) || F.SOURCES[0]
-      return json(route, { ...src, ...(req.postDataJSON() || {}) })
+      const id = Number(mm[1])
+      const i = db.sources.findIndex((s) => s.id === id)
+      if (i < 0) return json(route, { detail: 'Source not found' }, 404)
+      if (m === 'DELETE') {
+        db.sources.splice(i, 1)
+        return route.fulfill({ status: 204 })
+      }
+      if (m === 'PATCH') Object.assign(db.sources[i], req.postDataJSON() || {})
+      return json(route, db.sources[i])
     }
     if (p === '/api/entries/by-ids') {
       const ids = (u.searchParams.get('ids') || '').split(',').map(Number)
-      return json(route, ids.map((id) => F.ENTRIES.find((e) => e.id === id)).filter(Boolean).map((e) => ({ ...e, source_name: F.sourceName(e.source_id) })))
+      return json(route, ids.map(entryById).filter(Boolean).map((e) => ({ ...e, source_name: sourceName(e.source_id) })))
     }
     if (p === '/api/entries' && m === 'GET') {
-      let rows = F.ENTRIES.slice()
+      let rows = db.entries.filter((e) => sourceById(e.source_id))
       const q = (u.searchParams.get('q') || '').toLowerCase()
       const cat = u.searchParams.get('category')
       const srcs = u.searchParams.getAll('source')
       if (q) rows = rows.filter((e) => e.title.toLowerCase().includes(q) || String(e.meta?.summary || '').toLowerCase().includes(q))
-      if (cat) rows = rows.filter((e) => (F.SOURCES.find((s) => s.id === e.source_id) || {}).category === cat)
-      if (srcs.length) rows = rows.filter((e) => srcs.includes(F.sourceName(e.source_id)))
+      if (cat) rows = rows.filter((e) => (sourceById(e.source_id) || {}).category === cat)
+      if (srcs.length) rows = rows.filter((e) => srcs.includes(sourceName(e.source_id)))
       const limit = Number(u.searchParams.get('limit') || 0)
       if (limit) rows = rows.slice(0, limit)
       return json(route, rows)
     }
     mm = p.match(/^\/api\/entries\/(\d+)\/(summary|podcast_summary|reddit_comment_summary|related)$/)
     if (mm) {
-      const e = F.ENTRIES.find((x) => x.id === Number(mm[1]))
+      const e = entryById(Number(mm[1]))
       const kind = mm[2]
       if (kind === 'summary') return json(route, { summary: e ? e.meta.summary : null, cached: false })
       if (kind === 'podcast_summary') return json(route, { summary: e ? e.meta.summary : null, cached: false, available: !!(e && e.transcript_url) })
       if (kind === 'reddit_comment_summary') return json(route, { summary: 'Commenters are split: half think the funding formula is overdue, the other half point out the consultation window is absurdly short. Top comment links the technical annex.', cached: false, available: true, rate_limited: false })
       if (kind === 'related') {
         if (!e || e.story_cluster_id == null) return json(route, null)
-        const sib = F.ENTRIES.filter((x) => x.story_cluster_id === e.story_cluster_id && x.id !== e.id)
+        const sib = db.entries.filter((x) => x.story_cluster_id === e.story_cluster_id && x.id !== e.id)
         return json(route, {
           cluster_id: e.story_cluster_id,
           wire_source: 'Canadian Press',
           first_seen_at: new Date(F.NOW - 3600000).toISOString(),
-          articles: sib.map((x) => ({ entry_id: x.id, title: x.title, url: x.url, source_name: F.sourceName(x.source_id), favicon_path: (F.SOURCES.find((s) => s.id === x.source_id) || {}).favicon_path || null, published_at: x.published_at, framing_tone: 'alarmist' })),
+          articles: sib.map((x) => ({ entry_id: x.id, title: x.title, url: x.url, source_name: sourceName(x.source_id), favicon_path: (sourceById(x.source_id) || {}).favicon_path || null, published_at: x.published_at, framing_tone: 'alarmist' })),
         })
       }
     }
-    if (p === '/api/foryou') return json(route, F.FOR_YOU)
+    if (p === '/api/foryou') return json(route, forYouIds.map(entryById).filter((e) => e && sourceById(e.source_id)))
     if (p === '/api/framing-clusters') return json(route, [])
     if (p === '/api/feed-recommendations' && m === 'GET') {
       return json(route, [
@@ -155,12 +182,13 @@ function mockApi(context) {
     mm = p.match(/^\/api\/preferences\/(.+)$/)
     if (mm) {
       if (m === 'DELETE') return route.fulfill({ status: 204 })
-      return json(route, { key: decodeURIComponent(mm[1]), value: (req.postDataJSON() || {}).value ?? null, updated_at: new Date().toISOString() })
+      return json(route, { key: decodeURIComponent(mm[1]), value: (req.postDataJSON() || {}).value ?? null, updated_at: new Date(F.NOW).toISOString() })
     }
     mm = p.match(/^\/api\/ingest\/(.+)$/)
     if (mm) return json(route, { source: decodeURIComponent(mm[1]), fetched: 12, inserted: 2, duplicates: 10, error: null })
 
     log.push(`  !! UNMOCKED ${m} ${p}`)
+    if (onUnmocked) onUnmocked({ method: m, path: p, url: req.url() })
     return json(route, { detail: `unmocked ${m} ${p}` }, 404)
   })
 }

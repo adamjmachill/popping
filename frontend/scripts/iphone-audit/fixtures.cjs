@@ -39,14 +39,34 @@ const TITLE_WITH_TOKEN = `Release notes posted at ${TOKEN_90} for the October dr
 if (LONG_SOURCE_NAME.length !== 60) throw new Error('LONG_SOURCE_NAME must be 60 chars')
 if (LONG_SOURCE_URL.length !== 120) throw new Error('LONG_SOURCE_URL must be 120 chars')
 if (TOKEN_90.length !== 90 || /\s|-/.test(TOKEN_90)) throw new Error('TOKEN_90 must be 90 unbroken chars')
+// A 60-character search query: one unbroken snake_case token (the shape of a
+// source name), so nothing in the results header can wrap it.
+const SEARCH_QUERY_60 = padToLength('federal_infrastructure_funding_formula_needs_weighted_annex', 60, '_')
+// A 40-character category (the backend's maximum, routes/sources.py _CATEGORY_MAX).
+const CATEGORY_40 = 'regional politics and municipal councils'
+// A 300-character fetch error for the auto-disabled row (id 12).
+const LAST_ERROR_300 = padToLength(
+  'httpx.ConnectTimeout: timed out after 30.0s fetching https://risky.biz/feeds/risky-business/ (attempt 12 of 12). ' +
+    'The upstream CDN accepted the TCP connection but sent no bytes before the read deadline; the previous eleven ' +
+    'attempts failed the same way, so the scheduler auto-disabled this source until it is resumed by hand.',
+  300,
+  '.',
+)
+// the_verge (id 4): blocked by the site's bot filter.
+const VERGE_BLOCKED_ERROR = "[blocked] HTTPStatusError: Client error '403 Forbidden' for url 'https://www.theverge.com/rss/index.xml'"
+if (SEARCH_QUERY_60.length !== 60 || /\s|-/.test(SEARCH_QUERY_60)) throw new Error('SEARCH_QUERY_60 must be 60 unbroken chars')
+if (CATEGORY_40.length !== 40) throw new Error(`CATEGORY_40 is ${CATEGORY_40.length} chars, expected 40`)
+if (LAST_ERROR_300.length !== 300) throw new Error('LAST_ERROR_300 must be 300 chars')
 
 // ---- sources ---------------------------------------------------------------
-// 14 sources, 5 categories (news, deals, security, podcast, video).
+// 17 sources, 7 categories (news, deals, security, podcast, video, nhl and the
+// 40-character CATEGORY_40). Ids 1-14 are the original set; keep them stable.
 const SOURCES = [
   { id: 1, name: 'bbc_news', type: 'rss', category: 'news', url: 'https://feeds.bbci.co.uk/news/rss.xml', refresh_interval_seconds: 900, last_fetch_at: minsAgo(4), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/1.ico', custom_headers: null, auto_disabled: false, net_vote_score: 2 },
   { id: 2, name: 'hn_top', type: 'hn', category: 'news', url: 'https://hacker-news.firebaseio.com/v0/topstories.json', refresh_interval_seconds: 300, last_fetch_at: minsAgo(2), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/2.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
   { id: 3, name: LONG_SOURCE_NAME, type: 'rss', category: 'news', url: LONG_SOURCE_URL, refresh_interval_seconds: 21600, last_fetch_at: minsAgo(190), last_error: null, error_count: 0, active: true, favicon_path: null, custom_headers: { 'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1' }, auto_disabled: false, net_vote_score: -3 },
-  { id: 4, name: 'the_verge', type: 'rss', category: 'news', url: 'https://www.theverge.com/rss/index.xml', refresh_interval_seconds: 3600, last_fetch_at: minsAgo(35), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/4.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
+  // Custom rss without a User-Agent header, blocked by the site (403).
+  { id: 4, name: 'the_verge', type: 'rss', category: 'news', url: 'https://www.theverge.com/rss/index.xml', refresh_interval_seconds: 3600, last_fetch_at: minsAgo(35), last_error: VERGE_BLOCKED_ERROR, error_count: 2, active: true, favicon_path: 'favicons/4.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
   { id: 5, name: 'rfd_hot_deals', type: 'rss', category: 'deals', url: 'https://forums.redflagdeals.com/feed/forum/9', refresh_interval_seconds: 900, last_fetch_at: minsAgo(7), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/5.ico', custom_headers: null, auto_disabled: false, net_vote_score: 5 },
   { id: 6, name: 'slickdeals_frontpage', type: 'rss', category: 'deals', url: 'https://slickdeals.net/newsearch.php?mode=frontpage&searcharea=deals&searchin=first&rss=1', refresh_interval_seconds: 3600, last_fetch_at: minsAgo(50), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/6.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
   { id: 7, name: 'r_bapcsalescanada', type: 'reddit', category: 'deals', url: 'https://www.reddit.com/r/bapcsalescanada', refresh_interval_seconds: 900, last_fetch_at: minsAgo(9), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/7.ico', custom_headers: null, auto_disabled: false, net_vote_score: 1 },
@@ -57,10 +77,16 @@ const SOURCES = [
   { id: 10, name: 'krebs_on_security', type: 'rss', category: 'security', url: 'https://krebsonsecurity.com/feed/', refresh_interval_seconds: 3600, last_fetch_at: minsAgo(2880), last_error: null, error_count: 0, active: false, favicon_path: 'favicons/10.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
   { id: 11, name: 'darknet_diaries', type: 'podcast', category: 'podcast', url: 'https://feeds.megaphone.fm/darknetdiaries', refresh_interval_seconds: 21600, last_fetch_at: minsAgo(120), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/11.ico', custom_headers: null, auto_disabled: false, net_vote_score: 4 },
   // Auto-disabled after repeated failures.
-  { id: 12, name: 'risky_business_podcast', type: 'podcast', category: 'podcast', url: 'https://risky.biz/feeds/risky-business/', refresh_interval_seconds: 21600, last_fetch_at: minsAgo(4000), last_error: 'timeout after 30s', error_count: 12, active: false, favicon_path: 'favicons/12.ico', custom_headers: null, auto_disabled: true, net_vote_score: -1 },
+  { id: 12, name: 'risky_business_podcast', type: 'podcast', category: 'podcast', url: 'https://risky.biz/feeds/risky-business/', refresh_interval_seconds: 21600, last_fetch_at: minsAgo(4000), last_error: LAST_ERROR_300, error_count: 12, active: false, favicon_path: 'favicons/12.ico', custom_headers: null, auto_disabled: true, net_vote_score: -1 },
   { id: 13, name: 'anthropic_yt', type: 'youtube_channel', category: 'video', url: 'https://www.youtube.com/feeds/videos.xml?channel_id=UCrDwWp7EBBv4NwvScIpBDOA', refresh_interval_seconds: 21600, last_fetch_at: minsAgo(200), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/13.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
   { id: 14, name: 'veritasium_yt', type: 'youtube_channel', category: 'video', url: 'https://www.youtube.com/@veritasium', refresh_interval_seconds: 21600, last_fetch_at: minsAgo(260), last_error: null, error_count: 1, active: true, favicon_path: null, custom_headers: null, auto_disabled: false, net_vote_score: 0 },
-].map((s) => ({ favicon_url: s.favicon_path ? `https://example.invalid/${s.favicon_path}` : null, ...s }))
+  // generic_scrape with both discovery hints, in the 40-character category.
+  { id: 15, name: 'ollama_library', type: 'generic_scrape', category: CATEGORY_40, url: 'https://ollama.com/library', sitemap_url: 'https://ollama.com/sitemap.xml', link_pattern: '/library/', refresh_interval_seconds: 21600, last_fetch_at: minsAgo(300), last_error: null, error_count: 0, active: true, favicon_path: null, custom_headers: null, auto_disabled: false, net_vote_score: 0 },
+  // The only source in category nhl (3 entries below).
+  { id: 16, name: 'nhl_news', type: 'rss', category: 'nhl', url: 'https://www.nhl.com/rss/news.xml', refresh_interval_seconds: 3600, last_fetch_at: minsAgo(18), last_error: null, error_count: 0, active: true, favicon_path: 'favicons/16.ico', custom_headers: null, auto_disabled: false, net_vote_score: 0 },
+  // Custom rss with a legacy header name the editor must flag (space in the name).
+  { id: 17, name: 'legacy_header_feed', type: 'rss', category: 'news', url: 'https://feeds.example.org/legacy/rss.xml', refresh_interval_seconds: 3600, last_fetch_at: minsAgo(65), last_error: null, error_count: 0, active: true, favicon_path: null, custom_headers: { 'Bad Header': 'x' }, auto_disabled: false, net_vote_score: 0 },
+].map((s) => ({ favicon_url: s.favicon_path ? `https://example.invalid/${s.favicon_path}` : null, sitemap_url: null, link_pattern: null, ...s }))
 
 // ---- entries ---------------------------------------------------------------
 const LONG_SUMMARY_A =
@@ -142,6 +168,10 @@ const ENTRIES = [
   mkEntry(504, 13, 'Prompt caching explained in 4 minutes', { score: 38, ago: 2500 }),
   mkEntry(505, 14, 'I Spent $10,000 On A Single Photo', { image: true, score: 57, ago: 4000 }),
   mkEntry(506, 13, 'Model context protocol (MCP) deep dive with the team that built it, part two of the three part series', { score: 49, ago: 5000 }),
+  // --- nhl (nhl_news=16): exactly 3 entries ---
+  mkEntry(601, 16, 'Canucks sign Pettersson to an eight-year extension', { image: true, score: 72, ago: 22, summary: SHORT_SUMMARY }),
+  mkEntry(602, 16, 'Oilers beat Flames 4-3 in overtime', { score: 46, ago: 140, summary: SHORT_SUMMARY }),
+  mkEntry(603, 16, 'Trade deadline primer: every team\'s cap space, needs and likely sellers', { score: 39, ago: 400 }),
 ]
 
 const FOR_YOU_IDS = [101, 301, 102, 201, 401, 104, 303, 502]
@@ -184,6 +214,10 @@ module.exports = {
   TOKEN_90,
   TITLE_WITH_TOKEN,
   LONG_SUMMARY_A,
+  SEARCH_QUERY_60,
+  CATEGORY_40,
+  LAST_ERROR_300,
+  VERGE_BLOCKED_ERROR,
 }
 
 if (require.main === module) {
@@ -192,6 +226,9 @@ if (require.main === module) {
   console.log('LONG_SOURCE_URL ', LONG_SOURCE_URL.length, LONG_SOURCE_URL)
   console.log('TITLE_180       ', TITLE_180.length, TITLE_180)
   console.log('TOKEN_90        ', TOKEN_90.length, TOKEN_90)
+  console.log('SEARCH_QUERY_60 ', SEARCH_QUERY_60.length, SEARCH_QUERY_60)
+  console.log('CATEGORY_40     ', CATEGORY_40.length, CATEGORY_40)
+  console.log('LAST_ERROR_300  ', LAST_ERROR_300.length)
   console.log('sources', SOURCES.length, 'categories', [...new Set(SOURCES.map((s) => s.category))])
   console.log('entries', ENTRIES.length)
 }

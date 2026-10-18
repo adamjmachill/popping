@@ -10,7 +10,8 @@ export PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers   # chromium-1194 is pre-instal
 
 cd "$FRONTEND"
 npm run build
-npx vite preview --port 4173 --host 127.0.0.1 > "$HERE/vite-preview.log" 2>&1 &
+# Start vite itself (not through npx) so $! is the server and the trap kills it.
+./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173 --strictPort > "$HERE/vite-preview.log" 2>&1 &
 PREVIEW_PID=$!
 trap 'kill $PREVIEW_PID 2>/dev/null || true' EXIT
 for i in $(seq 1 20); do
