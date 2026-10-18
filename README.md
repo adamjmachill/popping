@@ -56,6 +56,16 @@ docker compose up -d       # recreate containers with the new image
 
 `pull_policy` defaults to `always`, so a plain `docker compose up -d` already pulls when the digest moved; the explicit `pull` step is only needed if you've set `POPPING_PULL_POLICY=missing` or `=never` in your `.env` (intentional opt-out for change-windowed deployments — see `.env.example` for the trade-off).
 
+**Server helpers (`ops/`):** two small scripts for a VPS install at `/opt/popping`.
+
+- `ops/popping-update.sh`: `git pull`, `docker compose pull`, `up -d`, then `docker image prune -f` so old images don't fill the disk, and waits for the backend to report healthy.
+- `ops/popping-backup.sh`: nightly `pg_dump` plus a copy of `.env` into `/root/backups`, kept 14 days. Install and restore steps are in the script header.
+
+```bash
+cp ops/popping-update.sh /usr/local/bin/popping-update && chmod 700 /usr/local/bin/popping-update
+popping-update
+```
+
 **Local dev with hot-reload (build from source):**
 
 ```bash
