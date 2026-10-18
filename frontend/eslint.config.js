@@ -23,7 +23,10 @@ import tseslint from 'typescript-eslint'
 // Files already cleaned of the patterns that break on an iPhone.
 // The list grows PR by PR until it covers all of src/ (REDESIGN_PLAN.md,
 // section 4, "Lint bans"). Core rules only, no extra dependency.
-const MOBILE_SCOPE = ['src/components/{Card,Toast,BriefCard,FramingWatch,SourceIcon,SearchResults}.tsx']
+const MOBILE_SCOPE = [
+  'src/components/{Card,Toast,BriefCard,FramingWatch,SourceIcon,SearchResults}.tsx',
+  'src/lib/**',
+]
 
 // A class-name pattern banned in string literals and template text.
 const ban = (re, message) => [

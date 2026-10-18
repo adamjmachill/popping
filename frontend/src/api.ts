@@ -139,6 +139,10 @@ export interface Source {
   // re-enabling) from a manually-paused one (routine user choice).
   // See ``app.models.Source.auto_disabled``.
   auto_disabled: boolean
+  // Website (generic_scrape) rows only: where to find the site's page
+  // list, and which links count as articles. Null = the defaults.
+  sitemap_url: string | null
+  link_pattern: string | null
   // Net thumbs score across every entry from this source:
   // sum(thumb_up) - sum(thumb_down). 0 = never voted on (or an even
   // split). Powers the FeedManager row badge so a net-negative
@@ -149,7 +153,7 @@ export interface Source {
 /** Result of ``POST /api/sources/test``. ``ok`` is the only field the
  * UI branches on; the rest are diagnostic. ``error_kind`` is a short
  * enum the frontend maps to a friendly message — see
- * ``friendlyTestError`` in the AddCustomTab code for the lookup. */
+ * ``friendlyTestError`` in lib/apiErrors.ts for the lookup. */
 export interface SourceTestResult {
   ok: boolean
   status_code: number | null
@@ -164,13 +168,14 @@ export interface SourceTestResult {
     | 'invalid_url'
     | 'unsupported_type'
     | 'network_error'
+    | 'invalid_headers'
     | 'unknown'
     | null
   error: string | null
-  // Set when the submitted URL was an Apple Podcasts show page
-  // (podcasts.apple.com/.../id<N>) resolved server-side to its
-  // actual RSS feed URL. Null for every other URL, including one
-  // that was already a direct feed URL.
+  // Set when the submitted URL was resolved server-side to a feed: an
+  // Apple Podcasts show page (podcasts.apple.com/.../id<N>) or any
+  // YouTube channel, handle, playlist or video link. Null for every
+  // other URL, including one that was already a direct feed URL.
   resolved_url: string | null
 }
 
@@ -258,30 +263,35 @@ export interface LLMTagsResponse {
 
 // Thrown by ``jsonFetch`` on a non-2xx response. ``detail`` carries
 // FastAPI's parsed error body (a string, or the list-of-field-errors
-// shape from a 422) when the response had one, so callers like
-// ``parseApiError`` can surface the actual reason instead of just the
-// HTTP status line.
+// shape from a 422) when the response had one, and ``status`` the
+// HTTP status, so lib/apiErrors.ts can say what went wrong in plain
+// words instead of showing the status line.
 export class ApiError extends Error {
   detail?: unknown
-  constructor(message: string, detail?: unknown) {
+  status: number
+  constructor(message: string, detail?: unknown, status = 0) {
     super(message)
     this.name = 'ApiError'
     this.detail = detail
+    this.status = status
+  }
+}
+
+async function errorDetail(resp: Response): Promise<unknown> {
+  try {
+    const body = await resp.json()
+    return (body as { detail?: unknown } | null)?.detail
+  } catch {
+    // Response body wasn't JSON (or was empty) — no field-level
+    // detail available; the status-line message is all we have.
+    return undefined
   }
 }
 
 async function jsonFetch<T>(url: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(url, { credentials: 'include', ...init })
   if (!resp.ok) {
-    let detail: unknown
-    try {
-      const body = await resp.json()
-      detail = (body as { detail?: unknown } | null)?.detail
-    } catch {
-      // Response body wasn't JSON (or was empty) — no field-level
-      // detail available; the status-line message is all we have.
-    }
-    throw new ApiError(`${resp.status} ${resp.statusText} for ${url}`, detail)
+    throw new ApiError(`${resp.status} ${resp.statusText} for ${url}`, await errorDetail(resp), resp.status)
   }
   return resp.json() as Promise<T>
 }
@@ -407,7 +417,7 @@ export const api = {
    * anything — a dead URL or a site sitemap-based discovery just
    * doesn't work on; nothing was created. */
   autoAddSource: (url: string, category: string = 'other') =>
-    jsonFetch<{ found: boolean; kind: 'rss' | 'generic_scrape' | null; source: Source | null }>(
+    jsonFetch<{ found: boolean; kind: 'rss' | 'generic_scrape' | 'youtube_channel' | null; source: Source | null }>(
       '/api/sources/auto',
       {
         method: 'POST',
@@ -420,7 +430,11 @@ export const api = {
    * ``name`` and ``url`` are now editable for dynamic rows. The
    * backend rejects PATCH on built-ins (BBC, HN, etc.) with a 400
    * and returns 409 on a name collision. URL changes clear the
-   * cached favicon; the next ingest re-downloads. */
+   * cached favicon; the next ingest re-downloads.
+   *
+   * ``keepalive`` lets the request finish after the page is hidden
+   * (the feed editor's saves on app switch); its body must stay under
+   * 64 KB, which a one-field PATCH always is. ``signal`` aborts it. */
   updateSource: (
     id: number,
     body: {
@@ -430,16 +444,22 @@ export const api = {
       name?: string
       url?: string
       // Per-source HTTP header overrides (e.g. ``{User-Agent: ...}``).
-      // Send ``{}`` (empty object) to clear an existing override;
-      // omit the field to leave it untouched. Cookie/Authorization
-      // /Host are rejected by the backend.
+      // Send null to clear an existing override; omit the field to
+      // leave it untouched. Cookie, Authorization, Host and the
+      // framing headers are rejected by the backend.
       custom_headers?: Record<string, string> | null
+      // Website (generic_scrape) rows only. Send null to clear.
+      sitemap_url?: string | null
+      link_pattern?: string | null
     },
+    opts: { keepalive?: boolean; signal?: AbortSignal } = {},
   ) =>
     jsonFetch<Source>(`/api/sources/${id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      keepalive: opts.keepalive,
+      signal: opts.signal,
     }),
   /** Drop a dynamic source row + its scheduler job. 400 if the row
    * is a built-in (BBC, HN, etc.). */
@@ -447,8 +467,10 @@ export const api = {
     fetch(`/api/sources/${id}`, {
       method: 'DELETE',
       credentials: 'include',
-    }).then((resp) => {
-      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText} for /api/sources/${id}`)
+    }).then(async (resp) => {
+      if (!resp.ok) {
+        throw new ApiError(`${resp.status} ${resp.statusText} for /api/sources/${id}`, await errorDetail(resp), resp.status)
+      }
     }),
   /** Curated list of feeds the user might want to add, minus any
    * they already have. Phase 5 is static; Phase 8 re-ranks by
