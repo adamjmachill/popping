@@ -91,17 +91,30 @@ export function checkRows(rows: readonly HeaderRow[]): { problems: RowProblem[];
     if (!name && !value) continue
     filled++
     const fail = (message: string, incomplete = false) => problems.push({ key, message, incomplete })
+    // A typed name is checked even before its value, so "Cookie" says
+    // at once that it can't be sent instead of asking for a value.
+    if (name) {
+      const nameProblem = !NAME_RE.test(name)
+        ? 'Header names use letters, numbers and dashes.'
+        : name.length > HEADER_NAME_MAX
+          ? `Header names can be ${HEADER_NAME_MAX} characters at most.`
+          : seen.has(name.toLowerCase())
+            ? 'Already added.'
+            : HEADER_DENYLIST.includes(name.toLowerCase())
+              ? `Popping can't send a ${name} header.`
+              : null
+      seen.add(name.toLowerCase())
+      if (nameProblem) {
+        fail(nameProblem)
+        continue
+      }
+    }
     if (!name || !value) {
       fail('Fill in both to save this header.', true)
       continue
     }
-    if (!NAME_RE.test(name)) fail('Header names use letters, numbers and dashes.')
-    else if (name.length > HEADER_NAME_MAX) fail(`Header names can be ${HEADER_NAME_MAX} characters at most.`)
-    else if (seen.has(name.toLowerCase())) fail('Already added.')
-    else if (HEADER_DENYLIST.includes(name.toLowerCase())) fail(`Popping can't send a ${name} header.`)
-    else if (value.length > HEADER_VALUE_MAX) fail(`Too long (${HEADER_VALUE_MAX} characters max).`)
+    if (value.length > HEADER_VALUE_MAX) fail(`Too long (${HEADER_VALUE_MAX} characters max).`)
     else if (!VALUE_RE.test(value)) fail('Use plain letters, numbers and punctuation.')
-    seen.add(name.toLowerCase())
   }
   return { problems, tooMany: filled > HEADERS_MAX ? `${HEADERS_MAX} headers at most.` : null }
 }

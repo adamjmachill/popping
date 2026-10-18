@@ -36,6 +36,9 @@ import { Settings } from './components/Settings'
 import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
 import { recordImmediate } from './lib/interactions'
 import { categoryLabel, sourceLabel } from './lib/labels'
+import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
+import { fieldSaveMessage, isRetryable } from './lib/apiErrors'
+import { sameHeaders, type HeaderMap } from './lib/headers'
 // Per-user server-backed preferences. Replaces the 8 localStorage
 // keys the dashboard used to write (readEntries, lastViewed,
 // columnPrefs, columnSections, hiddenEntries, starredEntries,
@@ -105,6 +108,20 @@ function deepEqual(a: unknown, b: unknown): boolean {
 // any row that's structurally unchanged — lets the memo comparators
 // actually bail out on the common "nothing changed for this row"
 // case.
+// How long a feed saved, added or deleted in this tab overrides what a
+// poll says about it (see ``sourceChangesRef``).
+const SOURCE_CHANGE_TTL_MS = 120_000
+
+// Puts a feed where the server's ``ORDER BY category, name`` would,
+// without re-sorting the rest (JavaScript and Postgres order some
+// strings differently, and the list shouldn't shuffle).
+function insertSorted(list: Source[], row: Source): Source[] {
+  const at = list.findIndex(
+    (s) => s.category > row.category || (s.category === row.category && s.name > row.name),
+  )
+  return at < 0 ? [...list, row] : [...list.slice(0, at), row, ...list.slice(at)]
+}
+
 function reconcileById<T extends { id: number }>(prev: T[], next: T[]): T[] {
   if (prev.length === 0) return next
   const prevById = new Map(prev.map((item) => [item.id, item]))
@@ -382,6 +399,23 @@ export function App() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [forYou, setForYou] = useState<Entry[]>([])
   const [sources, setSources] = useState<Source[]>([])
+  // The latest sources for the feed editor's save store, which reads
+  // them outside React.
+  const sourcesRef = useRef(sources)
+  sourcesRef.current = sources
+  // Feeds this tab saved, added or deleted, and when (ms). A poll that
+  // started before the change may carry the old state; ``refresh``
+  // lays these over its result for two minutes so the screen doesn't
+  // step back. Ids are never reused, so a deleted id stays dropped.
+  const sourceChangesRef = useRef({
+    written: new Map<number, number>(),
+    inserted: new Map<number, number>(),
+    deleted: new Map<number, number>(),
+  })
+  // Each refresh's number; a result older than one already applied is
+  // dropped.
+  const refreshSeqRef = useRef(0)
+  const appliedRefreshRef = useRef(0)
   const [health, setHealth] = useState<Health | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Settings overlay state. Driven by the URL so the back button
@@ -457,6 +491,14 @@ export function App() {
     window.history.replaceState(null, '', u.toString())
   }, [])
   const [mobileCol, setMobileCol] = useState<number>(loadMobileCol)
+  // The phone column (by name) to stay on once a category save has
+  // changed the columns. Set by a save, cleared by any tab the user
+  // picks, so a later change can't snap back over their choice.
+  const followTabRef = useRef<string | null>(null)
+  const selectMobileCol = useCallback((i: number) => {
+    followTabRef.current = null
+    setMobileCol(i)
+  }, [])
   const [error, setError] = useState<string | null>(null)
   const [user, setUser] = useState<CurrentUser | null>(null)
   const [authProbed, setAuthProbed] = useState(false)
@@ -1081,6 +1123,8 @@ export function App() {
   // stay up instead of being replaced by "refreshed".
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     setRefreshing(true)
+    const seq = ++refreshSeqRef.current
+    const startedAt = Date.now()
     try {
       const sourceArg = activeSources.size > 0 ? Array.from(activeSources) : undefined
       // A flat global `limit` on the unfiltered "give me everything"
@@ -1099,11 +1143,22 @@ export function App() {
       // Hot path: entries + sources + for-you. These change with
       // every ingest and the user expects them to be near-real-time
       // when the dashboard is open.
-      const [e, s, fy] = await Promise.all([
+      const [rawEntries, rawSources, rawForYou] = await Promise.all([
         entriesReq,
         api.sources(),
         api.forYou({ limit: 25 }).catch(() => [] as Entry[]),
       ])
+      // A newer refresh already landed: this one's data is older.
+      if (seq < appliedRefreshRef.current) return
+      appliedRefreshRef.current = seq
+      const changes = sourceChangesRef.current
+      const now = Date.now()
+      for (const m of [changes.written, changes.inserted, changes.deleted]) {
+        for (const [id, at] of m) if (now - at > SOURCE_CHANGE_TTL_MS) m.delete(id)
+      }
+      const isDeleted = (id: number) => changes.deleted.has(id)
+      const e = rawEntries.filter((x) => !isDeleted(x.source_id))
+      const fy = rawForYou.filter((x) => !isDeleted(x.source_id))
       const prevSeen = seenEntryIdsRef.current
       const newSeen = new Set(e.map((x) => x.id))
       if (
@@ -1122,7 +1177,20 @@ export function App() {
       }
       hiddenAtRef.current = null
       setEntries((prev) => reconcileById(prev, e))
-      setSources((prev) => reconcileById(prev, s))
+      setSources((prev) => {
+        const local = new Map(prev.map((row) => [row.id, row]))
+        const since = (m: Map<number, number>, id: number) => (m.get(id) ?? 0) >= startedAt
+        // Saved here after this poll started: the local row is newer.
+        let next = rawSources
+          .filter((row) => !isDeleted(row.id))
+          .map((row) => (since(changes.written, row.id) && local.has(row.id) ? local.get(row.id)! : row))
+        // Added here after this poll started and missing from it.
+        const got = new Set(next.map((row) => row.id))
+        for (const row of prev) {
+          if (!got.has(row.id) && since(changes.inserted, row.id)) next = insertSorted(next, row)
+        }
+        return reconcileById(prev, next)
+      })
       setForYou((prev) => reconcileById(prev, fy))
       setError(null)
       // Surface a brief success toast so the user knows the
@@ -1142,6 +1210,14 @@ export function App() {
       setRefreshing(false)
     }
   }, [activeSources])
+  // The latest ``refresh`` for callers that must stay stable: Column's
+  // memo ignores callbacks, so it would keep calling an old one with
+  // an old filter.
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+  const manualRefresh = useCallback(() => {
+    void refreshRef.current()
+  }, [])
 
   // Cold path: health pings (DB / sources count). Pulled on
   // its own slower interval so a single 5xx doesn't sit visible
@@ -1270,7 +1346,7 @@ export function App() {
     const startPolling = () => {
       if (intervalId != null) return
       intervalId = window.setInterval(() => {
-        void refresh()
+        void refresh({ silent: true })
       }, REFRESH_INTERVAL_MS)
     }
     const stopPolling = () => {
@@ -1285,7 +1361,7 @@ export function App() {
         hiddenAtRef.current = Date.now()
         stopPolling()
       } else {
-        void refresh()
+        void refresh({ silent: true })
         startPolling()
       }
     }
@@ -1293,7 +1369,7 @@ export function App() {
     document.addEventListener('visibilitychange', onVisibility)
     if (!pollingMountedRef.current) {
       pollingMountedRef.current = true
-      void refresh()
+      void refresh({ silent: true })
     }
     if (document.visibilityState === 'visible') startPolling()
 
@@ -1365,7 +1441,7 @@ export function App() {
       return
     }
     const id = window.setTimeout(() => {
-      void refresh()
+      void refresh({ silent: true })
     }, 250)
     return () => window.clearTimeout(id)
   }, [activeSources, refresh, authProbed])
@@ -1380,8 +1456,20 @@ export function App() {
   // (bad) value back to storage before the queue settled. Merging
   // clamp + write into a single effect with both deps in the array
   // gives us "validate, then persist" in the right order.
+  // After a category save, the phone stays on the column it showed
+  // (by name) even when columns are added or removed around it. If
+  // that column is gone, the clamp below lands on a neighbour.
+  useEffect(() => {
+    const name = followTabRef.current
+    if (name == null) return
+    followTabRef.current = null
+    const idx = columns.findIndex((c) => c.name === name)
+    if (idx >= 0) setMobileCol(idx)
+  }, [columns])
   useEffect(() => {
     if (columns.length === 0) return
+    // Desktop: j/k/o never target a column that has gone.
+    setSelectedColumnIndex((i) => Math.min(i, columns.length - 1))
     if (mobileCol >= columns.length) {
       const next = columns.length - 1
       setMobileCol(next)
@@ -2022,11 +2110,9 @@ export function App() {
       return next
     })
   }, [setActiveSources])
-  // When a user renames a source via the FeedManager inline editor,
-  // remap any active filter chip in the same render cycle so the
-  // chip bar doesn't briefly lose the source between PATCH and the
-  // next ``refresh()`` resolving. A no-op if the renamed source
-  // wasn't in the active set.
+  // A feed renamed in its editor: the filter chips and every saved
+  // view follow the new name at once, instead of losing the feed until
+  // the next poll. A no-op if the feed wasn't in either.
   const onSourceRenamed = useCallback((oldName: string, newName: string) => {
     if (oldName === newName) return
     setActiveSources((prev) => {
@@ -2036,7 +2122,150 @@ export function App() {
       next.add(newName)
       return next
     })
-  }, [setActiveSources])
+    const presets = filterPresetsRef.current
+    if (presets.some((p) => p.activeSources.includes(oldName))) {
+      setFilterPresets(
+        presets.map((p) =>
+          p.activeSources.includes(oldName)
+            ? { ...p, activeSources: p.activeSources.map((n) => (n === oldName ? newName : n)) }
+            : p,
+        ),
+      )
+    }
+  }, [setActiveSources, setFilterPresets])
+
+  // --- Feed editor (Settings › Feeds) ---------------------------------
+  // The phone shows a column; a category save may move it (see the
+  // follow effect above).
+  const columnsRef = useRef(columns)
+  columnsRef.current = columns
+  const mobileColRef = useRef(mobileCol)
+  mobileColRef.current = mobileCol
+
+  // A row the server returned for a save. The PATCH response carries
+  // no vote score, so the shown one is kept.
+  const applyServerSource = useCallback((row: Source) => {
+    const before = sourcesRef.current.find((s) => s.id === row.id)
+    if (before && before.category !== row.category && mobileColRef.current >= 0) {
+      followTabRef.current = columnsRef.current[mobileColRef.current]?.name ?? null
+    }
+    sourceChangesRef.current.written.set(row.id, Date.now())
+    setSources((prev) => prev.map((s) => (s.id === row.id ? { ...row, net_vote_score: s.net_vote_score } : s)))
+  }, [])
+
+  // A feed added in Settings shows at once, before the next poll.
+  const insertSource = useCallback((row: Source) => {
+    sourceChangesRef.current.inserted.set(row.id, Date.now())
+    setSources((prev) =>
+      prev.some((s) => s.id === row.id)
+        ? prev.map((s) => (s.id === row.id ? row : s))
+        : insertSorted(prev, row),
+    )
+  }, [])
+
+  // A feed deleted (here, or found deleted by a save): its row, its
+  // stories (or they'd fall into an "Other" column) and its name in the
+  // filter and saved views all go.
+  const removeSource = useCallback((id: number) => {
+    const gone = sourcesRef.current.find((s) => s.id === id)
+    sourceChangesRef.current.deleted.set(id, Date.now())
+    dropSource(id)
+    setSources((prev) => prev.filter((s) => s.id !== id))
+    setEntries((prev) => prev.filter((e) => e.source_id !== id))
+    setForYou((prev) => prev.filter((e) => e.source_id !== id))
+    if (gone) {
+      setActiveSources((prev) => {
+        if (!prev.has(gone.name)) return prev
+        const next = new Set(prev)
+        next.delete(gone.name)
+        return next
+      })
+      const presets = filterPresetsRef.current
+      if (presets.some((p) => p.activeSources.includes(gone.name))) {
+        setFilterPresets(
+          presets.map((p) =>
+            p.activeSources.includes(gone.name)
+              ? { ...p, activeSources: p.activeSources.filter((n) => n !== gone.name) }
+              : p,
+          ),
+        )
+      }
+    }
+    void refreshRef.current({ silent: true })
+  }, [setActiveSources, setFilterPresets])
+
+  // The latest handlers for the store, which is configured once.
+  const storeHandlersRef = useRef({ applyServerSource, onSourceRenamed, removeSource, openSettings })
+  storeHandlersRef.current = { applyServerSource, onSourceRenamed, removeSource, openSettings }
+
+  useEffect(() => {
+    // One quiet refresh 15 s after an address or headers save on an
+    // active feed, so "Last problem" shows how the fetch that the save
+    // started went. One timer per feed.
+    const followUps = new Map<number, ReturnType<typeof setTimeout>>()
+    configureSourceSaves({
+      patch: async (id, body, opts) => {
+        const row = await api.updateSource(id, body, opts)
+        if (row.active && ('url' in body || 'custom_headers' in body)) {
+          clearTimeout(followUps.get(id))
+          followUps.set(
+            id,
+            setTimeout(() => {
+              followUps.delete(id)
+              void refreshRef.current({ silent: true })
+            }, 15_000),
+          )
+        }
+        return row
+      },
+      getSource: (id) => sourcesRef.current.find((s) => s.id === id),
+      onServerRow: (row) => storeHandlersRef.current.applyServerSource(row as Source),
+      onRenamed: (oldName, newName) => storeHandlersRef.current.onSourceRenamed(oldName, newName),
+      onGone: (id) => storeHandlersRef.current.removeSource(id),
+      onFailedAway: (id, failures) => {
+        const name = sourcesRef.current.find((s) => s.id === id)?.name
+        if (!name || failures.length === 0) return
+        const message =
+          failures.length === 1
+            ? `Couldn't save the ${failures[0].label} for ${sourceLabel(name)}: ${failures[0].message}`
+            : `Couldn't save ${failures.length} changes for ${sourceLabel(name)}`
+        toast(message, {
+          kind: 'error',
+          action: { label: 'Open', onClick: () => storeHandlersRef.current.openSettings('feeds', id) },
+        })
+      },
+      describe: (err, field, value) => ({
+        message: fieldSaveMessage(err, field, value, sourceLabel),
+        retryable: isRetryable(err),
+      }),
+      equal: (field, a, b) =>
+        field === 'custom_headers'
+          ? sameHeaders(a as HeaderMap | null | undefined, b as HeaderMap | null | undefined)
+          : a === b || (a == null && b == null),
+    })
+    // Leaving the app (another app, the home screen, a closed tab)
+    // sends everything queued at once with keepalive, so a save isn't
+    // lost while iOS suspends the page. Always on, for saves still
+    // under way after Settings closed. Settings adds committing what
+    // is being typed.
+    const onVisibility = () => setPageHiding(document.visibilityState === 'hidden')
+    const onPageHide = () => setPageHiding(true)
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', onPageHide)
+    // Back from the back-forward cache.
+    window.addEventListener('pageshow', onVisibility)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', onPageHide)
+      window.removeEventListener('pageshow', onVisibility)
+      followUps.forEach((t) => clearTimeout(t))
+    }
+  }, [])
+
+  // Tapping a card's source name opens that feed's editor. Stable, as
+  // Card and Column's memos ignore callbacks.
+  const onSourceTap = useCallback((id: number) => openSettings('feeds', id), [openSettings])
+  const onEditSource = useCallback((id: number) => openSettings('feeds', id), [openSettings])
   // Same as ``toggleSource`` but also closes the drawer the first time
   // the user adds a source to an empty filter. The "empty → first tap"
   // transition is the confusing one — the user picked a source, the
@@ -2066,7 +2295,7 @@ export function App() {
       setSearchOpen(false)
       setSelectedColumnIndex(idx)
       setSelectedCardId(null)
-      setMobileCol(idx)
+      selectMobileCol(idx)
       requestAnimationFrame(() => {
         document
           .querySelector<HTMLElement>('[role="tablist"][aria-label="dashboard sections"] [aria-selected="true"]')
@@ -2077,7 +2306,7 @@ export function App() {
         ;(el?.firstElementChild as HTMLElement | null)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
       })
     }
-  }, [columns, setSelectedColumnIndex, setSelectedCardId, columnRefs])
+  }, [columns, setSelectedColumnIndex, setSelectedCardId, columnRefs, selectMobileCol])
 
   const setPrefsFor = useCallback((columnName: string, prefs: ColumnPrefs) => {
     setColumnPrefs(columnName, prefs as ColumnPrefsValue)
@@ -2606,6 +2835,7 @@ export function App() {
                       starred={starredSet.has(e.id)}
                       onVote={(dir) => setEntryVote(e.id, dir)}
                       vote={votedMap.get(e.id) ?? null}
+                      onSourceTap={onSourceTap}
                     />
                   )
                 })}
@@ -2624,7 +2854,8 @@ export function App() {
                     sourcesById={sourcesById}
                     sourcesByName={sourcesByName}
                     newCount={newCountByColumn.get(col.name)}
-                    onRefresh={refresh}
+                    onRefresh={manualRefresh}
+                    onSourceTap={onSourceTap}
                     selectedId={ci === selectedColumnIndex ? selectedCardId ?? undefined : undefined}
                     cardRefs={cardRefs}
                     onMarkRead={() => markColumnRead(col.name)}
@@ -2697,7 +2928,7 @@ export function App() {
                 type="button"
                 role="tab"
                 aria-selected={mobileCol === -1}
-                onClick={() => setMobileCol(-1)}
+                onClick={() => selectMobileCol(-1)}
                 className={`shrink-0 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
                   mobileCol === -1
                     ? 'bg-accent text-white'
@@ -2719,7 +2950,7 @@ export function App() {
                     key={c.name}
                     role="tab"
                     aria-selected={i === mobileCol}
-                    onClick={() => setMobileCol(i)}
+                    onClick={() => selectMobileCol(i)}
                     className={`shrink-0 flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
                       i === mobileCol
                         ? 'bg-accent text-white'
@@ -2760,7 +2991,8 @@ export function App() {
                   sourcesById={sourcesById}
                   sourcesByName={sourcesByName}
                   newCount={newCountByColumn.get(columns[mobileCol]?.name ?? '')}
-                  onRefresh={refresh}
+                  onRefresh={manualRefresh}
+                  onSourceTap={onSourceTap}
                   selectedId={
                     mobileCol === selectedColumnIndex ? selectedCardId ?? undefined : undefined
                   }
@@ -2859,7 +3091,6 @@ export function App() {
         tab={settingsTab}
         sources={sources}
         onRefreshSources={() => refresh({ silent: true })}
-        onError={setError}
         onClose={closeSettings}
         focusSourceId={settingsSourceId}
         focusNonce={settingsFocusNonce}
@@ -2867,7 +3098,9 @@ export function App() {
         onBriefToneChange={setBriefTone}
         triggerGenerate={triggerBriefGenerate}
         generating={generatingBrief}
-        onSourceRenamed={onSourceRenamed}
+        onSourceAdded={insertSource}
+        onSourceDeleted={removeSource}
+        onEditSource={onEditSource}
         onResetLocalState={resetLocalState}
         hiddenEntries={hiddenEntries}
         onRestoreHidden={(entryId) => {

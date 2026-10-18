@@ -69,6 +69,9 @@ type Props = {
   // prop). The chip stops click propagation so the header's
   // mark-read handler doesn't also fire.
   onRefresh?: () => void
+  // A card's source name was tapped: open that feed's editor. Must be
+  // stable (the memo comparator ignores callbacks).
+  onSourceTap?: (sourceId: number) => void
   // Per-card mark-read. App flips the entry's read state via this —
   // see ``markEntryRead`` in App.tsx. The Column just forwards the
   // clicked entry id up so the keyboard ``m`` shortcut and the
@@ -178,6 +181,7 @@ export function ColumnInner({
   cardRefs,
   onMarkRead,
   onRefresh,
+  onSourceTap,
   onMarkEntryRead,
   prefs,
   onPrefsChange,
@@ -550,6 +554,7 @@ export function ColumnInner({
                 starredSet={starredSet}
                 onVoteEntry={onVoteEntry}
                 votedMap={votedMap}
+                onSourceTap={onSourceTap}
               />
             )}
 
@@ -604,6 +609,7 @@ export function ColumnInner({
                 starredSet={starredSet}
                 onVoteEntry={onVoteEntry}
                 votedMap={votedMap}
+                onSourceTap={onSourceTap}
               />
             )}
           </>
@@ -648,6 +654,7 @@ type SectionProps = {
   starredSet: Set<number> | undefined
   onVoteEntry: ((entryId: number, direction: 'up' | 'down' | null) => void) | undefined
   votedMap: Map<number, 'up' | 'down'> | undefined
+  onSourceTap: ((sourceId: number) => void) | undefined
 }
 
 function ColumnSection({
@@ -674,6 +681,7 @@ function ColumnSection({
   starredSet,
   onVoteEntry,
   votedMap,
+  onSourceTap,
 }: SectionProps) {
   return (
     <div>
@@ -740,6 +748,7 @@ function ColumnSection({
                 starred={starredSet?.has(e.id) ?? false}
                 onVote={onVoteEntry ? (dir) => onVoteEntry(e.id, dir) : undefined}
                 vote={votedMap?.get(e.id) ?? null}
+                onSourceTap={onSourceTap}
               />
             )
           })}

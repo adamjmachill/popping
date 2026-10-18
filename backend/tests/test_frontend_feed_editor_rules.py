@@ -73,3 +73,15 @@ def test_category_limits_match():
     src = _ts("categories.ts")
     assert _number(src, "CATEGORY_MAX") == routes._CATEGORY_MAX
     assert set(_string_list(src, "RESERVED_CATEGORIES")) == routes._RESERVED_CATEGORY_NAMES
+
+
+# The old inline edit form (a datalist for the category, which iOS
+# Safari never shows, and a JSON textarea for headers) was replaced by
+# the feed editor in components/feeds. Keep it from coming back.
+FEED_MANAGER = REPO / "frontend/src/components/FeedManager.tsx"
+
+
+@pytest.mark.no_db
+@pytest.mark.parametrize("text", ["<datalist", "custom headers (JSON)", "JSON.parse(editHeaders"])
+def test_old_edit_form_is_gone(text):
+    assert text not in FEED_MANAGER.read_text()

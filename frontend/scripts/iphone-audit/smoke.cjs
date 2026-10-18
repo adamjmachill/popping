@@ -78,6 +78,9 @@ const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]',
 //   checks   false to skip the layout rules (behaviour flows)
 //   run      async ({ page, context, width, fail, settle }) assertions after
 //            the checks; call fail(rule, detail) for each problem
+//   expectedFailedLoads  pathnames whose failed requests the state causes
+//            on purpose (a refused or dropped save); the browser's
+//            "Failed to load resource" line for them is not C8
 // ---------------------------------------------------------------------------
 const MOBILE_MAIN = 'main.md\\:hidden'
 const PHONE_CARD = `${MOBILE_MAIN} article[data-card-id]`
@@ -108,6 +111,21 @@ async function openFeedTab(page, index) {
   await waitForSettingsTab(page)
   await page.locator(`${FEED_TABS} [role="tab"]`).nth(index).click()
 }
+
+// A feed's editor, opened through its ?source= link (PR6).
+async function waitForEditor(page, id) {
+  await waitForSettingsTab(page)
+  await page.locator(`#feed-${id} button[aria-expanded="true"]`).waitFor({ state: 'visible' })
+}
+const editorState = (suffix, id, fields = {}) => ({
+  name: `settings-editor-${suffix}`,
+  url: `/?view=settings&tab=feeds&source=${id}`,
+  ...fields,
+  setup: async (ctx) => {
+    await waitForEditor(ctx.page, id)
+    if (fields.setup) await fields.setup(ctx)
+  },
+})
 
 const settingsState = (tab, name = `settings-${tab}`) => ({
   name,
@@ -254,6 +272,43 @@ const STATES = [
       await page.locator(`${SETTINGS} button[aria-label^="add "]`).first().waitFor({ state: 'visible' })
     },
   },
+  // PR6: the feed editor. A custom feed with a long name and headers, a
+  // built-in, one stopped after failures, a website feed with its
+  // sitemap fields, a blocked one with its Last problem box, and one with
+  // a stored header the rules now refuse.
+  editorState('custom', 3),
+  editorState('builtin', 1),
+  editorState('stopped', 12),
+  editorState('website', 15),
+  editorState('blocked', 4),
+  editorState('legacy-header', 17),
+  editorState('newcat', 11, {
+    // New-category mode with a 45-character name (over the limit).
+    setup: async ({ page }) => {
+      await page.locator('#feed-11').getByRole('button', { name: 'New category', exact: true }).click()
+      await page.fill('#fe-category-11', 'Regional ice hockey leagues and junior scores')
+      await page.locator('#feed-11').getByText('Keep it to 40 characters or fewer.').waitFor({ state: 'visible' })
+      await page.locator('#fe-category-11').scrollIntoViewIfNeeded()
+    },
+  }),
+  editorState('error', 6, {
+    // A refused address: the long value stays and the reason shows with Undo.
+    expectedFailedLoads: ['/api/sources/6'],
+    before: async ({ page }) => {
+      await page.route((u) => new URL(u).pathname === '/api/sources/6', (route) =>
+        route.request().method() === 'PATCH'
+          ? route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ detail: 'url host is not reachable from this server' }) })
+          : route.fallback(),
+      )
+    },
+    setup: async ({ page }) => {
+      const addr = page.locator('#feed-6').getByLabel('Address', { exact: true })
+      await addr.fill('https://intranet.example.internal/feeds/very-long-path/that-keeps-going/and-going/rss.xml?token=abcdef')
+      await addr.press('Enter')
+      await page.locator('#feed-6').getByText("That address isn't reachable from Popping.").waitFor({ state: 'visible' })
+      await addr.scrollIntoViewIfNeeded()
+    },
+  }),
   settingsState('llm'), // "AI"
   settingsState('notifications'),
   settingsState('history'),
@@ -837,6 +892,7 @@ async function runState(browser, state, width, opts) {
         return
       }
       if (pathname === '/auth/me') return // the expected 404 when OIDC is off
+      if ((state.expectedFailedLoads || []).includes(pathname) && /^Failed to load resource/.test(text)) return
       push('C8', { path: loc.url || '(console)', detail: `console.error: ${text.slice(0, 400)}` })
     })
     page.on('dialog', (d) => {
