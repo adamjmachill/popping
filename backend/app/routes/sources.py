@@ -22,7 +22,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.apple_podcasts import PodcastResolutionError, resolve_feed_url
-from app.youtube import YouTubeResolutionError, resolve_channel_feed_url
+from app.youtube import (
+    YouTubeResolutionError,
+    is_youtube_url,
+    normalize_youtube_input,
+    resolve_channel_feed_url,
+    youtube_source_slug,
+)
 from app.auth.deps import current_user, require_user
 from app.config import settings
 from app.db import SessionLocal, get_session
@@ -108,7 +114,9 @@ async def _run_auto_discovery(category: str, context: str, discovered_from_sourc
 # and underscore only, 1-120 chars. Matches the existing built-in
 # plugin names ("bbc_news", "hn_top", etc.) so the UI doesn't render
 # a row whose name has a different shape than the rest.
-_NAME_RE = re.compile(r"^[a-z0-9_]{1,120}$")
+# Used with ``fullmatch``: ``^...$`` with ``match`` accepted a trailing
+# newline ("abc\n"), which could then reach a job id or a log line.
+_NAME_RE = re.compile(r"[a-z0-9_]{1,120}")
 
 # Refresh intervals are clamped so a typo can't accidentally turn a
 # feed into "refresh every 1 second" (DB spam, rate-limit hits). 60s
@@ -158,7 +166,10 @@ _CATEGORY_MAX = 40
 # with one of these names would silently collide with — and
 # overwrite — the real Saved/For You column. Case-insensitive
 # because a differently-cased duplicate ("saved") is just as
-# confusing even though it wouldn't literally collide.
+# confusing even though it wouldn't literally collide. Underscores,
+# dashes and runs of spaces count as one space too, because the
+# frontend's label turns "for_you" into "For You" (see
+# ``_category_fold``).
 _RESERVED_CATEGORY_NAMES = {"saved", "for you"}
 
 # Headers we refuse to let users override via ``custom_headers``.
@@ -174,6 +185,11 @@ _HEADER_DENYLIST = frozenset({"cookie", "authorization", "host"})
 # are reverse-proxy conventions. None of these are useful for
 # bypassing CDN UA blocks (the legitimate use case for the override
 # map) and they all change the trust surface.
+#
+# The second group is message framing and hop-by-hop headers. A
+# user-set Content-Length or Transfer-Encoding on a GET can make the
+# HTTP client fail or mis-frame the request, and Proxy-* names would
+# reach the optional egress guard-proxy for plain-http feeds.
 _HEADER_DENYLIST_EXTRA = frozenset(
     {
         "x-forwarded-for",
@@ -182,6 +198,16 @@ _HEADER_DENYLIST_EXTRA = frozenset(
         "x-real-ip",
         "x-original-url",
         "x-rewrite-url",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "keep-alive",
+        "te",
+        "trailer",
+        "upgrade",
+        "expect",
+        "proxy-authorization",
+        "proxy-connection",
     }
 )
 _HEADER_DENYLIST_ALL = _HEADER_DENYLIST | _HEADER_DENYLIST_EXTRA
@@ -191,6 +217,21 @@ _HEADER_DENYLIST_ALL = _HEADER_DENYLIST | _HEADER_DENYLIST_EXTRA
 # abuse (a multi-MB blob in the DB).
 _CUSTOM_HEADERS_MAX = 20
 _HEADER_VALUE_MAX = 512
+_HEADER_NAME_MAX = 100
+
+# Header names must be RFC 7230 tokens. Checked before the deny list,
+# so "Coo kie" is refused as an invalid name, not a denied one.
+_HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")
+
+# Stored in their usual spelling. The fetchers merge custom headers
+# into their defaults with a case-sensitive dict (sources/rss.py and
+# article_extract.py), so a lower-case "user-agent" would otherwise
+# send two User-Agent headers.
+_CANONICAL_HEADER_NAMES = {
+    "user-agent": "User-Agent",
+    "accept": "Accept",
+    "accept-language": "Accept-Language",
+}
 
 # Characters disallowed in header VALUES. httpx / urllib will pass
 # arbitrary bytes through; if a value contains ``\r\n`` the upstream
@@ -210,7 +251,7 @@ _BAD_HEADER_VALUE_RE = _re.compile(r"[^\t\x20-\x7e]")
 
 
 def _validate_name(name: str) -> None:
-    if not _NAME_RE.match(name):
+    if not _NAME_RE.fullmatch(name):
         raise HTTPException(
             status_code=422,
             detail="name must match ^[a-z0-9_]{1,120}$ (lowercase letters, digits, underscore)",
@@ -284,7 +325,17 @@ def _validate_refresh(value: int) -> int:
     return value
 
 
-def _validate_category(value: str) -> None:
+def _category_fold(value: str) -> str:
+    """Lower-case, and treat runs of underscores, dashes and spaces as
+    one space. Same rule as ``fold`` in the frontend's categories lib,
+    so the phone refuses exactly what the server refuses."""
+    return re.sub(r"[_\s-]+", " ", value.lower()).strip()
+
+
+def _validate_category(value: str) -> str:
+    """Return the stripped category, or raise 422. Callers store the
+    returned value, so " Tech " is saved as "Tech". No lower-casing:
+    entries are grouped by the raw string."""
     stripped = value.strip()
     if not stripped:
         raise HTTPException(status_code=422, detail="category cannot be empty")
@@ -296,11 +347,12 @@ def _validate_category(value: str) -> None:
             status_code=422,
             detail=f"category must be {_CATEGORY_MAX} characters or fewer",
         )
-    if stripped.lower() in _RESERVED_CATEGORY_NAMES:
+    if _category_fold(stripped) in _RESERVED_CATEGORY_NAMES:
         raise HTTPException(
             status_code=422,
             detail=f"category {stripped!r} is reserved for a built-in column",
         )
+    return stripped
 
 
 def _validate_custom_headers(value: dict | None) -> dict | None:
@@ -321,12 +373,30 @@ def _validate_custom_headers(value: dict | None) -> dict | None:
             detail=f"custom_headers may have at most {_CUSTOM_HEADERS_MAX} entries",
         )
     out: dict[str, str] = {}
+    seen: set[str] = set()
     for k, v in value.items():
         if not isinstance(k, str) or not isinstance(v, str):
             raise HTTPException(
                 status_code=422,
                 detail="custom_headers keys and values must be strings",
             )
+        if not _HEADER_NAME_RE.fullmatch(k):
+            raise HTTPException(
+                status_code=422,
+                detail=f"header name {k!r} is not a valid HTTP header name",
+            )
+        if len(k) > _HEADER_NAME_MAX:
+            raise HTTPException(
+                status_code=422,
+                detail=f"header name {k!r} is longer than {_HEADER_NAME_MAX} characters",
+            )
+        k = _CANONICAL_HEADER_NAMES.get(k.lower(), k)
+        if k.lower() in seen:
+            raise HTTPException(
+                status_code=422,
+                detail=f"header {k!r} is listed twice",
+            )
+        seen.add(k.lower())
         if k.lower() in _HEADER_DENYLIST_ALL:
             raise HTTPException(
                 status_code=422,
@@ -442,11 +512,14 @@ async def create_source_endpoint(
         body.url = await resolve_feed_url(body.url)
     except PodcastResolutionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    # Same idea for any shape of YouTube link (channel, handle,
-    # custom, or video URL) — resolve to the channel's video RSS feed.
-    # No-op for anything that isn't a YouTube host.
+    # Same idea for any shape of YouTube link (channel, handle, video,
+    # playlist, feed link or bare channel id) — resolve to the feed.
+    # No-op for anything that isn't YouTube. A bare @handle only counts
+    # when the user picked the YouTube type.
     try:
-        body.url = await resolve_channel_feed_url(body.url)
+        body.url = await resolve_channel_feed_url(
+            body.url, allow_bare_handle=(body.type == "youtube_channel")
+        )
     except YouTubeResolutionError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     # Type-aware URL validation. Reddit rows accept a subreddit
@@ -466,7 +539,16 @@ async def create_source_endpoint(
                 "'youtube_channel', and 'generic_scrape' are accepted in this build)"
             ),
         )
-    _validate_category(body.category)
+    category = _validate_category(body.category)
+    # Following the same YouTube feed twice would make two sources
+    # with the same videos. Say which one already has it.
+    if is_youtube_url(url) and "/feeds/videos.xml" in url:
+        existing = await session.scalar(select(Source).where(Source.url == url))
+        if existing is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=f"You already follow this channel as {existing.name}.",
+            )
     # ``refresh_interval_seconds`` is optional in the schema; default
     # to a per-type sensible value when absent. Reddit moves faster
     # than news RSS so 15 min vs 1h is the right baseline; podcasts
@@ -515,7 +597,7 @@ async def create_source_endpoint(
         session,
         name=body.name,
         type_=body.type,
-        category=body.category,
+        category=category,
         url=url,
         refresh=refresh,
         sitemap_url=sitemap_url_value,
@@ -603,9 +685,38 @@ async def source_auto_endpoint(
     nothing else to name it from at this point) and de-duplicated
     against existing rows — see ``_free_source_name``. The user can
     rename it afterward from the My feeds tab like any other source.
+
+    Any YouTube link, bare channel id or bare @handle takes its own
+    branch first: it resolves to the YouTube feed and creates a
+    ``youtube_channel`` source (no discovery task). When a source
+    already follows that feed, it is returned and nothing is created.
     """
+    youtube_input = normalize_youtube_input(body.url, allow_bare_handle=True)
+    if is_youtube_url(youtube_input):
+        category = _validate_category(body.category)
+        try:
+            yt_feed = await resolve_channel_feed_url(youtube_input, allow_bare_handle=True)
+        except YouTubeResolutionError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        _validate_url(yt_feed)
+        existing = await session.scalar(select(Source).where(Source.url == yt_feed))
+        if existing is not None:
+            return SourceAutoResult(
+                found=True, kind="youtube_channel", source=SourceOut.model_validate(existing)
+            )
+        name = await _free_source_name(session, youtube_source_slug(youtube_input, yt_feed))
+        row = await scheduler.add_source(
+            session,
+            name=name,
+            type_="youtube_channel",
+            category=category,
+            url=yt_feed,
+            refresh=_YOUTUBE_DEFAULT_REFRESH,
+        )
+        return SourceAutoResult(found=True, kind="youtube_channel", source=SourceOut.model_validate(row))
+
     _validate_url(body.url)
-    _validate_category(body.category)
+    category = _validate_category(body.category)
 
     feed_url = await discover_feed_url(body.url)
     if feed_url:
@@ -614,7 +725,7 @@ async def source_auto_endpoint(
             session,
             name=name,
             type_="rss",
-            category=body.category,
+            category=category,
             url=feed_url,
             refresh=_REFRESH_MIN * 60,
         )
@@ -635,7 +746,7 @@ async def source_auto_endpoint(
             session,
             name=name,
             type_="generic_scrape",
-            category=body.category,
+            category=category,
             url=body.url,
             refresh=_GENERIC_SCRAPE_DEFAULT_REFRESH,
         )
@@ -683,6 +794,18 @@ async def update_source_endpoint(
                 status_code=400,
                 detail=f"name {body.name!r} is reserved for a built-in source",
             )
+    # Built-in rows can be paused / re-categorized (these are
+    # row-level state, not class-level). Renaming or re-URLing a
+    # built-in is not allowed — the registry key is fixed, and the
+    # URL is bound to the plugin class's fetch logic. Checked before
+    # any URL resolution so a refused PATCH costs no network call.
+    if pre.name in registered_plugin_names() and (
+        body.name is not None or body.url is not None
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"built-in source {pre.name!r} cannot be renamed or re-URLed",
+        )
     if body.url is not None:
         # Apple Podcasts catalog links aren't a feed — resolve to the
         # real RSS URL before validating. No-op for anything that
@@ -692,9 +815,12 @@ async def update_source_endpoint(
         except PodcastResolutionError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         # Same idea for any shape of YouTube link — no-op for
-        # anything that isn't a YouTube host.
+        # anything that isn't YouTube. A bare @handle only counts on a
+        # YouTube row.
         try:
-            body.url = await resolve_channel_feed_url(body.url)
+            body.url = await resolve_channel_feed_url(
+                body.url, allow_bare_handle=(pre.type == "youtube_channel")
+            )
         except YouTubeResolutionError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         # PATCH URL is also type-aware: re-validate as a subreddit
@@ -709,10 +835,9 @@ async def update_source_endpoint(
     # sources only. ``None`` means "clear back to homepage-based
     # discovery"; any string is validated as an http(s) URL. The
     # plugin only reads this on ``generic_scrape`` rows; setting it
-    # on other types is silently stored-but-ignored — same pattern
-    # as ``custom_headers`` (which is also stored-but-ignored for
-    # generic_scrape since that plugin doesn't make HTTP requests
-    # with headers).
+    # on other types is silently stored-but-ignored. (``custom_headers``
+    # is different: generic_scrape does send them, on its article page
+    # fetches.)
     # ``update_source`` uses the ``_UNSET`` sentinel to distinguish
     # "field missing from the request body, don't touch" from
     # "explicitly set to None, clear it". Default to ``_UNSET`` here
@@ -749,25 +874,13 @@ async def update_source_endpoint(
     if body.refresh_interval_seconds is not None:
         body.refresh_interval_seconds = _validate_refresh(body.refresh_interval_seconds)
     if body.category is not None:
-        _validate_category(body.category)
+        body.category = _validate_category(body.category)
     headers: dict | None = scheduler._UNSET
     if "custom_headers" in body.model_fields_set:
         headers = (
             _validate_custom_headers(body.custom_headers)
             if body.custom_headers is not None
             else None
-        )
-
-    # Built-in rows can be paused / re-categorized (these are
-    # row-level state, not class-level). Renaming or re-URLing a
-    # built-in is not allowed — the registry key is fixed, and the
-    # URL is bound to the plugin class's fetch logic.
-    if pre.name in registered_plugin_names() and (
-        body.name is not None or body.url is not None
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=f"built-in source {pre.name!r} cannot be renamed or re-URLed",
         )
 
     try:
@@ -881,20 +994,10 @@ async def _test_source_impl(
     # None). Every SourceTestResult returned past this point carries
     # ``resolved_url`` so the frontend can show / adopt the real URL
     # regardless of whether the rest of the test succeeds.
-    resolved_url: str | None = None
-    try:
-        new_url = await resolve_feed_url(body.url)
-        new_url = await resolve_channel_feed_url(new_url)
-    except (PodcastResolutionError, YouTubeResolutionError) as exc:
-        return SourceTestResult(ok=False, error_kind="invalid_url", error=str(exc))
-    if new_url != body.url:
-        resolved_url = new_url
-        body.url = new_url
-
     # Name is optional on Test, but if provided it must be valid AND
     # not collide with an existing source or built-in. We deliberately
-    # do this BEFORE the URL fetch so a name conflict doesn't waste
-    # an upstream roundtrip.
+    # do this BEFORE resolving the URL so a bad name costs no YouTube or
+    # Apple lookup and no upstream roundtrip.
     if body.name is not None and body.name.strip():
         try:
             _validate_name(body.name)
@@ -925,6 +1028,18 @@ async def _test_source_impl(
                 error=f"a source named {body.name!r} already exists",
             )
 
+    resolved_url: str | None = None
+    try:
+        new_url = await resolve_feed_url(body.url)
+        new_url = await resolve_channel_feed_url(
+            new_url, allow_bare_handle=(body.type == "youtube_channel")
+        )
+    except (PodcastResolutionError, YouTubeResolutionError) as exc:
+        return SourceTestResult(ok=False, error_kind="invalid_url", error=str(exc))
+    if new_url != body.url:
+        resolved_url = new_url
+        body.url = new_url
+
     # URL validation. Same path Add uses; on failure, surface the
     # validation error verbatim (e.g. "url must start with http(s)://")
     # so the user knows what to fix.
@@ -954,13 +1069,20 @@ async def _test_source_impl(
     # returns (bool, reason) rather than raising, so the result has
     # to be checked explicitly — report a rejection as invalid_url
     # so the user understands the URL was rejected, not the network.
+    # The reason names internal addresses, so it goes to the log only
+    # (url_safety.check_url_safe's contract), never to the user.
     safe, reason = check_url_safe(url)
     if not safe:
+        logger.info(
+            "sources/test: refused by the SSRF guard host=%s reason=%s",
+            urlparse(url).hostname,
+            reason,
+        )
         return SourceTestResult(
             resolved_url=resolved_url,
             ok=False,
             error_kind="invalid_url",
-            error=reason,
+            error="That address isn't reachable from Popping.",
         )
 
     # Validate custom_headers the same way Add does, but only if
@@ -975,7 +1097,7 @@ async def _test_source_impl(
         return SourceTestResult(
             resolved_url=resolved_url,
             ok=False,
-            error_kind="unknown",
+            error_kind="invalid_headers",
             error=exc.detail if isinstance(exc.detail, str) else str(exc.detail),
         )
 
@@ -1140,8 +1262,7 @@ async def feed_recommendations_discover_endpoint(
     validation pipeline; ``added`` can legitimately be 0.
     """
     if body.category is not None:
-        _validate_category(body.category)
-        category = body.category.strip()
+        category = _validate_category(body.category)
     else:
         category = await top_category_for_user(
             session, aggregation_user_ids(user)
