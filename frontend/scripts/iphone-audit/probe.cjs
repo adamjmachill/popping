@@ -69,7 +69,9 @@ async function run(width, height, dpr) {
   })
 
   // 3. Settings -> feeds: tab strip, rows with chips, auto-feed row.
-  await page.locator('button[aria-label="open settings"]').click()
+  // Menu → Settings: the top bar's one button since PR5.
+  await page.locator('button[aria-label="open menu"]').click()
+  await page.locator('aside[aria-label="menu"]').getByRole('button', { name: /^Settings/ }).click()
   await page.waitForSelector('[role="tablist"][aria-label="feed manager tabs"]')
   await sleep(300)
   out.feeds = await page.evaluate(() => {

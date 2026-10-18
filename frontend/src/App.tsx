@@ -1,12 +1,13 @@
-// App: 3-4 column desktop grid, single-column mobile with swipe.
-// Top bar has the hamburger (opens Drawer), search input, and refresh.
-// When OIDC is enabled and the user isn't logged in, the dashboard
-// content is replaced with a LoginPage.
+// App: 3-4 column desktop grid; on phones one column at a time,
+// picked from a tab strip. The top bar has the title, search, refresh
+// (phones) and one Menu button (≡), which holds Settings, saved views,
+// Jump to column and the source filter. When OIDC is enabled and the
+// user isn't logged in, the dashboard is replaced with a LoginPage.
 //
 // Layered UX features (each documented at the call site):
-//   - Active source filter chips (multi-select via Drawer)
+//   - Active source filter chips (multi-select via the Menu)
 //   - Per-column sort/filter popover (the ⋯ button)
-//   - Per-column read/unread state in localStorage
+//   - Per-column read/unread state (server-backed preferences)
 //   - New-entry chip in column headers (union of refresh-delta +
 //     last-viewed-delta)
 //   - Search (debounced, replaces columns when query is set)
@@ -31,9 +32,10 @@ import { ToastHost, toast } from './components/Toast'
 import { UserBadge } from './components/UserBadge'
 import { Wallpaper } from './components/Wallpaper'
 import { SkeletonGrid } from './components/Skeleton'
-import { Settings, type SettingsTab } from './components/Settings'
+import { Settings } from './components/Settings'
+import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
 import { recordImmediate } from './lib/interactions'
-import { categoryLabel } from './lib/labels'
+import { categoryLabel, sourceLabel } from './lib/labels'
 // Per-user server-backed preferences. Replaces the 8 localStorage
 // keys the dashboard used to write (readEntries, lastViewed,
 // columnPrefs, columnSections, hiddenEntries, starredEntries,
@@ -383,11 +385,15 @@ export function App() {
   const [health, setHealth] = useState<Health | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
   // Settings overlay state. Driven by the URL so the back button
-  // and refresh both behave correctly. ``?view=settings`` opens it;
-  // ``?view=settings&tab=feeds|llm|notifications|history|hidden|starred|reset``
-  // picks the tab. ``null`` = closed.
+  // and a reload both behave: ``?view=settings`` opens it,
+  // ``&tab=<SETTINGS_TABS>`` picks the tab and ``&source=<id>`` opens
+  // that feed's row in Feeds.
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settingsTab, setSettingsTab] = useState<SettingsTab>('feeds')
+  const [settingsSourceId, setSettingsSourceId] = useState<number | null>(null)
+  // Bumped on every focus request, so asking for the same feed again
+  // while Settings is open still scrolls to it.
+  const [settingsFocusNonce, setSettingsFocusNonce] = useState(0)
 
   // Read the URL on every render. We listen for ``popstate`` and
   // our own custom events (the Settings tab buttons fire a popstate
@@ -399,28 +405,14 @@ export function App() {
       if (view === 'settings') {
         setSettingsOpen(true)
         const t = u.searchParams.get('tab')
-        // SettingsTab union: feeds | llm | notifications | hidden | reset.
-        // The Settings overlay renders a tab strip across the top;
-        // any value in the union is valid, anything else falls
-        // through to the default ``feeds`` tab. Keeping the
-        // explicit allow-list here (vs ``as SettingsTab``) makes
-        // the URL surface area narrow and avoids a typo'd
-        // ``?tab=feed`` (singular) silently rendering a blank
-        // overlay with no tab active.
-        if (
-          t === 'feeds' ||
-          t === 'llm' ||
-          t === 'notifications' ||
-          t === 'history' ||
-          t === 'hidden' ||
-          t === 'starred' ||
-          t === 'voted' ||
-          t === 'reset'
-        ) {
-          setSettingsTab(t)
-        }
+        // Only a known tab is taken, so a typo'd ``?tab=feed`` can't
+        // render an overlay with no tab active.
+        if (isSettingsTab(t)) setSettingsTab(t)
+        const source = u.searchParams.get('source')
+        setSettingsSourceId(source && /^\d+$/.test(source) ? Number(source) : null)
       } else {
         setSettingsOpen(false)
+        setSettingsSourceId(null)
       }
     }
     sync()
@@ -428,21 +420,42 @@ export function App() {
     return () => window.removeEventListener('popstate', sync)
   }, [])
 
-  const openSettings = (tab: SettingsTab = 'feeds') => {
+  // Opening pushes one history entry, marked ``popping: 'settings'``,
+  // so Back closes Settings. Opening again while it is open (a feed's
+  // › from the Menu, a toast's Open) replaces that entry, keeping its
+  // state: a Settings opened from a link has none, and Done must not
+  // step back out of the app from there.
+  const openSettings = useCallback((tab: SettingsTab = 'feeds', sourceId?: number) => {
     const u = new URL(window.location.href)
+    const reentry = u.searchParams.get('view') === 'settings'
     u.searchParams.set('view', 'settings')
     u.searchParams.set('tab', tab)
-    window.history.pushState(null, '', u.toString())
+    if (sourceId != null) u.searchParams.set('source', String(sourceId))
+    else u.searchParams.delete('source')
+    if (reentry) window.history.replaceState(window.history.state, '', u.toString())
+    else window.history.pushState({ popping: 'settings' }, '', u.toString())
     setSettingsTab(tab)
+    setSettingsSourceId(sourceId ?? null)
+    setSettingsFocusNonce((n) => n + 1)
     setSettingsOpen(true)
-  }
-  const closeSettings = () => {
+  }, [])
+  // Closes at once, then tidies the URL: back over our own entry
+  // (popstate's sync agrees it is closed), or, for a Settings opened
+  // from a link, a replace. Done, Esc and the backdrop never add a
+  // history entry, so one Back after Done doesn't reopen Settings.
+  const closeSettings = useCallback(() => {
+    setSettingsOpen(false)
+    setSettingsSourceId(null)
+    if (window.history.state?.popping === 'settings') {
+      window.history.back()
+      return
+    }
     const u = new URL(window.location.href)
     u.searchParams.delete('view')
     u.searchParams.delete('tab')
-    window.history.pushState(null, '', u.toString())
-    setSettingsOpen(false)
-  }
+    u.searchParams.delete('source')
+    window.history.replaceState(null, '', u.toString())
+  }, [])
   const [mobileCol, setMobileCol] = useState<number>(loadMobileCol)
   const [error, setError] = useState<string | null>(null)
   const [user, setUser] = useState<CurrentUser | null>(null)
@@ -1788,6 +1801,12 @@ export function App() {
         return
       }
 
+      if (e.key === ',' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        e.preventDefault()
+        openSettings('feeds')
+        return
+      }
+
       if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // ``?`` is Shift+/ on US layouts — key value is the literal
         // ``?`` character regardless. Guard modifiers so it doesn't
@@ -1920,6 +1939,7 @@ export function App() {
     hiddenSet,
     starredSet,
     toggleStarEntry,
+    openSettings,
   ])
 
   // Scroll the keyboard-selected card into view.
@@ -2035,13 +2055,27 @@ export function App() {
     setActiveSources(new Set())
   }, [setActiveSources])
 
+  // The Menu's Jump to column. Clears a search first (results replace
+  // the columns), then selects the column on both layouts: the phone's
+  // tab (scrolled into the strip's view) and the desktop grid's column.
   const jumpToCategory = useCallback((category: string) => {
     const idx = columns.findIndex((c) => c.name === category)
     if (idx >= 0) {
+      setSearchInput('')
+      setSearchQuery('')
+      setSearchOpen(false)
       setSelectedColumnIndex(idx)
       setSelectedCardId(null)
-      const el = columnRefs.current.get(category)
-      if (el) el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      setMobileCol(idx)
+      requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>('[role="tablist"][aria-label="dashboard sections"] [aria-selected="true"]')
+          ?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+        // The column ref is a ``display: contents`` wrapper, which has
+        // no box to scroll to; its first child does.
+        const el = columnRefs.current.get(category)
+        ;(el?.firstElementChild as HTMLElement | null)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      })
     }
   }, [columns, setSelectedColumnIndex, setSelectedCardId, columnRefs])
 
@@ -2211,26 +2245,21 @@ export function App() {
       className="h-full flex flex-col isolate"
     >
       <Wallpaper />
-      {/* Large-title navigation bar. Mirrors Apple Mail / Music:
-          the title is large (34pt, iOS ``largeTitle`` weight) when the
-          bar is at the top of the scroll, and the row beneath it
-          carries the action buttons (hamburger, search, refresh,
-          brief). A hairline divider sits at the bottom — the entire
-          UI leans on these 1px ``rgba(255,255,255,0.08)`` lines as
-          the only border treatment. ``z-20`` keeps the bar above
-          column content but below the Drawer (z-30+). */}
+      {/* Large-title navigation bar, like Apple Mail and Music: a
+          34pt title on the left, then search, refresh (phones) and the
+          Menu button on the right. On ``sm+`` a second row carries the
+          health line, Refresh and Brief. A hairline divider sits at the
+          bottom — the UI leans on these 1px ``rgba(255,255,255,0.08)``
+          lines as its only border. Stacking: header z-20 < Menu z-30/40
+          < Settings z-50 < toasts z-[60]. */}
       <header className="sticky top-0 z-20 pt-[env(safe-area-inset-top)] bg-bg-app/85 supports-[backdrop-filter]:backdrop-blur-xl border-b border-hairline">
-        {/* Title row. The hamburger sits on the trailing edge of the
-            row (right-aligned) rather than the leading edge — this
-            matches iOS where leading space is reserved for the title
-            and the trailing chrome owns the actions. The large title
-            is left-aligned at full width on its own row so it lands
-            with the iOS-weight feel. On ``sm+`` the row also includes
-            the search affordance and trailing health/brief buttons;
-            on mobile the trailing controls are stripped (the icons
-            only would crowd the small viewport). */}
+        {/* Title row. The title never truncates: with one Menu button
+            the row has room for "Popping" at 320 and at 312 (Page Zoom),
+            and below 360px it drops to 28px for margin (smoke rule C16).
+            While search is open on a phone the field takes the row and
+            the title steps aside. */}
         <div className="flex items-end justify-between px-4 pt-3 pb-2 sm:pt-4 sm:pb-3">
-          <h1 className={`text-ios-large-title text-label-primary truncate ${searchOpen ? 'hidden sm:block' : ''}`}>
+          <h1 className={`shrink-0 whitespace-nowrap text-ios-large-title max-[359px]:text-[28px] max-[359px]:leading-[34px] text-label-primary ${searchOpen ? 'hidden sm:block' : ''}`}>
             Popping
           </h1>
           <div className={`flex items-center gap-1 sm:gap-2 pb-1 ${searchOpen ? 'flex-1 min-w-0 justify-end sm:flex-none' : ''}`}>
@@ -2321,42 +2350,9 @@ export function App() {
               <RefreshIcon className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
             </button>
             )}
-
-{/* Settings gear. Opens the Settings overlay (a
-            full-page sheet with tabs for feeds / LLM /
-            notifications / reset). Lives to the LEFT of the
-            hamburger so the hamburger keeps its right-edge
-            position; the two together read as "more menu
-            options → main menu." */}
-          <button
-            type="button"
-            onClick={() => openSettings('feeds')}
-            aria-label="open settings"
-              data-settings-gear
-              className="w-11 h-11 flex items-center justify-center rounded-full text-label-primary active:bg-bg-elevated"
-            >
-              {/* A toothed gear (Feather "settings", MIT). The previous
-                  circle-with-rays glyph read as a sun / brightness
-                  control rather than Settings. */}
-              <svg
-                width="22"
-                height="22"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth={1.6}
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
-              </svg>
-            </button>
-            {/* Hamburger lives next to the search/refresh affordances
-                — each is a 44×44 tappable target that matches iOS
-                nav-bar icon-button conventions. */}
-            <Hamburger onClick={() => setDrawerOpen(true)} />
+            {/* The one Menu button (≡): Settings, saved views, Jump to
+                column and the source filter all live behind it. */}
+            <Hamburger open={drawerOpen} onClick={() => setDrawerOpen(true)} />
           </div>
         </div>
         {/* Sub-row: health status + Refresh + Brief. Hidden on mobile
@@ -2406,9 +2402,9 @@ export function App() {
               key={src}
               onClick={() => toggleSource(src)}
               className="shrink-0 rounded-full bg-accent-soft px-2.5 py-0.5 text-accent text-ios-caption motion-safe:animate-fade-in"
-              aria-label={`remove ${src} from filter`}
+              aria-label={`remove ${sourceLabel(src)} from filter`}
             >
-              {src} ✕
+              {sourceLabel(src)} ✕
             </button>
           ))}
           <button
@@ -2834,8 +2830,8 @@ export function App() {
         onSourceToggle={toggleSourceAndMaybeClose}
         onClearAllFilters={clearSourceFilters}
         onCategoryJump={jumpToCategory}
-        onResetLocalState={resetLocalState}
         onOpenSettings={(tab) => openSettings(tab ?? 'feeds')}
+        onEditSource={(id) => openSettings('feeds', id)}
         onSavePreset={() => {
           // Use a native prompt for the preset name.
           // Simple, no extra state, no overlay. A
@@ -2865,6 +2861,8 @@ export function App() {
         onRefreshSources={() => refresh({ silent: true })}
         onError={setError}
         onClose={closeSettings}
+        focusSourceId={settingsSourceId}
+        focusNonce={settingsFocusNonce}
         briefTone={briefTone}
         onBriefToneChange={setBriefTone}
         triggerGenerate={triggerBriefGenerate}

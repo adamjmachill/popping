@@ -511,7 +511,9 @@ async function main() {
     await sleep(400)
 
     // ---- (4) settings / feeds ----
-    await page.locator('button[aria-label="open settings"]').click()
+    // Menu → Settings: the top bar's one button since PR5.
+    await page.locator('button[aria-label="open menu"]').click()
+    await page.locator('aside[aria-label="menu"]').getByRole('button', { name: /^Settings/ }).click()
     await page.waitForSelector('[role="dialog"][aria-label="settings"]')
     await page.waitForSelector('[role="tablist"][aria-label="feed manager tabs"]')
     await sleep(300)

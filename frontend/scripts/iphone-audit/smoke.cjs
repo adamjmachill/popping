@@ -27,6 +27,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const WIDTHS = {
   390: { width: 390, height: 844, deviceScaleFactor: 3 },
   320: { width: 320, height: 568, deviceScaleFactor: 2 },
+  // A 390 iPhone with Safari's Page Zoom at 125%. Only the states that
+  // list it run here.
+  312: { width: 312, height: 675, deviceScaleFactor: 3.75 },
 }
 const DEFAULT_WIDTHS = [390, 320]
 
@@ -50,6 +53,7 @@ const RULES = {
   C13: { title: 'measure: headline >= 55% of the card, no text block > 8 lines and < 160px wide' },
   C14: { title: 'ellipsis floor: a truncated box keeps >= min(96px, its content)' },
   C15: { title: 'no native search field (input[type=search])' },
+  C16: { title: 'title fits: the header h1 is not cut off' },
 }
 // Rules every state runs in the page. Per-state additions go in `extra`.
 const PAGE_RULES = ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C11', 'C12', 'C13', 'C14', 'C15']
@@ -112,7 +116,21 @@ const settingsState = (tab, name = `settings-${tab}`) => ({
 })
 
 const STATES = [
-  { name: 'dashboard', extra: ['C2b'] },
+  {
+    name: 'dashboard',
+    widths: [390, 320, 312],
+    extra: ['C2b', 'C16'],
+    // The top bar holds exactly: title, search, refresh (phones) and
+    // the one Menu button.
+    run: async ({ page, fail }) => {
+      const labels = await page.$$eval('header button', (els) =>
+        els.filter((b) => b.getClientRects().length).map((b) => b.getAttribute('aria-label') || b.textContent.trim()),
+      )
+      const want = ['open search', 'refresh', 'open menu']
+      if (JSON.stringify(labels) !== JSON.stringify(want)) fail('HEADER', `header buttons are ${JSON.stringify(labels)}, expected ${JSON.stringify(want)}`)
+      if (await page.locator('[aria-label="open settings"]').count()) fail('HEADER', 'the old settings gear is still in the page')
+    },
+  },
   {
     name: 'card-summary',
     setup: async ({ page }) => {
@@ -135,6 +153,7 @@ const STATES = [
   { name: 'search-60', setup: async ({ page }) => openSearch(page, F.SEARCH_QUERY_60) },
   {
     name: 'menu',
+    widths: [390, 320, 312],
     setup: async ({ page }) => {
       await page.locator('button[aria-label="open menu"]').click()
       // Wait for the slide-in transition to finish.
@@ -647,6 +666,14 @@ function pageChecks(cfg) {
   if (on.has('C15')) {
     for (const el of els) {
       if (el.matches('input[type="search" i]')) fail('C15', el, 'input[type=search]: its native clear button and search styling are invisible to the other checks; use type="text" inputMode="search"')
+    }
+  }
+
+  // C16 title fits: the large title in the top bar shows in full.
+  if (on.has('C16')) {
+    const h1 = document.querySelector('header h1')
+    if (h1 && h1.getClientRects().length && h1.scrollWidth > h1.clientWidth + 0.5) {
+      fail('C16', h1, `title is cut off: scrollWidth ${h1.scrollWidth} > clientWidth ${h1.clientWidth}`)
     }
   }
 

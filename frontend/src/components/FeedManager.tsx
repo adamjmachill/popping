@@ -65,14 +65,55 @@ type Props = {
   // ``activeSources`` synchronously so the chip bar stays consistent
   // through the rename.
   onSourceRenamed?: (oldName: string, newName: string) => void
+  // Open this feed's row (the Menu's ›, a ?source= link). A new
+  // ``focusNonce`` repeats the request for the same feed.
+  focusSourceId?: number | null
+  focusNonce?: number
 }
 
 type Tab = 'mine' | 'recommended' | 'add'
 
-export function FeedManager({ sources, onRefresh, onError, onSourceRenamed }: Props) {
+// The open row is part of the URL only until the user moves on: then
+// ``source`` goes, keeping the history entry's state (App's Done reads
+// it).
+function clearSourceParam() {
+  const u = new URL(window.location.href)
+  if (!u.searchParams.has('source')) return
+  u.searchParams.delete('source')
+  window.history.replaceState(window.history.state, '', u.toString())
+}
+
+export function FeedManager({ sources, onRefresh, onError, onSourceRenamed, focusSourceId, focusNonce }: Props) {
   const [tab, setTab] = useState<Tab>('mine')
   const [editingInterval, setEditingInterval] = useState<number | null>(null)
   const [editingRowId, setEditingRowId] = useState<number | null>(null)
+  // One open row at a time, so the Menu's › can open a given feed.
+  const [openRowId, setOpenRowId] = useState<number | null>(null)
+  const pendingScroll = useRef<number | null>(null)
+
+  // Asked to show a feed: My feeds, that row open (in its edit form),
+  // scrolled to the top of the sheet once it has rendered.
+  useEffect(() => {
+    if (focusSourceId == null) return
+    setTab('mine')
+    setOpenRowId(focusSourceId)
+    setEditingInterval(null)
+    setEditingRowId(focusSourceId)
+    pendingScroll.current = focusSourceId
+  }, [focusSourceId, focusNonce])
+  useEffect(() => {
+    const id = pendingScroll.current
+    if (id == null) return
+    const row = document.getElementById(`feed-${id}`)
+    if (!row) return
+    pendingScroll.current = null
+    row.scrollIntoView({ block: 'start' })
+  })
+
+  const toggleRow = (id: number) => {
+    setOpenRowId((cur) => (cur === id ? null : id))
+    clearSourceParam()
+  }
   // Stable Set of source names. ``RecommendedTab``'s useEffect
   // depends on this and would otherwise refire on every parent
   // render (parent constructs ``new Set(...)`` inline today).
@@ -98,6 +139,8 @@ export function FeedManager({ sources, onRefresh, onError, onSourceRenamed }: Pr
       {tab === 'mine' && (
         <MyFeedsTab
           sources={sources}
+          openRowId={openRowId}
+          onToggleRow={toggleRow}
           editingInterval={editingInterval}
           setEditingInterval={setEditingInterval}
           editingRowId={editingRowId}
@@ -153,6 +196,8 @@ function TabButton({
 
 function MyFeedsTab({
   sources,
+  openRowId,
+  onToggleRow,
   editingInterval,
   setEditingInterval,
   editingRowId,
@@ -162,6 +207,8 @@ function MyFeedsTab({
   onSourceRenamed,
 }: {
   sources: Source[]
+  openRowId: number | null
+  onToggleRow: (id: number) => void
   editingInterval: number | null
   setEditingInterval: (id: number | null) => void
   // ID of the row currently in inline edit mode. Mutually exclusive
@@ -179,9 +226,11 @@ function MyFeedsTab({
   return (
     <ul className="space-y-1">
       {sources.map((s) => (
-        <li key={s.id}>
+        <li key={s.id} id={`feed-${s.id}`} className="scroll-mt-2">
           <SourceRow
             source={s}
+            isOpen={openRowId === s.id}
+            onToggle={() => onToggleRow(s.id)}
             isEditingInterval={editingInterval === s.id}
             onStartEditInterval={() => setEditingInterval(s.id)}
             onCancelEditInterval={() => setEditingInterval(null)}
@@ -206,6 +255,8 @@ function MyFeedsTab({
 
 function SourceRow({
   source,
+  isOpen: open,
+  onToggle,
   isEditingInterval,
   onStartEditInterval,
   onCancelEditInterval,
@@ -217,6 +268,8 @@ function SourceRow({
   onRenamed,
 }: {
   source: Source
+  isOpen: boolean
+  onToggle: () => void
   isEditingInterval: boolean
   onStartEditInterval: () => void
   onCancelEditInterval: () => void
@@ -242,7 +295,7 @@ function SourceRow({
   // Rows show name, category and freshness; the controls (pause,
   // edit, interval, fetch, delete) appear when the row is tapped,
   // like an iOS settings list, instead of six links on every row.
-  const [open, setOpen] = useState(false)
+  // MyFeedsTab owns which row is open (``isOpen``).
 
   const toggleActive = async () => {
     setBusy(true)
@@ -546,7 +599,7 @@ function SourceRow({
     <div className={`py-0.5 text-ios-caption border-b border-hairline last:border-b-0 ${busy ? 'opacity-60' : ''}`}>
       <button
         type="button"
-        onClick={() => setOpen((v) => !v)}
+        onClick={onToggle}
         aria-expanded={open}
         className="w-full min-h-[44px] flex items-center gap-2 min-w-0 text-left"
       >
