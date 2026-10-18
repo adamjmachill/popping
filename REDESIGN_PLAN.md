@@ -1,6 +1,6 @@
 # Popping redesign plan
 
-Status: complete enough to execute. Written 2026-10-18 by a Claude Code session on top of main after PR #12 (mark as unread).
+Status: complete enough to execute; a verification pass is running and will revise sections 2 to 14. Written 2026-10-18 by a Claude Code session on top of main after PR #12 (mark as unread).
 This file is the plan a fresh Claude Code session executes. The design sections (5 to 9, 12) were written from the code readings in the working notes; the deep-dive design panel was cut short to save quota, so the implementation session should re-check each file:line before changing it.
 
 Scope agreed with the owner:
@@ -356,3 +356,4 @@ If you only have quota for one PR, start with A: it is independent, visible imme
   - On touch screens every input, textarea and select is forced to 16px by styles.css 24 to 26 (`!important`). New controls must be designed at 16px or more so that rule can go.
   - FeedManager's PATCH surface is `api.updateSource(id, { refresh_interval_seconds?, active?, category?, name?, url?, custom_headers? })` (api.ts 424 to 434); custom_headers is a flat string-to-string map and null clears it.
   - Desktop breakpoint is md (768px); iPads get the 480px right-hand panel.
+- Session switched to Claude Opus 5.5 at the owner's request (quota at 81%). Deep-dive workflow resumed from cache with the owner's three later requirements (VPS safety, YouTube, overflow) and two extra verifiers (YouTube, VPS security). It reads this file and will produce corrections to sections 2 to 14.
