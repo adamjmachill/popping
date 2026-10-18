@@ -29,7 +29,8 @@ const GLOBAL_BINDINGS: Binding[] = [
   { key: '?', label: 'show this shortcuts sheet' },
   { key: '/', label: 'focus search' },
   { key: 'r', label: 'refresh dashboard' },
-  { key: 'Esc', label: 'close drawer / clear search' },
+  { key: ',', label: 'open settings' },
+  { key: 'Esc', label: 'close the menu or settings / clear search' },
 ]
 
 const NAVIGATION_BINDINGS: Binding[] = [

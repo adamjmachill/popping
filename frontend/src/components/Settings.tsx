@@ -34,18 +34,11 @@ import {
   type Source,
 } from '../api'
 import { FeedManager } from './FeedManager'
+import { SETTINGS_TABS, type SettingsTab } from '../lib/settingsTabs'
 import { toast } from './Toast'
 import { usePreferences, type HistoryGroupByValue } from '../lib/preferences'
 
-export type SettingsTab =
-  | 'feeds'
-  | 'llm'
-  | 'notifications'
-  | 'history'
-  | 'hidden'
-  | 'starred'
-  | 'voted'
-  | 'reset'
+export type { SettingsTab }
 
 type Props = {
   open: boolean
@@ -58,6 +51,11 @@ type Props = {
   onRefreshSources: () => Promise<void>
   onError: (msg: string) => void
   onClose: () => void
+  // Open this feed's row in Feeds (the Menu's ›, a ?source= link).
+  // ``focusNonce`` changes on every request, so asking for the same
+  // feed again while Settings is open still scrolls to it.
+  focusSourceId?: number | null
+  focusNonce?: number
   // Lifted state from App. The Settings overlay owns the canonical
   // brief-tone state — Drawer's tone picker is gone, so this is
   // the only place the tone can change.
@@ -121,6 +119,8 @@ export function Settings({
   onRefreshSources,
   onError,
   onClose,
+  focusSourceId,
+  focusNonce,
   briefTone,
   onBriefToneChange,
   triggerGenerate,
@@ -202,6 +202,7 @@ export function Settings({
         // the LLM tab needs room for the provider/model pickers and
         // the Feeds tab's add-custom form has a wide textarea.
         className="absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)] rounded-t-ios-lg bg-bg-app shadow-2xl flex flex-col
+                   motion-safe:animate-sheet-up md:animate-none
                    md:inset-y-0 md:right-0 md:left-auto md:top-0 md:bottom-auto md:h-full md:w-[480px] md:rounded-none"
       >
         {/* Header — iOS sheet layout: title on the leading edge, Done
@@ -226,7 +227,7 @@ export function Settings({
             alone left the reader guessing. ``role="tablist"`` so
             screen readers announce it as a tab group. */}
         <div data-hscroll className="flex gap-1.5 overflow-x-auto px-4 mt-3 pb-1" role="tablist">
-          {(['feeds', 'llm', 'notifications', 'history', 'hidden', 'starred', 'voted', 'reset'] as SettingsTab[]).map((t) => {
+          {SETTINGS_TABS.map((t) => {
             const active = t === tab
             return (
               <button
@@ -235,10 +236,13 @@ export function Settings({
                 aria-selected={active}
                 onClick={() => {
                   // Tab changes are URL-driven. App owns the URL
-                  // updater; we just bubble the new tab.
+                  // updater; we just bubble the new tab. The history
+                  // state is kept: App's Done uses it to step back
+                  // instead of adding an entry.
                   const u = new URL(window.location.href)
                   u.searchParams.set('tab', t)
-                  window.history.replaceState(null, '', u.toString())
+                  u.searchParams.delete('source')
+                  window.history.replaceState(window.history.state, '', u.toString())
                   // Force a re-render via a custom event so App
                   // re-reads the URL. Alternative: lift a callback
                   // to App and call it. The custom event is
@@ -268,6 +272,8 @@ export function Settings({
                 onRefresh={onRefreshSources}
                 onError={onError}
                 onSourceRenamed={onSourceRenamed}
+                focusSourceId={focusSourceId}
+                focusNonce={focusNonce}
               />
             </div>
           )}

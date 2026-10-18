@@ -56,6 +56,35 @@ async function waitFor(fn, ms = 5000) {
 
 const isDisabled = (page, name) => page.getByRole('button', { name, exact: true }).isDisabled()
 
+const MENU = 'aside[aria-label="menu"]'
+
+async function openMenu(page) {
+  await page.locator('button[aria-label="open menu"]').click()
+  await page.waitForFunction(() => {
+    const a = document.querySelector('aside[aria-label="menu"]')
+    if (!a || a.hasAttribute('inert')) return false
+    const r = a.getBoundingClientRect()
+    return r.right <= innerWidth + 0.5 && a.getAnimations().every((x) => x.playState !== 'running')
+  }, null, { timeout: 5000 })
+}
+
+// A feed row is open when its controls show: the expanded row, or (until
+// PR6 replaces it) the old edit form the Menu's › lands in.
+const rowOpen = (page, id) =>
+  page.locator(`#feed-${id}`).locator('button[aria-expanded="true"], input[type="text"], input[type="url"]').count().then((n) => n > 0)
+
+// True when el's box sits inside the visible part of its scroller.
+async function inView(page, selector, scrollerSelector) {
+  return page.evaluate(([sel, scSel]) => {
+    const el = document.querySelector(sel)
+    const sc = el && (scSel ? el.closest(scSel) : null)
+    if (!el) return false
+    const r = el.getBoundingClientRect()
+    const box = sc ? sc.getBoundingClientRect() : { top: 0, left: 0, bottom: innerHeight, right: innerWidth }
+    return r.top >= box.top - 1 && r.left >= box.left - 1 && r.right <= box.right + 1 && r.top < box.bottom
+  }, [selector, scrollerSelector])
+}
+
 const flow = (name, fields) => ({
   name,
   url: '/?view=settings&tab=feeds',
@@ -63,6 +92,9 @@ const flow = (name, fields) => ({
   checks: false,
   ...fields,
 })
+
+// PR5 flows run from the dashboard.
+const dashFlow = (name, fields) => flow(name, { url: '/', ...fields })
 
 module.exports = [
   flow('flow-fj-youtube-handle', {
@@ -180,6 +212,85 @@ module.exports = [
       await page.getByRole('button', { name: 'Add feed', exact: true }).click()
       if (!(await waitFor(() => page._posts.length === 1))) return fail('FR', 'no POST for the subreddit')
       if ('custom_headers' in page._posts[0]) fail('FR', `the subreddit POST carries custom_headers ${JSON.stringify(page._posts[0].custom_headers)}`)
+    },
+  }),
+
+  dashFlow('flow-fg-settings-back', {
+    run: async ({ page, fail }) => {
+      // An app entry to come back to, so Back stays inside the app.
+      await page.evaluate(() => history.pushState(null, '', '/?start=1'))
+      const before = await page.evaluate(() => history.length)
+      await openMenu(page)
+      await page.locator(MENU).getByRole('button', { name: /^Settings/ }).click()
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      const tab = await page.locator(`${SETTINGS} [role="tablist"]:not([aria-label]) [aria-selected="true"]`).first().textContent()
+      if (!/Feeds/.test(tab || '')) fail('FG', `Menu → Settings opened ${JSON.stringify(tab)}, expected Feeds`)
+      await page.locator('button[aria-label="close settings"]').click()
+      await page.locator(SETTINGS).waitFor({ state: 'detached' })
+      const after = await page.evaluate(() => history.length)
+      if (after - before > 1) fail('FG', `history grew by ${after - before} for one open and close`)
+      await page.goBack()
+      await page.waitForTimeout(400)
+      if (await page.locator(SETTINGS).count()) fail('FG', 'Back after Done reopened Settings')
+      const u = new URL(page.url())
+      if (!/^https?:$/.test(u.protocol)) fail('FG', `Back left the app: ${page.url()}`)
+      for (const k of ['view', 'tab', 'source']) if (u.searchParams.has(k)) fail('FG', `the URL still has ${k}: ${page.url()}`)
+    },
+  }),
+
+  dashFlow('flow-ft-menu-edit-feed', {
+    run: async ({ page, fail }) => {
+      await openMenu(page)
+      await page.locator(MENU).getByRole('button', { name: 'edit The Verge', exact: true }).click()
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      await page.locator('#feed-4').waitFor({ state: 'visible' })
+      if (!(await waitFor(() => rowOpen(page, 4), 3000))) fail('FT', 'the_verge is not open after its ›')
+      await page.waitForTimeout(300)
+      if (!(await inView(page, '#feed-4', '.overflow-y-auto'))) fail('FT', 'the_verge is not scrolled into view')
+      if (!/source=4/.test(page.url())) fail('FT', `the URL has no source=4: ${page.url()}`)
+      // Another feed while Settings stays open, through the URL.
+      await page.evaluate(() => {
+        const u = new URL(location.href)
+        u.searchParams.set('source', '11')
+        history.replaceState(history.state, '', u.toString())
+        dispatchEvent(new PopStateEvent('popstate'))
+      })
+      if (!(await waitFor(() => rowOpen(page, 11), 3000))) fail('FT', 'darknet_diaries did not open from the URL')
+      await page.waitForTimeout(300)
+      if (!(await inView(page, '#feed-11', '.overflow-y-auto'))) fail('FT', 'darknet_diaries is not scrolled into view')
+      if (await rowOpen(page, 4)) fail('FT', 'the_verge stayed open')
+    },
+  }),
+
+  dashFlow('flow-fu-jump-to-column', {
+    run: async ({ page, fail }) => {
+      const STRIP = '[role="tablist"][aria-label="dashboard sections"]'
+      await openMenu(page)
+      // The last column, which starts outside the strip's visible area.
+      const rows = page.locator(MENU).locator('h3:text-matches("jump to column", "i")').locator('xpath=../..').getByRole('button')
+      const last = rows.last()
+      const label = ((await last.textContent()) || '').trim()
+      await last.click()
+      await page.waitForTimeout(600)
+      const selected = page.locator(`${STRIP} [aria-selected="true"]`).first()
+      const text = ((await selected.textContent()) || '').trim()
+      if (!text.startsWith(label)) fail('FU', `selected tab is ${JSON.stringify(text)}, expected ${JSON.stringify(label)}`)
+      if (!(await inView(page, `${STRIP} [aria-selected="true"]`, STRIP))) fail('FU', 'the selected tab is outside the strip')
+    },
+  }),
+
+  dashFlow('flow-menu-closed-inert', {
+    run: async ({ page, fail }) => {
+      await openMenu(page)
+      await page.locator('button[aria-label="close menu"]').click()
+      await page.waitForTimeout(500)
+      const focusedMenu = await page.evaluate(() => document.activeElement?.getAttribute('aria-label'))
+      if (focusedMenu !== 'open menu') fail('MENU', `focus went to ${JSON.stringify(focusedMenu)} after closing, expected the ≡ button`)
+      for (let i = 0; i < 40; i++) {
+        await page.keyboard.press('Tab')
+        const inMenu = await page.evaluate(() => !!document.activeElement?.closest('aside[aria-label="menu"]'))
+        if (inMenu) return fail('MENU', `Tab reached the closed Menu after ${i + 1} presses`)
+      }
     },
   }),
 

@@ -1,7 +1,8 @@
 # iPhone layout scripts
 
 Everything here renders the built app in a browser with iPhone emulation
-(390x844 at 3x and 320x568 at 2x, touch on) against a fully mocked API
+(390x844 at 3x and 320x568 at 2x, touch on; a few states also at 312x675, a
+390 phone with Page Zoom at 125%) against a fully mocked API
 (`capture.cjs` `mockApi`, data in `fixtures.cjs`). All scripts are CommonJS
 (`.cjs`) because `frontend/package.json` is `"type": "module"`, and card
 locators are scoped to `main.md\:hidden` because App renders the hidden
@@ -83,11 +84,11 @@ and `clock.setFixedTime(F.NOW)`, so relative times ("12m ago") are stable. Then:
 
 | State | What it shows |
 |---|---|
-| `dashboard` | the phone dashboard (also runs C2b) |
+| `dashboard` | the phone dashboard at 390, 320 and 312 (also runs C2b and C16); the top bar must hold exactly search, refresh and the Menu button, and no settings gear |
 | `card-summary` | summaries open on card 101 (180-character title, thumbnail, 60-character source) and 102 (90-character unbroken token) |
 | `search-x` | search open with "x" typed |
 | `search-60` | search with the 60-character `F.SEARCH_QUERY_60` (results header) |
-| `menu` | the Menu (≡, `open menu`) after its slide-in |
+| `menu` | the Menu (≡, `open menu`) after its slide-in, at 390, 320 and 312 |
 | `settings-feeds` | Settings → Feeds (`?view=settings&tab=feeds`) |
 | `settings-add-youtube` | Feeds → the third feed-manager tab (Add), YouTube selected, long name and URL typed |
 | `settings-add-error` | Add, YouTube, a Test that fails with YouTube's longest message (`F.YOUTUBE_BLOCKED_MESSAGE`) |
@@ -129,6 +130,7 @@ and reports with `fail(rule, detail)`.
 | C13 | A card headline is ≥ 55% of the card's content box; no text block is taller than 8 lines while narrower than 160px. |
 | C14 | A box with `text-overflow: ellipsis` is at least `min(96px, its scrollWidth)` wide. |
 | C15 | No visible `input[type=search]`. |
+| C16 | The top bar's title (`header h1`) is not cut off (`scrollWidth <= clientWidth`). |
 
 "Visible" means: has client rects, not `visibility: hidden`, no ancestor at
 opacity 0, not inside `[inert]` or `[aria-hidden="true"]`, not inside the
@@ -193,6 +195,10 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-fq-new-category` | New category "NEWS" lands in "news"; Add feed waits while a new category is pending; "Hockey" shows as "Hockey (new)" and is sent as typed |
 | `flow-fr-headers` | a half-filled header holds Test and Add with its message; switching to Subreddit drops the headers from the POST |
 | `flow-fs-auto-already-added` | Auto-add answering with a feed already followed shows "Already added: …" |
+| `flow-fg-settings-back` | Menu → Settings opens Feeds; after Done, history grew by at most one entry and Back stays in the app with Settings closed |
+| `flow-ft-menu-edit-feed` | a source row's › in the Menu opens that feed in Settings, in view; a `?source=` change while Settings is open moves to another feed |
+| `flow-fu-jump-to-column` | Jump to column selects that phone tab and scrolls it into the strip |
+| `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
 
 Run one with `--only <name>`; PR6 and PR8 add the PATCH and PUT counting flows.
 
@@ -212,8 +218,8 @@ builds, serves on 127.0.0.1:4173 and writes next to the scripts:
 entries per call (POST, PATCH and DELETE change that copy; GET reads it), and
 calls `onUnmocked({ method, path, url })` for anything it does not answer.
 
-`capture.cjs` and `probe.cjs` selectors are updated in PR5 when the UI changes
-(`open settings` becomes Menu → Settings).
+`capture.cjs` and `probe.cjs` open Settings the way a person does since PR5:
+the Menu (`open menu`), then its Settings row.
 
 ## Matching CI's fonts locally
 
