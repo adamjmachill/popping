@@ -2441,6 +2441,22 @@ async def update_source(
     if row.name in registered_names:
         return row
 
+    # A category-only edit needs no job rebuild: ingest reads the
+    # category from the row each run, while the job holds a plugin
+    # built from the row's name, URL and headers. Rebuilding would
+    # also fetch the feed right away, which the category picker's
+    # autosave would trigger on every pick.
+    if category_changed and not (
+        refresh_changed
+        or active_changed
+        or name_changed
+        or url_changed
+        or headers_changed
+        or sitemap_url_changed
+        or link_pattern_changed
+    ):
+        return row
+
     if active is False:
         # Disabled — remove the job if it exists. ``remove_job``
         # raises if the id doesn't exist; catch so the caller still
