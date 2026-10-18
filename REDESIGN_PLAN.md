@@ -155,7 +155,19 @@ Facts established so far in this environment:
 - Outbound to youtube.com is blocked by the environment's proxy.
 - The workflow tool runs at most two agents at a time here.
 
-**pending**: the full recipe including iPhone screenshots with a mocked API.
+Recipe for every PR in this plan, run in the Claude Code container before pushing:
+
+```
+cd frontend
+npm run lint
+npx tsc --noEmit
+npm run build
+bash scripts/iphone-audit/run.sh    # screenshots + overflow scan at 390 and 320
+```
+
+The audit scripts are in `frontend/scripts/iphone-audit/` (added on this branch). Look at the PNGs it writes, not only the scan: the scan catches boxes past their parent, your eyes catch "this looks wrong". Backend changes are checked by CI's pytest job (Postgres is not available in the container). The sweep PR turns the audit into a smoke test that fails the frontend CI job on any overflow.
+
+Browser-level checks that only a real iPhone can do, after popping-update: focus a text field (no zoom), open Settings (sheet fits under the status bar), rotate to landscape (no clipped buttons), and try Page Zoom at 125% (everything still fits).
 
 ## 14. How to start the session
 
@@ -168,6 +180,7 @@ Facts established so far in this environment:
 - PR #12 (mark as unread) merged at 04:22 UTC; main is 721713e.
 - Deep-dive workflow launched: 10 code readers, 3 designs (minimal change, iOS-native UX, structural), 3 judges, 1 synthesis, 7 adversarial verifiers, 1 completeness critic.
 - Read directly: App.tsx settings routing (lines 380 to 445: `?view=settings&tab=` drives the overlay via pushState/popstate), top bar (gear at 2272 to 2301, hamburger at 2306), FeedManager inline edit form (436 to 700: text category with a datalist, JSON textarea for headers, tiny "save" link), Drawer "All settings..." row (384 to 387), native `window.prompt` for presets (App.tsx 306 and 2826) and `window.confirm` for reset (Settings.tsx 413).
+- iPhone overflow audit done (agent, 92 tool calls): 13 measured defects, section 4. Scripts preserved in frontend/scripts/iphone-audit/.
 - Deployment surface read: docker-compose.yml, nginx.conf.template, egress-proxy, ops/popping-update.sh. See section 2.
 - Reader reports done so far: feed editor, Settings overlay. Constraints they pinned down (each must hold in the redesign):
   - Settings tab identity is URL state (`?view=settings&tab=`), parsed by an allow-list in App.tsx 394 to 428 and set by pushState in 430 to 444. Settings.tsx 238 to 246 switches tabs with replaceState plus a synthetic popstate that App listens to. Any new tab or rename must be added in both places, and the Drawer deep-links by tab id (Drawer.tsx 345 and 384).
