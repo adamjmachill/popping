@@ -41,7 +41,7 @@ Nothing in this plan opens a port, adds a service, or changes how the VPS is rea
 | Background processes | The same three containers (postgres, backend, frontend), plus cloudflared or guard-proxy only if you enabled those profiles | Unchanged |
 | Outbound requests | RSS, article, podcast, YouTube and LLM fetches, all through the SSRF guard in backend/app/url_safety.py and the optional egress proxy | Same paths. The YouTube fix changes how one existing lookup is made; the optional API key adds one call to googleapis.com |
 | Browser security headers | nginx sets a strict Content-Security-Policy (self only) | Unchanged; the new UI loads no fonts, scripts or styles from outside |
-| Files the PRs may touch | | frontend/src, backend/app/youtube.py, backend/app/routes/sources.py, backend/tests, README, .env.example. Not docker-compose.yml, nginx.conf.template, .github, egress-proxy or ops |
+| Files the PRs may touch | | frontend/src, frontend/scripts, frontend/package.json and its lockfile (Playwright as a dev dependency only), backend/app/youtube.py, backend/app/config.py, backend/app/schemas.py, backend/app/scheduler.py, backend/app/routes/sources.py, backend/tests, README.md, .env.example, and one added step in the frontend job of .github/workflows/build.yml with no new permissions or secrets. Not docker-compose.yml, Dockerfiles, nginx.conf.template, egress-proxy or ops |
 
 Checks before each merge:
 
@@ -346,6 +346,7 @@ If you only have quota for one PR, start with A: it is independent, visible imme
 - Tests that pin the current FeedManager source text: backend/tests/test_frontend_slice15_add_generic_scrape.py (68 to 341) and test_source_create_sitemap_link_pattern.py (199 to 280) grep FeedManager.tsx and api.ts for literal strings. A rewrite must update those tests in the same PR or CI goes red.
 - Settings tab allow-list is duplicated in App.tsx 409 to 418, Settings.tsx 40 to 48 and 233; export one SETTINGS_TABS array.
 - Dead code to remove with the top-bar change: Drawer `onResetLocalState` prop (Drawer.tsx 61 to 92, App.tsx 2810), the `data-settings-gear` attribute (App.tsx:2309), the unused sheetUp animation, and Drawer header comments that describe a bottom sheet that no longer exists.
+- Fixed a contradiction: section 2 forbade .github and omitted schemas.py, scheduler.py and config.py, while PRs A and C need them. The allowed list now matches section 12.
 - Deep-dive workflow stopped at 98% quota after 9 of 10 readers; the design panel, judges and verifiers did not run. Sections 5 to 9 and 12 are my synthesis from the readings.
 - Deployment surface read: docker-compose.yml, nginx.conf.template, egress-proxy, ops/popping-update.sh. See section 2.
 - Reader reports done so far: feed editor, Settings overlay. Constraints they pinned down (each must hold in the redesign):
