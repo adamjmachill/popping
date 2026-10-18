@@ -13,7 +13,7 @@ Nothing in this plan opens a port, starts a process, adds a container or changes
 | Outbound hosts | No new host compared with today. The YouTube page lookup goes to youtube.com hosts and follows only the redirects YouTube sends (consent.youtube.com, consent.google.com, accounts.google.com, www.google.com/sorry). Every hop passes `ssrf_event_hook`; the entry URL and final URL pass `check_url_safe`; after the response every URL in `resp.history` and `resp.url` must be on that list or the result is rejected without reading any marker. The `/user/NAME` fallback is verified with the existing `app.sources.rss.fetch_rss` (same SSRF guard). No googleapis.com (open decision 1). |
 | What a lookup sends | A desktop Safari User-Agent, `Accept`, `Accept-Language: en-US,en;q=0.9`, and two fixed consent cookies (`SOCS=CAI`, `CONSENT=YES+`) on `.youtube.com`. No user data, credentials or keys. |
 | Logging | Popping's own `youtube: lookup` line never contains a query string or page body. httpx's own INFO line (`HTTP Request: GET <url>`, enabled because main.py:71-74 sets the root logger to INFO) still logs each hop's full URL; that is public YouTube data and main.py stays untouched. |
-| SSRF guard reasons | Never shown to the user (url_safety.py:220-222). PR1 removes today's leaks at youtube.py:83-85, :101-106 and routes/sources.py:957-964. The user sees "That address isn't reachable from Popping."; the reason is logged as `result=blocked:ssrf` without the query string. |
+| SSRF guard reasons | Never shown to the user (url_safety.py:220-222). PR1 removes today's leaks at youtube.py:83-85, :101-106 and routes/sources.py:957-964 (in /test that branch is reached only for reddit, whose validator skips `check_url_safe`; every other type is refused first at :943 by `_validate_url`, whose detail "url is not reachable (must be a public host)" already hides the reason, :233-242). The user sees "That address isn't reachable from Popping."; the reason is logged as `result=blocked:ssrf` without the query string. |
 | Header deny list | routes/sources.py:169-187 stays the authority and grows by: content-length, transfer-encoding, connection, keep-alive, te, trailer, upgrade, expect, proxy-authorization, proxy-connection. New input rules: names must be RFC 7230 tokens (checked before the deny list), at most 100 characters, no case-insensitive duplicates, and `user-agent`, `accept`, `accept-language` are stored as `User-Agent`, `Accept`, `Accept-Language`. The last rule matters because rss.py:375 and article_extract.py:97-101 merge with a case-sensitive dict, so a lower-case key would send two User-Agent headers. lib/headers.ts mirrors all of it; a no_db test pins both directions. |
 | Header values | Stored as plain text and returned by GET /api/sources to anyone who can open Popping, as today. The editor says so. No new storage. |
 | Source names | `_NAME_RE.match` (routes/sources.py:111, :213) accepts `"abc\n"`. PR1 switches to `fullmatch` so a newline can never reach a job id, `/api/ingest/{name}` or a log line. |
@@ -98,7 +98,7 @@ docker compose pull && docker compose up -d
 - **F3. Add sends the typed URL, not `resolved_url` from Test** (:1446-1458), so YouTube is looked up twice.
 - **B3. Shapes that already carry the id still fail.** `feeds/videos.xml?channel_id=UC…` does not match `/channel/` (youtube.py:37) and is fetched as a page, whose XML has no JSON marker. A bare `UC…` id or a link without `https://` is not a URL and gets a 422. youtube.py:37 is unanchored, so a 23+ character id is silently truncated.
 - **B4. /auto has no YouTube branch** (routes/sources.py:573-644). It creates an rss row called `youtube_com`, a generic_scrape row, or fails.
-- **B5. Raw text reaches the user:** httpx exception text (youtube.py:107-108), the `check_url_safe` reason (youtube.py:83-85, :101-106) and, in /test, the SSRF reason for every type (routes/sources.py:957-964). All three break url_safety.py:220-222.
+- **B5. Raw text reaches the user:** httpx exception text (youtube.py:107-108), the `check_url_safe` reason (youtube.py:83-85, :101-106) and, in /test, the SSRF reason at routes/sources.py:957-964. That /test branch is reached only when `_validate_url` was skipped (type reddit, :931-940) or DNS changed between :943 and :957; every other type is refused at :943 with the generic "url is not reachable (must be a public host)" (:233-242). All three break url_safety.py:220-222.
 
 **Likely, not verifiable here** (this container's proxy blocks youtube.com):
 - **B1. The page fetch looks like a bot:** `User-Agent: Popping/0.2` (config.py:392 via youtube.py:41, sent at :98), no Accept-Language, no consent cookies. Datacenter and EU addresses may get consent.youtube.com or a bot check; the VPS region is unknown. The lookup log line (below) settles this after PR1 deploys.
@@ -192,7 +192,7 @@ def _client() -> httpx.AsyncClient:
 - status 429;
 - body contains `action="https://consent.youtube.com` or `Before you continue to YouTube`, or matches `confirm you(?:’|'|\\u2019|\\u0027)re not a bot` (case-insensitive). A bare "Sign in to confirm" is not a rule.
 
-**/user fallback.** Import lazily inside the function (`from app.sources.rss import fetch_rss`). Accept `feeds/videos.xml?user=NAME` only when it returns at least one item; otherwise raise `YouTubeBlockedError`. Log `fallback:user_ok` or `fallback:user_failed`. This also covers POST, PATCH and /auto, which never fetch the feed themselves.
+**/user fallback.** Import lazily inside the function (`from app.sources.rss import fetch_rss`). Accept `feeds/videos.xml?user=NAME` only when it returns at least one item; otherwise raise `YouTubeBlockedError`. Wrap the call in `except (httpx.HTTPError, ValueError)`: `fetch_rss` raises httpx errors (`raise_for_status`, rss.py:394; a retried transport error, :500-503), and `ValueError` for a redirect to a denied host (rss.py:411-413) and for a body that is not a feed (rss.py:476-481). Either becomes `YouTubeBlockedError`, so nothing escapes as a 500. This is the one place besides lookup step 3 that catches, and it still never uses `except Exception`. Log `fallback:user_ok` or `fallback:user_failed`. This also covers POST, PATCH and /auto, which never fetch the feed themselves.
 
 **Slug** (`youtube_source_slug`, also mirrored by `suggestName` in lib/feedRules.ts):
 - `@handle`, `/c/NAME`, `/user/NAME` or `?user=NAME` → `<name>_yt`;
@@ -227,7 +227,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 - **POST /api/sources/test** (:839-1068):
   - move the name block (:894-926) above resolution (:884-892), so a bad name costs no lookup;
   - resolve with the same flag as POST; a failure returns `error_kind="invalid_url"` and the message as `error`;
-  - the SSRF branch (:957-964) returns `error="That address isn't reachable from Popping."` and logs the reason at INFO without the query;
+  - the SSRF branch (:957-964) returns `error="That address isn't reachable from Popping."` and logs the reason at INFO without the query. It is reached for reddit (its validator skips `check_url_safe`); other types keep failing earlier at :943 with `_validate_url`'s generic detail, which the frontend maps through "not reachable" (section 6);
   - header validation failure (:968-980) returns `error_kind="invalid_headers"` instead of `"unknown"`; document it in the SourceTestResult docstring (schemas.py:212+).
 - **POST /api/sources/auto** (:573-644). Before `_validate_url(body.url)` (:607):
   1. `url = normalize_youtube_input(body.url, allow_bare_handle=True)`.
@@ -288,6 +288,8 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
   - delegate every other host to the saved original `socket.getaddrinfo`;
   - the real `check_url_safe` and `ssrf_event_hook` run; never stub them.
 - Use `fake_dns` only in tests that stub every fetch. A route test that would reach `fetch_rss` for a resolved youtube feed monkeypatches `app.sources.rss.fetch_rss`.
+- Tests 4-11 and 13, and every route test that resolves or validates a youtube.com URL, use `fake_dns`. The container has no DNS and section 13 step 4 adds no YouTube hosts to /etc/hosts, so without it those tests get the unreachable message locally while passing in CI.
+- `fake_dns` yields its host map, so a single test can add an entry (test 15's reddit case maps www.reddit.com to 10.0.0.5).
 
 **Tests:**
 1. Rows 1-8 and 15-16 make zero handler calls: a bare id with spaces; a feed link with `&foo=1`; `/CHANNEL/UC…`; `studio.youtube.com/channel/UC…`; `playlist?list=UU…` → `channel_id=UC…`; `list=WL` → playlist error; the home page and `/results?search_query=x` → not-a-channel error; `/channel/UC…abc` (25 characters) → not-a-channel error; `youtube.com.evil.example` and `youtube.com@127.0.0.1/` → not treated as YouTube.
@@ -295,7 +297,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 3. `is_blocked_page`: true for consent hosts, accounts.google.com, google.com `/sorry/`, a 429, and each body phrase (including the `’` form); false for a normal page and for "Sign in to confirm your age". An age-gated watch page carrying videoDetails resolves.
 4. `@handle?si=abc` lookup: the request URL has no `si`; User-Agent contains "Safari"; Accept-Language is present; the `cookie` header contains `SOCS=CAI` on the first request **and** on a redirected hop (the handler answers 301 from youtube.com to www.youtube.com).
 5. A 302 to `https://consent.youtube.com/m?…` raises `YouTubeBlockedError`; the message contains "channel ID" and no "http".
-6. `/user/NAME` blocked: with `app.sources.rss.fetch_rss` monkeypatched to `[{"title": "x"}]` the result is `…feeds/videos.xml?user=NAME`; with `[]` it raises `YouTubeBlockedError`.
+6. `/user/NAME` blocked: with `app.sources.rss.fetch_rss` monkeypatched to `[{"title": "x"}]` the result is `…feeds/videos.xml?user=NAME`; with `[]` it raises `YouTubeBlockedError`; with a stub that raises `ValueError` it raises `YouTubeBlockedError` (not a 500) and logs `fallback:user_failed`.
 7. 404 raises the not-found message.
 8. Redirects to `http://127.0.0.1/admin` and to `http://evil.internal/` raise the unreachable message; it contains no IP address and no "denied"; the handler never sees those hosts.
 9. A redirect to `https://example.org/` raises the unexpected-host message, and no marker in that body is read.
@@ -305,12 +307,13 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 13. `caplog` around a lookup: the `youtube: lookup` line has no `?` and no `si=`.
 14. Rewrite `test_resolve_channel_feed_url_raises_for_nonexistent_handle` (:115-121) and the route tests at :125-133 and :164-177 to use a mocked 404 instead of the live network.
 15. Route tests (DB):
-    - POST /api/sources/test, `type=youtube_channel`, mocked consent page: `ok False`, `error_kind 'invalid_url'`, error contains "channel ID";
+    - POST /api/sources/test, `type=youtube_channel`, mocked consent page (with `fake_dns`): `ok False`, `error_kind 'invalid_url'`, error contains "channel ID";
     - POST /api/sources with a bare id (with `fake_dns`): 200, stored url is the feed URL; the same POST again: 409 containing "already follow";
     - POST /api/sources/auto with `https://www.youtube.com/@somehandle`, `app.routes.sources.resolve_channel_feed_url` monkeypatched and `fake_dns` on (`_validate_url(feed_url)` runs `check_url_safe` on www.youtube.com): a row with type youtube_channel, name `somehandle_yt`, refresh 21600, `kind == "youtube_channel"`; a second identical call returns the same id and creates no `somehandle_yt_2`;
-    - /auto with a playlist link: name `playlist_<id6>_yt`;
+    - /auto with a playlist link (with `fake_dns`; `_validate_url(feed_url)` runs `check_url_safe` on www.youtube.com): name `playlist_<id6>_yt`;
     - POST /api/sources/test with `custom_headers={"Cookie": "x"}`: `error_kind 'invalid_headers'`;
-    - POST /api/sources/test for an SSRF-denied URL: error equals "That address isn't reachable from Popping.".
+    - POST /api/sources/test, type rss, `http://127.0.0.1/feed`: `error_kind 'invalid_url'`; the error contains no IP address and no "denied" (it is `_validate_url`'s generic detail from :943, which the frontend maps to "That address isn't reachable from Popping.");
+    - POST /api/sources/test, type reddit, `r/python`, with `fake_dns` mapping www.reddit.com to 10.0.0.5 in that test: the :957-964 branch answers, and `error` equals "That address isn't reachable from Popping.".
 16. Keep test_youtube.py:47-109, :136-158 and :180-192 as they are.
 
 ## 4. Text that overflows rows and boxes
