@@ -994,6 +994,8 @@ async def _test_source_impl(
     # None). Every SourceTestResult returned past this point carries
     # ``resolved_url`` so the frontend can show / adopt the real URL
     # regardless of whether the rest of the test succeeds.
+    resolved_url: str | None = None
+
     # Name is optional on Test, but if provided it must be valid AND
     # not collide with an existing source or built-in. We deliberately
     # do this BEFORE resolving the URL so a bad name costs no YouTube or
@@ -1028,7 +1030,6 @@ async def _test_source_impl(
                 error=f"a source named {body.name!r} already exists",
             )
 
-    resolved_url: str | None = None
     try:
         new_url = await resolve_feed_url(body.url)
         new_url = await resolve_channel_feed_url(

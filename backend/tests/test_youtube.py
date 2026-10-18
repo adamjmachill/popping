@@ -495,6 +495,8 @@ def test_slugs():
         "https://www.youtube.com/feeds/videos.xml?playlist_id=PLabcdefghij123456",
     ) == "playlist_123456_yt"
     assert youtube_source_slug("https://youtu.be/abcdefghijk", _FEED) == "channel_qrstuv_yt"
+    dashed = "https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnop-r_t-v"
+    assert youtube_source_slug("https://youtu.be/abcdefghijk", dashed) == "channel__r_t_v_yt"
 
 
 # --- 12. the egress proxy still applies ---------------------------------------------
@@ -601,3 +603,19 @@ async def test_test_route_ssrf_branch_uses_the_plain_message(app_client, fake_dn
     body = (await app_client.post("/api/sources/test", json={"type": "reddit", "url": "r/python"})).json()
     assert body["ok"] is False
     assert body["error"] == "That address isn't reachable from Popping."
+
+
+@pytest.mark.parametrize(
+    "name, kind",
+    [("Bad Name", "invalid_url"), ("hn_top", "name_conflict")],
+)
+async def test_test_route_checks_the_name_before_resolving(app_client, net, name, kind):
+    resp = await app_client.post(
+        "/api/sources/test",
+        json={"type": "youtube_channel", "url": "https://www.youtube.com/@somebody", "name": name},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["error_kind"] == kind
+    assert net.requests == []

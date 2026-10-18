@@ -405,10 +405,15 @@ def youtube_source_slug(original: str, feed_url: str) -> str:
     slug = _slugify(name)
     if slug:
         return f"{slug}_yt"
+    # Ids may contain "-", which source names don't allow.
     if feed_query.get("playlist_id"):
-        return f"playlist_{feed_query['playlist_id'][0][-6:].lower()}_yt"
+        return f"playlist_{_id6(feed_query['playlist_id'][0])}_yt"
     channel = (feed_query.get("channel_id") or [""])[0]
-    return f"channel_{channel[-6:].lower()}_yt"
+    return f"channel_{_id6(channel)}_yt"
+
+
+def _id6(value: str) -> str:
+    return re.sub(r"[^a-z0-9_]", "_", value[-6:].lower())
 
 
 # --- network ----------------------------------------------------------------
