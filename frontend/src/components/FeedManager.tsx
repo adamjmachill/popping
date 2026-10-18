@@ -275,7 +275,7 @@ function TabButton({
       role="tab"
       aria-selected={active}
       onClick={onClick}
-      className={`flex-1 min-w-0 min-h-[44px] px-1 rounded-ios text-ios-body whitespace-nowrap truncate transition ${
+      className={`flex-1 min-w-0 min-h-[44px] px-1 rounded-ios text-ios-body max-[359px]:text-[15px] whitespace-nowrap truncate transition ${
         active
           ? 'bg-bg-elevated text-accent'
           : 'bg-bg-surface text-label-primary active:bg-bg-elevated'

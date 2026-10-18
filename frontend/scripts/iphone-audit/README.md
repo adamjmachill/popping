@@ -199,3 +199,19 @@ calls `onUnmocked({ method, path, url })` for anything it does not answer.
 
 `capture.cjs` and `probe.cjs` selectors are updated in PR5 when the UI changes
 (`open settings` becomes Menu → Settings).
+
+## Matching CI's fonts locally
+
+GitHub's ubuntu runner renders `system-ui` in DejaVu Sans, which is wider
+than the Inter this container defaults to (and wider than SF Pro on an
+iPhone). A label that fits locally can fail C14 in CI. To measure with
+CI's fonts, run the guard with the bundled fontconfig file:
+
+```bash
+FONTCONFIG_FILE=$PWD/scripts/iphone-audit/fonts-ci.conf \
+  PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+  node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp
+```
+
+`fc-match system-ui` with that variable set should print DejaVu Sans.
+Run it this way before every push.
