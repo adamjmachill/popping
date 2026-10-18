@@ -136,11 +136,80 @@ So this class of bug cannot come back: the sweep PR adds a Playwright smoke test
 
 ## 10. iPhone sweep checklist
 
-**pending**.
+Preliminary (from the code audit, high and medium confidence; the deep dive's verifiers will confirm or strike each one, and the overflow items from section 4 join this list). File:line as of main 721713e.
+
+Real bugs, not polish:
+
+- App.tsx:2022 and 2598: the menu's "Jump to column" does nothing on the phone (it scrolls desktop refs that are not mounted) and nothing on desktop either (the ref is a `display: contents` element). Fix: set the phone column (`setMobileCol`) and attach the ref to a boxed element, or drop the section on the phone since the tab strip covers it.
+- Column.tsx:314 to 324: the whole column header is a button that marks every entry read; the only hint is a tooltip. One stray tap clears a column. Fix: an explicit "Mark all read" control; the header stops being a button.
+- LoginPage.tsx:72: the username field has no `autoCapitalize="none"`, so iOS types "Adam" for "adam" and local sign-in fails. Same for the feed-name, subreddit, URL and category fields in FeedManager.tsx (1245, 1532, 1655, 605). Fix: `autoCapitalize="none" autoCorrect="off" spellCheck={false}` and `inputMode="url"` where it is a URL.
+- App.tsx:433 to 444: Done pushes a new history entry instead of going back, so Back reopens Settings. Fix: `history.back()` when Settings was opened by pushState in this session.
+- App.tsx:2594: the phone/desktop switch is `md` (768px); an iPhone in landscape (812 to 932px) gets the desktop multi-column grid. Fix: gate the desktop layout on width and height (or pointer), not width alone.
+- App.tsx:2401: `z-15` is not a Tailwind class, so the sticky error banner has no z-index. Fix: `z-10`.
+- App.tsx:2826, 306 and Settings.tsx:413: `window.prompt` and `window.confirm` for saving a view, renaming it, and resetting. In a home-screen app these look foreign. Fix: inline name field and the two-tap confirm pattern the feed delete already uses.
+- Settings.tsx:1526 and 1598: empty states tell a phone user to right-click or press keys. Fix: touch wording ("Tap the eye on a card").
+- Settings.tsx:204: the Settings sheet ignores the keyboard (no visualViewport handling), so a field near the bottom hides under the keyboard. Fix: size the sheet from `window.visualViewport`.
+
+Tap targets under 44px (one shared fix: a 44px minimum on every control, with padding rather than visual size):
+
+- FeedManager.tsx 658 to 671 and 790 to 920: edit-form save/cancel and row actions are 13px text links about 18px tall.
+- FeedManager.tsx 1069 to 1127 and 278: "find more feeds" 28px, Recommended "Add" 28px, tab pills 36px.
+- App.tsx 282 to 374, 2383, 2246 to 2258, 2677, 2703: preset chip buttons, filter chips, the search clear, the mobile column tabs.
+- Settings.tsx 215, 349 to 359, 763 to 768, 1403 to 1454; Drawer.tsx 318: Done buttons are 32px; Restore, Clear all, Retry, Edit and Cancel are text links.
+- Card.tsx 976 to 1121: the inline text actions (Discussed on Reddit, Summarize, Listen, Related coverage).
+
+Other phone defects:
+
+- Card.tsx:513: the swipe transition class is left on during the drag, so the card lags the finger. Fix: no transition while dragging, 180ms on release.
+- Card.tsx:585: a 500ms long-press silently copies the URL and collides with the native link callout. Fix: drop it, or make long-press open an action sheet.
+- Drawer.tsx:262: the closed Drawer stays mounted and focusable off-screen. Fix: `inert` and `aria-hidden` when closed.
+- Drawer.tsx:303: the grabber ignores the top safe-area inset. Drawer.tsx:334, Settings.tsx:263 and the column scrollers: no `overscroll-contain`, so scrolling past the end rubber-bands the page.
+- App.tsx:2210 and 2655: only the top safe-area inset is handled; landscape needs left and right.
+- App.tsx:2188: inline `minHeight: 100dvh` fights the `height: 100%` chain in styles.css. Pick one.
+- Toast.tsx:259 to 261: toast text is truncated to one line, so error toasts lose their message. Fix: two or three lines.
+- Settings.tsx:779 and other native selects: no chevron on iOS, so a select looks like a text box. Fix: one shared select style with a drawn chevron.
+- Settings.tsx:1436: Hidden and Saved rows truncate titles to one line. Fix: two lines.
+- Card.tsx:1690: the thumbnail is a div, not a link, so it has no native long-press menu.
+- Column.tsx:237: the column options popover closes on `mousedown`, which iOS does not send for taps on empty space.
+- App.tsx:2341 to 2364: there is no way to sign out on the phone (the sign-out badge is in a desktop-only row).
+- Sub-11px text: see section 4, item 12.
 
 ## 11. Ease-of-use sweep checklist
 
-**pending**.
+Preliminary (same caveat as section 10).
+
+Behaviour that misleads:
+
+- App.tsx:1112 and 1245 to 1249: `refresh()` toasts "refreshed" on every run, including the 60-second poll and every return to the app. Fix: toast only on a manual refresh.
+- Column.tsx:341 to 350: the "+N new" chip triggers a full refresh and the count never changes. Fix: make it scroll to the new items or clear, not refresh.
+- App.tsx:1615 and 748 to 751: hiding a card says "moved to history" but the card is filtered out of every column including history. Fix: one wording ("Hidden. Undo").
+- App.tsx:835 to 841: the Saved and For You columns are inserted only when non-empty, but the phone remembers the tab by index, so tabs shift under the user. Fix: remember the column by name.
+- Settings.tsx:1403 to 1410 and App.tsx:2860: "Clear all" and "Hide all downvoted" act at once with no confirm and no Undo. Fix: Undo toast or inline confirm.
+- FeedManager.tsx:411 and 379: deleting a feed is permanent, with a confirm that cancels itself after 4 seconds. Fix: offer Pause first; keep the confirm until answered.
+- lib/preferences.tsx:527 to 627: failed saves of read, star and hide marks are swallowed. Fix: one error toast and a retry.
+- Card.tsx:1392: the star tooltip names the wrong shortcut.
+
+Developer language where plain words belong:
+
+- api.ts:284: raw "500 Internal Server Error for /api/entries?..." is shown to the user. Fix: a plain message per status ("The server had a problem. Try again.").
+- FeedManager.tsx:1531 to 1540: Add custom asks the user to invent a slug ("lowercase letters, digits, underscore"). Fix: derive the id from the title or host; show a "Display name" field.
+- FeedManager.tsx:1110 and Drawer.tsx:415 to 477: Recommended and the Drawer show raw ids and categories while My feeds shows labels. Fix: use `sourceLabel` and `categoryLabel` everywhere.
+- FeedManager.tsx:1281: "generic_scrape", "Sitemap URL", "Link pattern" exposed. Fix: "Website (no feed)" with the two fields under Advanced.
+- Settings.tsx:757 to 834: the AI tab says "set provider in env", free-text model names, "Scoring model". Fix: a model picker per provider with "Other…", plainer names, save on change.
+- Settings.tsx:361 to 371: Notifications tab tells the user to edit .env and restart. Fix: on/off status with the setup note under Advanced.
+- Column.tsx:425 to 460: "Top (composite score)", a 0 to 100 min-score slider. Fix: "Best first / Newest / Oldest" and a simple switch.
+- Column.tsx:836: empty states mention "Feed Manager" and "the scheduler". Fix: name the real screen and say what will happen.
+- Settings.tsx:1165: a history row renders the literal text "◯ with strike" as its icon.
+- UserBadge.tsx:37 and App.tsx:2344: "(local bypass)" and a raw health status.
+- FeedManager.tsx:740 to 754, 705 to 713, 843 to 848: a feed's last error only lives in tooltips. Fix: show it as a line under the row.
+
+Structure:
+
+- Settings.tsx:229: eight scrolling tabs (Feeds, AI, Notifications, History, Hidden, Saved, Voted, Reset). Fix: group into Feeds, AI, Lists, Advanced; rename Voted to Downvoted.
+- Settings.tsx:211 to 222 and Drawer.tsx:314 to 325: Done on the left, title on the right, 32px tall. iOS puts the title left and Done right at 44px.
+- App.tsx:2839 and FeedManager error paths: every feed error goes to the dashboard banner behind the Settings sheet, where the user cannot see it. Fix: error toasts above the sheet, or an inline error line under the form.
+- Toast.tsx:93 to 120: info toasts vanish after 1.5 seconds. Fix: 3 to 4 seconds, two lines.
+- BriefCard.tsx:562: the expanded header row does not wrap on the phone.
 
 ## 12. Build order (PR-sized steps)
 
@@ -181,6 +250,10 @@ Browser-level checks that only a real iPhone can do, after popping-update: focus
 - Deep-dive workflow launched: 10 code readers, 3 designs (minimal change, iOS-native UX, structural), 3 judges, 1 synthesis, 7 adversarial verifiers, 1 completeness critic.
 - Read directly: App.tsx settings routing (lines 380 to 445: `?view=settings&tab=` drives the overlay via pushState/popstate), top bar (gear at 2272 to 2301, hamburger at 2306), FeedManager inline edit form (436 to 700: text category with a datalist, JSON textarea for headers, tiny "save" link), Drawer "All settings..." row (384 to 387), native `window.prompt` for presets (App.tsx 306 and 2826) and `window.confirm` for reset (Settings.tsx 413).
 - iPhone overflow audit done (agent, 92 tool calls): 13 measured defects, section 4. Scripts preserved in frontend/scripts/iphone-audit/.
+- Backend facts that shape the editor (reader report): any effective PATCH on an active feed rebuilds its scheduler job and sets the next fetch to now (scheduler.py about 2461), so autosave must send one PATCH per committed change (on blur or picker change), never per keystroke, and the backend should skip the job rebuild when only category or headers changed. `_validate_category` checks the stripped value but the routes persist it unstripped (sources.py 518, 617, 779); strip once in the route. The frontend's hardcoded KNOWN_BUILT_INS list (FeedManager.tsx:108) has 6 names while the backend registers 7 (rfd_hot_deals is missing); add a `builtin` flag to SourceOut instead. The header validator accepts blank keys (sources.py:325); the key/value editor must drop blank rows. The Test endpoint for subreddits imports `fetch_subreddit` from a module that does not define it (sources.py:1008 versus sources/reddit.py:41), so Test on a subreddit fails today; fix in the editor PR. Reddit rows store custom headers but the fetch ignores them (dynamic_reddit.py:171); hide the headers section for reddit and built-in rows.
+- Tests that pin the current FeedManager source text: backend/tests/test_frontend_slice15_add_generic_scrape.py (68 to 341) and test_source_create_sitemap_link_pattern.py (199 to 280) grep FeedManager.tsx and api.ts for literal strings. A rewrite must update those tests in the same PR or CI goes red.
+- Settings tab allow-list is duplicated in App.tsx 409 to 418, Settings.tsx 40 to 48 and 233; export one SETTINGS_TABS array.
+- Dead code to remove with the top-bar change: Drawer `onResetLocalState` prop (Drawer.tsx 61 to 92, App.tsx 2810), the `data-settings-gear` attribute (App.tsx:2309), the unused sheetUp animation, and Drawer header comments that describe a bottom sheet that no longer exists.
 - Deployment surface read: docker-compose.yml, nginx.conf.template, egress-proxy, ops/popping-update.sh. See section 2.
 - Reader reports done so far: feed editor, Settings overlay. Constraints they pinned down (each must hold in the redesign):
   - Settings tab identity is URL state (`?view=settings&tab=`), parsed by an allow-list in App.tsx 394 to 428 and set by pushState in 430 to 444. Settings.tsx 238 to 246 switches tabs with replaceState plus a synthetic popstate that App listens to. Any new tab or rename must be added in both places, and the Drawer deep-links by tab id (Drawer.tsx 345 and 384).
