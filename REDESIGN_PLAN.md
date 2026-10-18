@@ -14,6 +14,8 @@ Scope agreed with the owner:
 7. Text that overflows rows and boxes on the phone.
 8. Nothing that touches VPS exposure: no new ports, services or daemons.
 
+Raw evidence (every code reader report, design, judgment and verifier finding, appended automatically as they finish): REDESIGN_DEEP_DIVE.md on this branch.
+
 Also published as a Claude doc: https://claude.ai/artifact/6EWfrW14on6HFUc4ibmk1R
 
 ---
