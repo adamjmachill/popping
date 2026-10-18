@@ -63,6 +63,7 @@ import {
   MAX_PRESETS,
 } from './lib/preferences'
 import { STORAGE_KEYS, safeGetItem, safeSetItem } from './lib/storage'
+import { useMediaQuery } from './lib/visualViewport'
 
 const REFRESH_INTERVAL_MS = 60_000
 // Health pings don't need 60s cadence — DB status is slow-
@@ -246,7 +247,7 @@ function PresetChips({
   return (
     <div
       data-hscroll
-      className="flex gap-1.5 overflow-x-auto px-4 sm:px-6 border-b border-hairline bg-bg-app"
+      className="flex gap-1.5 overflow-x-auto pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] sm:pl-[max(1.5rem,env(safe-area-inset-left))] sm:pr-[max(1.5rem,env(safe-area-inset-right))] border-b border-hairline bg-bg-app"
       role="toolbar"
       aria-label="saved filter presets"
     >
@@ -575,6 +576,9 @@ export function App() {
   // all stay in sync.
   // The Brief tone survives a reload on this device; anything stored
   // that isn't one of the three tones reads as 'terse'.
+  // The desktop grid, its For You row, framing watch and inline Brief
+  // render only at desktop widths; a phone renders only its own layout.
+  const isDesktop = useMediaQuery('(min-width: 768px)')
   const [briefTone, setBriefToneState] = useState<BriefTone>(() => {
     const stored = safeGetItem(STORAGE_KEYS.briefTone)
     return stored === 'narrative' || stored === 'alert' ? stored : 'terse'
@@ -2561,7 +2565,7 @@ export function App() {
             and below 360px it drops to 28px for margin (smoke rule C16).
             While search is open on a phone the field takes the row and
             the title steps aside. */}
-        <div className="flex items-end justify-between px-4 pt-3 pb-2 sm:pt-4 sm:pb-3">
+        <div className="flex items-end justify-between pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-3 pb-2 sm:pt-4 sm:pb-3">
           <h1 className={`shrink-0 whitespace-nowrap text-ios-large-title max-[359px]:text-[28px] max-[359px]:leading-[34px] text-label-primary ${searchOpen ? 'hidden sm:block' : ''}`}>
             Popping
           </h1>
@@ -2663,7 +2667,7 @@ export function App() {
             offers — opening the Drawer takes one tap. The row is
             laid out as a single flex line so the trailing buttons
             stay aligned with the title row's right edge. */}
-        <div className="hidden sm:flex items-center justify-between px-4 pb-2 -mt-1">
+        <div className="hidden sm:flex items-center justify-between pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pb-2 -mt-1">
           <span className="text-ios-caption text-label-secondary truncate">
             {health
               ? `${health.entries} entries · ${health.sources} sources · ${health.status}`
@@ -2691,7 +2695,7 @@ export function App() {
       </header>
 
       {activeSources.size > 0 && (
-        <div data-hscroll className="px-4 border-b border-hairline bg-bg-surface flex items-center gap-2 text-ios-caption overflow-x-auto whitespace-nowrap">
+        <div data-hscroll className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] border-b border-hairline bg-bg-surface flex items-center gap-2 text-ios-caption overflow-x-auto whitespace-nowrap">
           <span className="text-label-secondary shrink-0">filtering by:</span>
           {Array.from(activeSources).map((src) => (
             // ``animate-fade-in`` fires on every mount (the animation
@@ -2727,7 +2731,7 @@ export function App() {
         <div
           role="alert"
           aria-live="assertive"
-          className="sticky top-0 z-10 px-4 py-2 bg-red-500/15 border-b border-red-500/40 text-ios-caption text-red-200 flex items-center justify-between gap-2"
+          className="sticky top-0 z-10 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] py-2 bg-red-500/15 border-b border-red-500/40 text-ios-caption text-red-200 flex items-center justify-between gap-2"
         >
           <span className="break-words">{error}</span>
           <button
@@ -2744,15 +2748,17 @@ export function App() {
           it. Mobile moves it into its own tab (see the mobile main
           below) so the column content isn't pushed below the fold
           by a card the user has to scroll past every time. */}
-      <div className="hidden md:block">
-        <BriefCard
-          brief={brief}
-          onBriefChange={setBrief}
-          tone={briefTone}
-          onToneChange={setBriefTone}
-          triggerGenerate={triggerBriefGenerate}
-        />
-      </div>
+      {isDesktop && (
+        <div>
+          <BriefCard
+            brief={brief}
+            onBriefChange={setBrief}
+            tone={briefTone}
+            onToneChange={setBriefTone}
+            triggerGenerate={triggerBriefGenerate}
+          />
+        </div>
+      )}
 
       <PresetChips
         presets={filterPresets}
@@ -2763,7 +2769,7 @@ export function App() {
       />
 
       {showSearchView ? (
-        <main className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4">
+        <main className="flex-1 overflow-y-auto overscroll-contain py-3 sm:py-4 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:pl-[max(1rem,env(safe-area-inset-left))] sm:pr-[max(1rem,env(safe-area-inset-right))]">
           <SearchResults
             query={searchQuery}
             entries={searchResults.filter((e) => !hiddenSet.has(e.id))}
@@ -2833,8 +2839,8 @@ export function App() {
               2. By-category grid — the All Subs columns. Skipped in
                  'multisub' view because the multi-sub column is the
                  whole dashboard there. */}
-          {viewKind === 'all' && visibleForYou.length > 0 && (
-            <section className="hidden md:block px-4 pt-4 pb-3 border-b border-hairline">
+          {isDesktop && viewKind === 'all' && visibleForYou.length > 0 && (
+            <section className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
               <header className="flex items-center justify-between mb-2">
                 <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
                   For You
@@ -2920,70 +2926,72 @@ export function App() {
               </div>
             </section>
           )}
-          {viewKind === 'all' && <FramingWatch />}
-          <main className="hidden md:grid md:grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 p-4 flex-1 overflow-x-clip overflow-y-auto">
-            {columns
-              .filter((col) => viewKind === 'multisub' || col.name !== 'For You')
-              .map((col, ci) => (
-                <div key={col.name} ref={setColumnRef(col.name)} className="contents">
-                  <Column
-                    name={col.name}
-                    sections={sectionsByColumn.get(col.name) ?? { new: [], history: [] }}
-                    sourcesById={sourcesById}
-                    sourcesByName={sourcesByName}
-                    newCount={newCountByColumn.get(col.name)}
-                    onRefresh={manualRefresh}
-                    onSourceTap={onSourceTap}
-                    selectedId={ci === selectedColumnIndex ? selectedCardId ?? undefined : undefined}
-                    cardRefs={cardRefs}
-                    onMarkRead={() => markColumnRead(col.name)}
-                    onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
-                    onHideEntry={(entryId) => {
-                      hideEntry(entryId)
-                      toast('Entry hidden.', {
-                        kind: 'info',
-                        action: {
-                          label: 'Undo',
-                          onClick: () => restoreHiddenEntry(entryId),
-                        },
-                      })
-                    }}
-                    onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
-                    hiddenSet={hiddenSet}
-                    onStarEntry={(entryId) => {
-                      const wasStarred = starredSet.has(entryId)
-                      toggleStarEntry(entryId)
-                      toast(
-                          wasStarred
-                            ? 'Removed from Saved.'
-                            : 'Saved for later — see the Saved column.',
-                          {
-                            kind: 'info',
-                            action: {
-                              label: 'Undo',
-                              onClick: () => toggleStarEntry(entryId),
-                            },
+          {isDesktop && viewKind === 'all' && <FramingWatch />}
+          {isDesktop && (
+            <main className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 py-4 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] flex-1 overflow-x-clip overflow-y-auto">
+              {columns
+                .filter((col) => viewKind === 'multisub' || col.name !== 'For You')
+                .map((col, ci) => (
+                  <div key={col.name} ref={setColumnRef(col.name)} className="contents">
+                    <Column
+                      name={col.name}
+                      sections={sectionsByColumn.get(col.name) ?? { new: [], history: [] }}
+                      sourcesById={sourcesById}
+                      sourcesByName={sourcesByName}
+                      newCount={newCountByColumn.get(col.name)}
+                      onRefresh={manualRefresh}
+                      onSourceTap={onSourceTap}
+                      selectedId={ci === selectedColumnIndex ? selectedCardId ?? undefined : undefined}
+                      cardRefs={cardRefs}
+                      onMarkRead={() => markColumnRead(col.name)}
+                      onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
+                      onHideEntry={(entryId) => {
+                        hideEntry(entryId)
+                        toast('Entry hidden.', {
+                          kind: 'info',
+                          action: {
+                            label: 'Undo',
+                            onClick: () => restoreHiddenEntry(entryId),
                           },
-                        )
-                    }}
-                    starredSet={starredSet}
-                    onVoteEntry={setEntryVote}
-                    votedMap={votedMap}
-                    prefs={columnPrefs[col.name] ?? DEFAULT_PREFS}
-                    onPrefsChange={(next) => setPrefsFor(col.name, next)}
-                    totalCount={col.totalCount}
-                    categoriesBySourceId={categoriesBySourceId}
-                    faviconBySourceId={faviconBySourceId}
-                    expandedSummaries={expandedSummaries}
-                    onToggleSummary={toggleSummary}
-                    sectionsCollapsed={sectionsCollapsedFor(col.name)}
-                    onToggleSection={(key) => setColumnSection(col.name, key)}
-                  />
-                </div>
-              ))}
-          </main>
+                        })
+                      }}
+                      onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
+                      hiddenSet={hiddenSet}
+                      onStarEntry={(entryId) => {
+                        const wasStarred = starredSet.has(entryId)
+                        toggleStarEntry(entryId)
+                        toast(
+                            wasStarred
+                              ? 'Removed from Saved.'
+                              : 'Saved for later — see the Saved column.',
+                            {
+                              kind: 'info',
+                              action: {
+                                label: 'Undo',
+                                onClick: () => toggleStarEntry(entryId),
+                              },
+                            },
+                          )
+                      }}
+                      starredSet={starredSet}
+                      onVoteEntry={setEntryVote}
+                      votedMap={votedMap}
+                      prefs={columnPrefs[col.name] ?? DEFAULT_PREFS}
+                      onPrefsChange={(next) => setPrefsFor(col.name, next)}
+                      totalCount={col.totalCount}
+                      categoriesBySourceId={categoriesBySourceId}
+                      faviconBySourceId={faviconBySourceId}
+                      expandedSummaries={expandedSummaries}
+                      onToggleSummary={toggleSummary}
+                      sectionsCollapsed={sectionsCollapsedFor(col.name)}
+                      onToggleSection={(key) => setColumnSection(col.name, key)}
+                    />
+                  </div>
+                ))}
+            </main>
+          )}
 
-          <main className="md:hidden flex-1 min-h-0 flex flex-col p-3">
+          <main className="md:hidden flex-1 min-h-0 flex flex-col py-3 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))]">
             {/* Tab bar. Replaces the old swipe-to-change-column
                 gesture — that gesture had no direction lock (any
                 60px-plus horizontal touch delta fired it, scroll

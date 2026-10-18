@@ -219,16 +219,16 @@ export function ColumnInner({
   // reads the latest ``cardRefs`` and ``entry.id`` from refs so
   // each card lands in the right slot regardless of when it
   // mounted.
-  const setCardRef = useCallback((entryId: number) => (el: HTMLElement | null) => {
+  // A detaching card removes its entry only while the entry is still
+  // that card: the same story can be registered by the phone layout
+  // and the desktop grid, and the grid unmounting (the window crossing
+  // 768px) must not drop the phone card's entry.
+  const setCardRef = useCallback((entryId: number) => (el: HTMLElement | null, prev?: HTMLElement | null) => {
     const refs = cardRefsLatest.current
     if (!refs) return
-    if ('current' in refs) {
-      if (el) refs.current.set(entryId, el)
-      else refs.current.delete(entryId)
-    } else {
-      if (el) refs.set(entryId, el)
-      else refs.delete(entryId)
-    }
+    const map = 'current' in refs ? refs.current : refs
+    if (el) map.set(entryId, el)
+    else if (!prev || map.get(entryId) === prev) map.delete(entryId)
   }, [])
 
   // Click-outside dismissal. The popover is small and short-lived;
@@ -641,7 +641,7 @@ type SectionProps = {
     | Map<number, HTMLElement | null>
     | React.MutableRefObject<Map<number, HTMLElement | null>>
     | undefined
-  setCardRef: (entryId: number) => (el: HTMLElement | null) => void
+  setCardRef: (entryId: number) => (el: HTMLElement | null, prev?: HTMLElement | null) => void
   categoriesBySourceId: Map<number, string> | undefined
   faviconBySourceId: Map<number, string | null> | undefined
   onMarkEntryRead: ((entryId: number) => void) | undefined
