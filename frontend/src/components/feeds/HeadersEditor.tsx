@@ -1,9 +1,13 @@
 // Request headers as rows instead of JSON (REDESIGN_PLAN.md section 8).
 // The rules live in lib/headers.ts and mirror the backend's.
 //
-// This is the `local` mode the Add form uses: every change reports the
-// map to send and whether it can be sent. The feed editor's autosave
-// mode arrives with PR6.
+// Two modes:
+// - ``local`` (the Add form): every change reports the map to send and
+//   whether it can be sent; the form sends it with Test and Add.
+// - ``autosave`` (the feed editor): the map is committed when focus
+//   leaves the headers, a row is removed or a preset is tapped, never
+//   per keystroke. A row with an error holds the whole commit; a
+//   half-filled row is left out and waits.
 
 import { useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
@@ -11,8 +15,10 @@ import {
   HEADERS_MAX,
   HEADER_PRESETS,
   blocksSave,
+  canonicalHeaders,
   checkRows,
   rowsToMap,
+  sameHeaders,
   type HeaderMap,
   type HeaderRow,
 } from '../../lib/headers'
@@ -24,52 +30,127 @@ const keepFocus = (e: React.SyntheticEvent) => e.preventDefault()
 const fieldClass =
   'w-full min-w-0 min-h-[44px] rounded-ios bg-bg-elevated border border-hairline px-3 text-ios-body text-label-primary placeholder:text-label-tertiary disabled:opacity-50'
 
+type Rows = HeaderRow[]
+
 export function HeadersEditor({
+  mode,
   value,
   onCommit,
   onValidChange,
   disabled,
+  busy,
+  failed,
+  reseedToken,
 }: {
-  mode: 'local'
-  // The rows to start from.
+  mode: 'local' | 'autosave'
+  // Local: the rows to start from. Autosave: the saved map.
   value: HeaderMap | null
-  // Called with the map to send (null for none) whenever it changes.
+  // Local: called with the map to send whenever it changes.
+  // Autosave: called with a map that differs from ``value``.
   onCommit: (map: HeaderMap | null) => void
-  // False while any row is half-filled or breaks a rule, so the form
-  // can hold Test and Add until it is fixed.
+  // Local only: false while any row is half-filled or breaks a rule.
   onValidChange?: (ok: boolean) => void
   disabled?: boolean
+  // Autosave only: a headers save is queued or in flight, or failed.
+  // Either way the rows aren't reseeded from ``value`` meanwhile.
+  busy?: boolean
+  failed?: boolean
+  // Autosave only: a new value reseeds the rows from ``value`` (Undo).
+  reseedToken?: number
 }) {
   const nextKey = useRef(0)
-  const [rows, setRows] = useState<HeaderRow[]>(() =>
-    Object.entries(value ?? {}).map(([name, v]) => ({ key: nextKey.current++, name, value: v })),
-  )
+  const toRows = (map: HeaderMap | null): Rows =>
+    Object.entries(map ?? {}).map(([name, v]) => ({ key: nextKey.current++, name, value: v }))
+  const [rows, setRows] = useState<Rows>(() => toRows(value))
   // "Fill in both" waits until focus has left the headers.
   const [focusInside, setFocusInside] = useState(false)
   const nameInputs = useRef(new Map<number, HTMLInputElement>())
 
   const check = checkRows(rows)
-  const ok = !blocksSave(check) && check.problems.length === 0
-  const map = ok ? rowsToMap(rows, null) : null
-  const mapKey = JSON.stringify(map)
 
+  // --- local mode --------------------------------------------------------
+  const localOk = !blocksSave(check) && check.problems.length === 0
+  const localMap = localOk ? rowsToMap(rows, null) : null
+  const localKey = canonicalHeaders(localMap)
+  const localMapRef = useRef(localMap)
+  localMapRef.current = localMap
   useEffect(() => {
-    onValidChange?.(ok)
-  }, [ok, onValidChange])
-  // Keyed on the map's JSON, so a re-render with the same rows reports
-  // nothing new.
+    if (mode === 'local') onValidChange?.(localOk)
+  }, [mode, localOk, onValidChange])
+  // Keyed on the map's content, so a re-render with the same rows
+  // reports nothing new.
   useEffect(() => {
-    onCommit(JSON.parse(mapKey) as HeaderMap | null)
-  }, [mapKey, onCommit])
+    if (mode === 'local') onCommit(localMapRef.current)
+  }, [mode, localKey, onCommit])
+
+  // --- autosave mode -----------------------------------------------------
+  // The map the rows were last seeded from or committed, so the
+  // server's echo of a commit doesn't reseed rows under the user.
+  const lastSeeded = useRef(canonicalHeaders(value))
+  const valueKey = canonicalHeaders(value)
+  useEffect(() => {
+    if (mode !== 'autosave' || focusInside || busy || failed) return
+    if (valueKey === lastSeeded.current) return
+    lastSeeded.current = valueKey
+    // Keep the order of names still present; append new ones (Postgres
+    // returns JSONB keys sorted by length, not as typed). A half-filled
+    // row was never sent, so it stays as typed.
+    const saved = Object.entries(value ?? {})
+    setRows((prev) => {
+      const kept = prev
+        .filter(
+          (r) =>
+            saved.some(([n]) => n.toLowerCase() === r.name.trim().toLowerCase()) ||
+            (r.name.trim() === '') !== (r.value.trim() === ''),
+        )
+        .map((r) => {
+          const hit = saved.find(([n]) => n.toLowerCase() === r.name.trim().toLowerCase())
+          return hit ? { key: r.key, name: hit[0], value: hit[1] } : r
+        })
+      const added = saved
+        .filter(([n]) => !kept.some((r) => r.name.toLowerCase() === n.toLowerCase()))
+        .map(([n, v]) => ({ key: nextKey.current++, name: n, value: v }))
+      return [...kept, ...added]
+    })
+    // value is read through valueKey.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode, valueKey, focusInside, busy, failed])
+  // Undo: back to what is saved.
+  const firstToken = useRef(reseedToken)
+  useEffect(() => {
+    if (reseedToken === firstToken.current) return
+    firstToken.current = reseedToken
+    lastSeeded.current = canonicalHeaders(value)
+    setRows(toRows(value))
+    // Only a new token reseeds.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [reseedToken])
+
+  const commit = (next: Rows) => {
+    if (mode !== 'autosave' || disabled) return
+    if (blocksSave(checkRows(next))) return
+    const map = rowsToMap(next, value)
+    if (sameHeaders(map, value)) return
+    lastSeeded.current = canonicalHeaders(map)
+    onCommit(map)
+  }
 
   const update = (key: number, patch: Partial<HeaderRow>) =>
     setRows((prev) => prev.map((r) => (r.key === key ? { ...r, ...patch } : r)))
 
   const addRow = (name = '', v = '') => {
     const key = nextKey.current++
+    const next = [...rows, { key, name, value: v }]
     // Focus inside the same tap, or iOS won't raise the keyboard.
-    flushSync(() => setRows((prev) => [...prev, { key, name, value: v }]))
+    flushSync(() => setRows(next))
     if (!name) nameInputs.current.get(key)?.focus()
+    else commit(next)
+  }
+
+  const removeRow = (key: number) => {
+    const next = rows.filter((r) => r.key !== key)
+    setRows(next)
+    commit(next)
   }
 
   const has = (name: string) => rows.some((r) => r.name.trim().toLowerCase() === name.toLowerCase())
@@ -80,7 +161,9 @@ export function HeadersEditor({
       className="space-y-3"
       onFocus={() => setFocusInside(true)}
       onBlur={(e) => {
-        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) setFocusInside(false)
+        if (e.currentTarget.contains(e.relatedTarget as Node | null)) return
+        setFocusInside(false)
+        commit(rows)
       }}
     >
       {rows.map((row) => {
@@ -110,7 +193,7 @@ export function HeadersEditor({
                 type="button"
                 onPointerDown={keepFocus}
                 onMouseDown={keepFocus}
-                onClick={() => setRows((prev) => prev.filter((r) => r.key !== row.key))}
+                onClick={() => removeRow(row.key)}
                 disabled={disabled}
                 aria-label={`remove header ${row.name.trim() || 'row'}`}
                 className="w-11 h-11 flex items-center justify-center rounded-ios text-red-300 active:opacity-60 disabled:opacity-40"

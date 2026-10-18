@@ -23,7 +23,7 @@
 // overlay" for free, and the overlay is dismissible by clearing the
 // param (Esc + tapping Done both do that).
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
   safeExternalUrl,
@@ -35,6 +35,8 @@ import {
 } from '../api'
 import { FeedManager } from './FeedManager'
 import { SETTINGS_TABS, type SettingsTab } from '../lib/settingsTabs'
+import { flushEditors, setPageHiding } from '../lib/sourceSaves'
+import { useMediaQuery, useVisualViewport } from '../lib/visualViewport'
 import { toast } from './Toast'
 import { usePreferences, type HistoryGroupByValue } from '../lib/preferences'
 
@@ -49,7 +51,6 @@ type Props = {
   // path can list existing names client-side).
   sources: Source[]
   onRefreshSources: () => Promise<void>
-  onError: (msg: string) => void
   onClose: () => void
   // Open this feed's row in Feeds (the Menu's ›, a ?source= link).
   // ``focusNonce`` changes on every request, so asking for the same
@@ -69,10 +70,11 @@ type Props = {
     onError?: (msg: string) => void,
   ) => Promise<void>
   generating: boolean
-  // Bubbles the old→new source name mapping from FeedManager's
-  // inline edit, so App can remap the active filter chip in the
-  // same render cycle.
-  onSourceRenamed?: (oldName: string, newName: string) => void
+  // A feed was added or deleted in Feeds, so App shows the change at
+  // once; and the Edit action on an "Added …" toast.
+  onSourceAdded?: (row: Source) => void
+  onSourceDeleted?: (id: number) => void
+  onEditSource?: (id: number) => void
   // Reset hooks. Wipes local namespaced keys; App owns the
   // reload so every component's state mirrors reset in lockstep.
   onResetLocalState: () => void
@@ -117,7 +119,6 @@ export function Settings({
   tab,
   sources,
   onRefreshSources,
-  onError,
   onClose,
   focusSourceId,
   focusNonce,
@@ -125,7 +126,9 @@ export function Settings({
   onBriefToneChange,
   triggerGenerate,
   generating,
-  onSourceRenamed,
+  onSourceAdded,
+  onSourceDeleted,
+  onEditSource,
   onResetLocalState,
   hiddenEntries,
   onRestoreHidden,
@@ -163,6 +166,19 @@ export function Settings({
     }
   }, [open])
 
+  // Errors inside Settings show as a toast over the sheet; App's banner
+  // sits behind it, where nobody would see it.
+  const reportError = useCallback((m: string) => toast(m, 'error'), [])
+
+  // Done, the backdrop and Esc: the blur commits a text field being
+  // edited, flushEditors commits any other unsaved draft, and the sheet
+  // closes at once. Saves carry on after it has gone.
+  const handleClose = useCallback(() => {
+    ;(document.activeElement as HTMLElement | null)?.blur()
+    flushEditors()
+    onClose()
+  }, [onClose])
+
   // Esc closes. Mirrors the Drawer's pattern; App's keyboard handler
   // also listens for Esc on the search input but this listener
   // captures first when the overlay is open.
@@ -172,14 +188,55 @@ export function Settings({
       if (e.key === 'Escape') {
         e.stopPropagation()
         e.preventDefault()
-        onClose()
+        handleClose()
       }
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, onClose])
+  }, [open, handleClose])
+
+  // Switching apps mid-edit: commit what is being typed and send it at
+  // once with keepalive. setPageHiding comes first so these commits go
+  // straight out, whichever of App's listeners and these runs first.
+  useEffect(() => {
+    if (!open) return
+    const hide = () => {
+      setPageHiding(true)
+      ;(document.activeElement as HTMLElement | null)?.blur()
+      flushEditors()
+    }
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') hide()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', hide)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', hide)
+    }
+  }, [open])
+
+  // The on-screen keyboard on a phone: the sheet shrinks to the visible
+  // area, so Done and the focused field stay above the keyboard. The
+  // desktop panel ignores this.
+  const viewport = useVisualViewport()
+  const phone = useMediaQuery('(max-width: 767px)')
+  const keyboard = open && phone && viewport.keyboardOpen
+  const panelRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!keyboard) return
+    const el = document.activeElement
+    if (el instanceof HTMLElement && panelRef.current?.contains(el)) el.scrollIntoView({ block: 'nearest' })
+  }, [keyboard, viewport.height, viewport.offsetTop])
 
   if (!open) return null
+
+  const panelStyle = keyboard
+    ? {
+        top: `calc(env(safe-area-inset-top) + 0.75rem + ${viewport.offsetTop}px)`,
+        bottom: `${Math.max(0, document.documentElement.clientHeight - (viewport.offsetTop + viewport.height))}px`,
+      }
+    : undefined
 
   return (
     <div
@@ -190,10 +247,12 @@ export function Settings({
       onClick={(e) => {
         // Backdrop tap closes. The inner card has stopPropagation so
         // taps inside it don't close.
-        if (e.target === e.currentTarget) onClose()
+        if (e.target === e.currentTarget) handleClose()
       }}
     >
       <div
+        ref={panelRef}
+        style={panelStyle}
         // Right-side panel on desktop, full-viewport sheet on mobile.
         // The mobile sheet is pinned by its top edge, not a vh height:
         // iOS Safari's vh counts the space behind its toolbar, so a
@@ -214,7 +273,7 @@ export function Settings({
             Settings
           </h2>
           <button
-            onClick={onClose}
+            onClick={handleClose}
             aria-label="close settings"
             className="shrink-0 min-h-[44px] min-w-[44px] px-2 flex items-center justify-center rounded-ios text-ios-body font-semibold text-accent active:bg-bg-elevated"
           >
@@ -264,16 +323,22 @@ export function Settings({
         {/* Body. ``min-h-0`` lets the section actually scroll when
             the content overflows the viewport. Same pattern as the
             Drawer. */}
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain bg-bg-app pb-[calc(2rem+env(safe-area-inset-bottom))]">
+        <div
+          className={`flex-1 min-h-0 overflow-y-auto overscroll-contain bg-bg-app ${
+            keyboard ? 'pb-8' : 'pb-[calc(2rem+env(safe-area-inset-bottom))]'
+          }`}
+        >
           {tab === 'feeds' && (
             <div className="pt-4 px-4">
               <FeedManager
                 sources={sources}
                 onRefresh={onRefreshSources}
-                onError={onError}
-                onSourceRenamed={onSourceRenamed}
+                onError={reportError}
                 focusSourceId={focusSourceId}
                 focusNonce={focusNonce}
+                onSourceAdded={onSourceAdded}
+                onSourceDeleted={onSourceDeleted}
+                onEditSource={onEditSource}
               />
             </div>
           )}
@@ -401,7 +466,7 @@ export function Settings({
             />
           )}
 
-          {tab === 'history' && <HistoryTabContent onError={onError} />}
+          {tab === 'history' && <HistoryTabContent onError={reportError} />}
 
           {tab === 'reset' && (
             <div className="pt-4 px-4 space-y-3">

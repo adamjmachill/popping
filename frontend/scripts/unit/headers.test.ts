@@ -25,6 +25,12 @@ test('both fields empty: the row is ignored', () => {
   assert.equal(rowsToMap([row('', '')], null), null)
 })
 
+test('a refused or malformed name is reported before its value is typed', () => {
+  assert.deepEqual(messages([row('Cookie', '')]), ["Popping can't send a Cookie header."])
+  assert.deepEqual(messages([row('Bad Header', '')]), ['Header names use letters, numbers and dashes.'])
+  assert.equal(blocksSave(checkRows([row('Cookie', '')])), true)
+})
+
 test('one field filled: fill in both, and it does not block saving', () => {
   const check = checkRows([row('X-A', ''), row('X-B', 'b')])
   assert.deepEqual(check.problems.map((p) => [p.message, p.incomplete]), [['Fill in both to save this header.', true]])

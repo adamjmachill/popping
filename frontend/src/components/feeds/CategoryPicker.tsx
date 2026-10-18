@@ -1,8 +1,8 @@
 // The category control for the Add form and the feed editor
 // (REDESIGN_PLAN.md section 7). One native select, so iOS shows its
 // own picker, grouped into the categories in use and the suggestions;
-// "New category" swaps it for a text field. A datalist would be
-// invisible on iOS Safari.
+// "New category" swaps it for a text field. A suggestion list tied to
+// a text field would be invisible on iOS Safari.
 //
 // Presentational: it reports the final value and the caller saves it.
 // Return or Add commits a new category; leaving the field does not.

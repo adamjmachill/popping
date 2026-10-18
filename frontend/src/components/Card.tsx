@@ -106,6 +106,8 @@ type Props = {
   // (App.tsx) doesn't need matching toggle logic.
   vote?: 'up' | 'down' | null
   onVote?: (direction: 'up' | 'down' | null) => void
+  // Tapping the source name opens that feed's editor in Settings.
+  onSourceTap?: (sourceId: number) => void
 }
 
 // Same tone -> style map as FramingWatch.tsx's standalone section —
@@ -289,7 +291,7 @@ const SWIPE_DIRECTION_RATIO = 1.3
 const SWIPE_MAX_REVEAL_PX = 88
 const SWIPE_COMMIT_PX = 58
 
-export function CardInner({ entry, sourceName, unread, selected, cardRef, onActivate, category, onMarkRead, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote }: Props) {
+export function CardInner({ entry, sourceName, unread, selected, cardRef, onActivate, category, onMarkRead, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote, onSourceTap }: Props) {
   const stripeClass = categoryStripeClass(category)
   const sourceTextClass = categorySourceTextClass(category)
   const borderClass = categoryBorderClass(category)
@@ -958,12 +960,29 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
           </div>
         )}
       </div>
-      <div className="flex items-center gap-2 text-ios-caption text-label-secondary">
-        {/* Uppercase + tracked, like a magazine section kicker — same
-            sans font as the rest of the meta row, just a different
-            case/tracking treatment, so the source reads as a label
-            rather than blending into the timestamp next to it. */}
-        {sourceName && <span className={`min-w-0 truncate font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>}
+      {/* 44px tall so the source name is a full-size tap target that
+          never overlaps the headline or the thumbnail. */}
+      <div className="flex min-h-[44px] items-center gap-2 text-ios-caption text-label-secondary">
+        {/* The source reads as a label, set apart from the timestamp
+            next to it. Tapping it opens that feed's editor. */}
+        {sourceName &&
+          (onSourceTap ? (
+            <button
+              type="button"
+              data-card-interactive
+              onTouchStart={(e) => e.stopPropagation()}
+              onClick={(e) => {
+                e.stopPropagation()
+                onSourceTap(entry.source_id)
+              }}
+              aria-label={`edit feed ${sourceLabel(sourceName)}`}
+              className={`min-w-0 min-h-[44px] truncate text-left font-semibold ${sourceTextClass}`}
+            >
+              {sourceLabel(sourceName)}
+            </button>
+          ) : (
+            <span className={`min-w-0 truncate font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>
+          ))}
         {sourceName && <span className="shrink-0 whitespace-nowrap">·</span>}
         <time className="shrink-0 whitespace-nowrap" dateTime={entry.published_at ?? ''}>{timeAgo(entry.published_at)}</time>
       </div>
