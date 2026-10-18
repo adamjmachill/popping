@@ -2,7 +2,7 @@
 
 Generated from the deep-dive workflow journal. Raw agent output, not edited. REDESIGN_PLAN.md is the curated plan; this file is the evidence behind it and survives if the session ends.
 
-Progress: 10 code readers, 1 designs, 0 judges, synthesis not yet, 0 verifiers, critic not yet.
+Progress: 10 code readers, 2 designs, 0 judges, synthesis not yet, 0 verifiers, critic not yet.
 
 ## Designs
 
@@ -936,6 +936,1445 @@ On-phone checks after popping-update (owner, 2 minutes):
 - **Single-process backend:** no new tasks, jobs or processes. The /auto YouTube branch is synchronous like the existing branches.
 - **Design tokens:** `text-ios-body` 17px for controls, `text-ios-caption` 13px for labels, `min-h-[44px]`, hairlines, accent #0a84ff, `rounded-ios`. No new tokens. One CSS utility (`.hit-44`) and one component class (`.select-ios`).
 - **PR #11 fixes preserved:** viewport-fit=cover without maximum-scale, the sheet pinned by its top edge with the safe-area inset, the safe-area bottom padding, and the 16px coarse-pointer rule as a backstop.
+
+
+### Popping on iPhone: one Menu sheet, a feed page that saves itself, YouTube that adds, text that fits (iOS-first design)
+
+Key decisions:
+- One top-bar button: the hamburger (aria-label 'open menu') opens a single Menu sheet with iOS-Settings-style push navigation. The gear (App.tsx:2305-2331), the phone refresh icon (App.tsx:2290-2297), Drawer.tsx (with 'All settings…' and Jump to column), and the Settings container with its 8-pill tab strip (Settings.tsx:182-262) are all deleted. Settings tab bodies become pushed pages through an exported SettingsPageBody.
+- The URL stays the source of truth with the same param names. ?view=settings is the Menu root, &tab= is level 1 (existing ids plus a new 'filter'), &page=feed-<id>|add|suggested is level 2, and &pick=category is level 3. One SHEET_PAGES constant in lib/sheetRoute.ts replaces the three duplicated allow-lists.
+- History depth is stored in history.state.poppingSheet. Back calls history.back() when depth > 1 and replaceState otherwise. Close calls history.go(-n). Opening at a feed from a card pushes the real chain (root, feeds, feed). This fixes 'Done pushes, Back reopens' (App.tsx:438-444).
+- Fastest edit path: the source label in every card's meta row (Card.tsx:961) becomes a 44pt button that opens that feed's page. Category is 3 taps from the dashboard, Pause 2, 'Use a Browser Identity' 2. The draft's 'card options menu' does not exist on touch.
+- Autosave has no time-based debounce, because every effective PATCH triggers an immediate fetch (scheduler.py:2455-2461). Text commits on blur or Return, pickers and switches on change, and the headers group when focus leaves the group. Pending drafts are flushed on page pop, sheet close, visibilitychange and pagehide, using fetch keepalive.
+- Per-source FIFO queue with one PATCH in flight. Same-field commits coalesce and the last write wins. Different fields are never merged, so errors map to the field. Network errors retry once after 2s. The store is a module singleton, so in-flight saves survive page unmounts. A failure after the user has left the page shows an error toast with an 'Open' action.
+- Rollback differs by control type. Discrete controls snap back to the saved value with a red caption. Text fields keep the user's draft, with the plain-language reason and Undo. Saved feedback is a spinner, then a check that fades after 1.2s, plus an aria-live announcement. Editor errors never go to the dashboard banner hidden under the sheet.
+- App applies the PATCH response but keeps the previous net_vote_score, because PATCH returns 0 (sources.py:398-403). An overlay of local writes and deletes (by timestamp versus each poll's start time) stops stale polls from undoing saved edits.
+- Category picker is a pushed checkmark list. It shows your categories with feed counts, then unused suggestions, then a 'New Category' input row, and auto-returns after a pick. New names are matched case-insensitively to existing ones and stored as typed, not lowercased, so categoryLabel keeps 'NHL'. The backend now stores the normalized value.
+- Headers are iOS-style rows: a red minus button, a Name input and a Value input, plus Add Header and two presets (Use a Browser Identity, Prefer English). The client mirrors the backend deny-list and limits, adds a token rule and normalizes smart punctuation, and sends the whole map or null. The section shows only for rss, podcast, youtube_channel and generic_scrape feeds that are not built-in. A one-tap browser-identity fix appears wherever a 403 is shown.
+- Corrects the draft's job-rebuild rule. Only a category-only PATCH may skip the job rebuild. Headers and name changes must rebuild, because the job holds a plugin built from the row (args=[plugin], and dynamic_rss.py:71 reads _source_row.custom_headers).
+- The feed page uses Refresh Now (POST /api/ingest/{name}) instead of Test. Test on an existing feed returns name_conflict, rejects built-in types, ignores headers for generic_scrape, and is broken for reddit. Test stays on the Add page only.
+- Add flow: one paste field that classifies the link. YouTube links and bare UC ids go to /api/sources/auto, which gains YouTube support. Reddit and Apple Podcasts links open the manual form with the type preset. A successful add lands on the new feed's page. AddCustomTab and AutoFeedBlock stay in FeedManager.tsx, so the backend source-text guard tests pass unchanged.
+- YouTube resolution, in order. Shapes that carry the id resolve with no network: bare UC id, feeds/videos.xml?channel_id=, /channel/, and scheme-less paste. Other shapes use the optional YOUTUBE_API_KEY first, then a page fetch with browser headers and domain-scoped consent cookies through the existing SSRF guard, with a 3MB cap. Seven ordered markers are tried (browseId is excluded). The consent wall and bot checks are detected. Errors are plain and teach the user to copy the channel ID. The key and raw exception text are never shown.
+- YouTube tests run fully offline. httpx.AsyncClient is monkeypatched with MockTransport, and app.url_safety.socket.getaddrinfo is patched, so the real SSRF guard stays in the path. Tests cover every shape, every marker, the consent redirect with and without an API key, a private-IP redirect, the body cap, and that the key never leaks.
+- Overflow is fixed at the root by a written layout contract enforced through ui primitives. The contract covers min-w-0 text, shrink-0 siblings, no fixed widths beside text, wrapping control rows, one 16px gutter, token-only type, and controls at least 16px by construction. The !important 16px override is replaced by a non-important max(1em,16px) base rule. Below sm the card thumbnail moves above the headline.
+- Overflow guard: frontend/scripts/iphone-audit/guard.cjs exits non-zero on document overflow (body and #root, not only html), controls off-screen, text cut by a clipping ancestor without ellipsis, fields under 16px, a non-coarse pointer, page errors or unmocked requests, and (from PR 3) tap targets under 44pt in the sheet and header. It runs at 320 and 390 in fresh contexts, and in CI through one build.yml step that installs playwright@1.56.1 with --no-save, so there are no package.json or Docker changes.
+- iOS keyboard handling: the sheet follows window.visualViewport, both top and bottom, and scrolls the focused field into view. Sheet gestures are swipe-down on the grabber and nav bar strip only. Pull-to-refresh uses WebKit's native rubber-band (scrollTop <= -64, no preventDefault) and replaces the refresh icon. The search bar replaces the title row and has a Cancel button.
+- Safety: no infra file is touched and nothing new runs on the VPS (no ports, services, daemons, cron jobs, background tasks, service worker or new routes). The only new outbound host is googleapis.com, and only when the owner sets YOUTUBE_API_KEY. Every PR runs a path-allowlist diff check and the security-review skill. tailwind.config.js joins the allowed list for the landscape breakpoint (build-time only).
+- PR order: 1 overflow and guard, then 2 backend (YouTube and editor contract), which can run in parallel with 1. Then 3 one-button Menu sheet, then 4 feed page, picker and headers, then 5 the whole-app sweep with landscape. Each PR has Playwright and pytest acceptance criteria, including exact PATCH counts per interaction.
+
+# Popping on iPhone: iOS-first redesign
+
+The angle is the best iOS experience. The model is one button that opens one sheet, with navigation like iOS Settings. Rows are grouped lists at 44pt. Pickers are native wheels. Saving is silent, with a small spinner then a check. Errors show where they happen. Swipe down closes; pull down refreshes. Everything stays within the existing tokens: `bg-app #000`, `bg-elevated #1c1c1e` for cells, hairlines, `rounded-ios` 10px and `rounded-ios-lg` 14px, `text-ios-body` 17/22, `text-ios-caption` 13/18, `text-ios-large-title` 34, accent `#0a84ff`, plus the existing emerald and red status colours (Settings.tsx:333-366).
+
+Baseline: repo /home/user/popping at origin/main 721713e (PR #12). Line numbers were checked on that tree on 2026-10-18. "approx" marks a line that will drift.
+
+---
+
+## 0. Verdict on REDESIGN_PLAN.md (keep, correct, add)
+
+### Keep (right, adopted below)
+
+**Safety and YouTube**
+- §2 safety table and the pre-merge and post-update checks.
+- §3 YouTube diagnosis:
+  - the bot user-agent `Popping/0.2` (config.py:392, used at youtube.py:41)
+  - the single marker `"channelId"` (youtube.py:38)
+  - pasted feed links fail because the direct regex only knows `/channel/` (youtube.py:37, 75-77)
+
+**Overflow**
+- §4's 13 measured overflow defects and most of their fixes.
+
+**Editor contract (§6)**
+- Commit on blur. One PATCH per commit, never per keystroke.
+- A per-source serial queue.
+- A `builtin` flag on SourceOut.
+- Strip the category before storing it.
+- Fix the reddit Test import.
+- Reject bad header names.
+- Route tests for every validation.
+
+**Category, headers, top bar (§7 to §9)**
+- §7: build the category options from `sources`.
+- §8: key/value header rows with presets. Drop blank rows. Send `null` to clear. Hide the section for built-in and reddit feeds.
+- §9: one top-bar button, Sign out on the phone, Save view without `window.prompt`, dead-code removal.
+
+**Checklists and process**
+- §10 and §11 checklists (deduplicated in §12 here).
+- PR-per-step discipline.
+
+### Correct (wrong against the code)
+
+- **C1. Job rebuild.** The draft skips the scheduler job rebuild when only `category`, `name` or `custom_headers` change (§6). That is unsafe for headers and name.
+  - The job's args hold a plugin built from the row: `args=[plugin]` in `_add_or_replace_dynamic_job` (scheduler.py:2101-2156).
+  - The plugin reads `self._source_row.custom_headers` at fetch time (dynamic_rss.py:71).
+  - So skipping the rebuild after a headers change keeps fetching with the old headers until the next restart.
+  - Only a category-only change is safe to skip. Dynamic ingest reloads the row by id (`session.get(Source, source_id)`, scheduler.py:~398) and reads `source.category` from the DB (scheduler.py:431).
+- **C2. Test fetch in the editor won't work for an existing feed.**
+  - Sending the feed's name returns `name_conflict` (sources.py:909-926).
+  - Built-in types are `unsupported_type` (sources.py:867).
+  - generic_scrape ignores headers (sources.py:1000-1006).
+  - reddit is broken (sources.py:1008).
+  - Fix: the feed page uses **Refresh Now**, which calls `POST /api/ingest/{name}` (api.ts:543-546) with the saved settings. Test stays only on the Add page.
+- **C3. "Card options > Edit this feed" has no surface on touch.**
+  - The chevron under a card is the inline-summary toggle.
+  - The card menu is right-click only (Card.tsx:708-808, bound at :879).
+  - Fix: the tap target is the source label in the card's meta row (Card.tsx:961, a plain `<span>` today).
+- **C4. Two sheets and a separate Drawer.** The draft's FeedEditorSheet at z-50 over Settings, plus the Drawer as a separate right-hand Menu, gives two presentations and stacked sheets. That is the duplication the owner objected to. Replaced by one sheet with a navigation stack (§3).
+- **C5. Lowercasing new categories.** `categoryLabel` leaves any string with a capital letter as is and title-cases lowercase strings (labels.ts:64-68). So "NHL" lowercased would display as "Nhl".
+  - Fix: match case-insensitively to existing categories, and store new ones as typed (trimmed, single spaces).
+- **C6. Wrong names and lines.**
+  - The reserved set is `_RESERVED_CATEGORY_NAMES = {"saved","for you"}` at sources.py:162, not `_RESERVED_CATEGORIES` near :154.
+  - The phone's tab index is persisted at App.tsx:1358-1366. Lines 835-845 are the Saved/For You column insertion.
+- **C7. Rewriting the grep tests is avoidable.** Keep `AddCustomTab` and `AutoFeedBlock`, with their pinned literals, in FeedManager.tsx. Then test_frontend_slice15_add_generic_scrape.py and test_source_create_sitemap_link_pattern.py pass unchanged. The editor lives in new files.
+- **C8. Use `sheetUp`, don't delete it.** It is exactly the sheet entrance animation (tailwind.config.js:97-100, :116).
+- **C9. "Backend pytest runs only in CI" is false.** The full suite passed here: 623 tests with Postgres 16, pgvector and /etc/hosts entries. The recipe is in §15.
+- **C10. `run.sh` is not a gate.**
+  - It leaks its preview server: `$!` is the npx wrapper (run.sh:13-15).
+  - It always exits 0 (capture.cjs:562).
+  - Fix: a new `guard.cjs` that exits non-zero (§11).
+- **C11. The 16px replacement must handle inheritance.** Tailwind preflight gives inputs `font-size: 100%`, so a raw input inside a 13px parent renders at 13px. The real fix has three parts:
+  - primitives at 17px,
+  - a non-important base rule `font-size: max(1em, 16px)`,
+  - a guard assertion.
+- **C12. Allowed files need two changes.**
+  - Add `frontend/tailwind.config.js` for the landscape breakpoint. It is build-time CSS with no runtime or infra effect.
+  - Drop `frontend/package.json` and the lockfile: install Playwright in the CI step with `npm i --no-save playwright@1.56.1`. That means no Dependabot churn and nothing new in the Docker build stage (frontend/Dockerfile runs `npm ci`).
+- **C13. YouTube details.**
+  - `browseId` is unsafe as a marker: it also names other channels (featured or related shelves). Exclude it.
+  - `/user/NAME` → `feeds/videos.xml?user=` with no network is unverified. Use a page lookup first and keep `?user=` only as the fallback when YouTube blocks the lookup.
+  - The current code pastes raw httpx text into the user message (youtube.py:107-108). With an API key that text would contain `key=…`. Never echo exception text.
+- **C14. Editor URL.** `?edit=<id>` becomes `page=feed-<id>` inside the sheet route. The refresh icon leaves the phone top bar entirely and is replaced by pull-to-refresh. It does not only leave below 360px.
+- **C15. PATCH response votes.** The PATCH response carries `net_vote_score: 0`; only the list endpoint fills it (sources.py:398-403). Replacing the row with the response zeroes the vote badge, so keep the previous value.
+- **C16. Polling race.** A poll that started before a PATCH but lands after it overwrites the row through `reconcileById` (App.tsx:1079-1100). The draft does not handle this. The overlay in §7.5 does.
+- **C17. Jump to column.** It is a no-op on desktop too: the ref sits on a `display: contents` element (App.tsx:2598), verified in Chromium. Remove it everywhere rather than fixing it.
+
+### Add (missing from the draft)
+
+- Behaviour of the Feeds list, the Add page and the Suggested page inside the new navigation.
+- The undefined autosave edges: idle debounce, Return key, close and app switch, field coalescing, rollback rules per control type.
+- Cards' source label opens the feed page in one tap.
+- A one-tap "Use a Browser Identity" fix wherever a 403 is shown.
+- Smart Add: a pasted YouTube, Reddit or Apple Podcasts link picks its own type; `/api/sources/auto` accepts YouTube links.
+- iOS keyboard handling for the sheet (visualViewport), swipe-down to dismiss, pull-to-refresh, and an iOS-style search bar with Cancel.
+- The BriefCard first-run header clip (BriefCard.tsx:562) joins the overflow list.
+- Saved presets are remapped on feed rename.
+- Toasts move above the sheet (portal, `z-[60]`).
+
+---
+
+## 1. Principles mapped to iOS
+
+| iOS idiom | Here |
+| --- | --- |
+| One settings surface, push navigation (Settings, Mail settings) | One Menu sheet whose rows push pages; back chevron top-left; Done top-right |
+| Inset grouped lists | Cells `bg-bg-elevated` on `bg-bg-app`, `mx-4 rounded-ios`, hairline separators inset to the text, rows `min-h-[44px]`, 17px titles, 13px secondary text, 13px uppercase section headers in `text-label-secondary` |
+| Native pickers | A real `<select>` laid invisibly over a value row, so a tap opens the iOS wheel |
+| Detail disclosure (ⓘ) | In "Show Stories From", tapping a row filters and tapping ⓘ opens the feed page |
+| Silent save | Spinner, then a check that fades after 1.2s; a red caption under the row on failure |
+| Sheet gestures | `animate-sheet-up` on open, drag down on the top bar to close, Esc on desktop |
+| Pull to refresh | Uses the native rubber-band of the phone column scroller; no JS scroll hijack |
+| Search bar | Replaces the title row while active, with a Cancel button |
+| Copy | Title Case for buttons, rows and titles ("Add Feed", "Delete Feed"); sentence case for footers; no developer words; no exclamation points |
+
+---
+
+## 2. Requirement map
+
+| # | Requirement | Where | PR |
+| --- | --- | --- | --- |
+| 1 | Editor in fewer steps | Card source label → feed page (1 tap); Menu → Feeds → feed (3) | 4 |
+| 2 | Category picker from existing categories, easy new one | Category page: your categories, then suggestions, then a "New Category" field | 4 |
+| 3 | Autosave, no save link | §7 | 4 (AI page in 5) |
+| 4 | Headers without JSON | Header rows with presets (§9) | 4 |
+| 5 | One top-bar button | Title, search, Menu; gear, refresh icon and Drawer removed (§3) | 3 |
+| 6 | iPhone problems fixed by default | Overflow root fixes, guard, keyboard-aware sheet, landscape, safe areas, 44pt targets (§11, §12) | 1, 3, 5 |
+| 7 | Ease of use by default | Native wheels everywhere, autosave everywhere, obvious 44pt Title Case buttons, plain copy (§12) | 3, 4, 5 |
+| 8 | VPS safety | §13; no infra file touched in any PR | all |
+| 9 | YouTube adds | §10, offline tests | 2 |
+| 10 | Real overflow fixes plus a guard | §11, `guard.cjs` in CI | 1, kept current in 3 and 4 |
+
+---
+
+## 3. Navigation: one button, one sheet
+
+### 3.1 Top bar (phone)
+
+```
+At rest:         [ Popping                        (⌕)  (≡) ]
+Search active:   [ (⌕ Search…                ⓧ)   Cancel  ]
+```
+
+**At rest**
+- Title: `text-ios-large-title truncate min-w-0`. Buttons: `w-11 h-11 shrink-0`.
+- At 320px, 34px "Popping" (about 140px) plus 2×44 fits in 288px. This fixes overflow item 8.
+
+**Search active (below md)**
+- The title and Menu button hide.
+- The field pill is `flex-1 min-w-0 h-11`.
+- The input is `type="text" inputMode="search" enterKeyHint="search" autoCapitalize="none" autoCorrect="off" spellCheck={false}`. This fixes items 2 and 13: there is no second native clear button.
+- The clear button is `w-11 h-11 -mr-3`, inside the pill.
+- Cancel is `shrink-0 min-h-[44px] px-1 text-ios-body text-accent`. It clears the query and closes search.
+- Desktop (md+) keeps the inline field (App.tsx:2231, `sm:w-72` becomes `md:w-72`).
+
+**Removed**
+- The refresh icon (App.tsx:2290-2297). Replaced by pull-to-refresh on the phone column and Menu → Refresh Now. Desktop keeps the sub-row Refresh button (App.tsx:2349-2355).
+- The gear (App.tsx:2305-2331), with its `data-settings-gear` attribute, on every breakpoint.
+
+**The single button**
+- The Hamburger (App.tsx:2333, Hamburger.tsx:11-33) keeps `aria-label="open menu"`. It opens the Menu root.
+
+**Breakpoints**
+- The desktop sub-row and the search width move from `sm:` to `md:` (App.tsx:2231, 2342). The header and the body then switch together.
+- The landscape fix itself is in PR 5.
+
+### 3.2 What happens to the gear, the Drawer, "All settings…" and the Settings overlay
+
+**Gear**
+- Deleted (PR 3).
+- Update App.tsx:1-17, which says the bar has hamburger, search and refresh, and delete the gear comment at App.tsx:2298-2304.
+
+**Drawer.tsx — deleted.** Each piece moves or goes:
+
+| Drawer piece | Fate |
+| --- | --- |
+| History row (Drawer.tsx:336-351) | Menu → "Your Stories" section |
+| Save current view (:366-376 → `window.prompt` App.tsx:2812-2832) | Menu row "Save This View" with an inline field |
+| All settings… (:377-390) | Removed; the Menu is the settings, and its rows are the old tabs |
+| Jump to column (:393-409) | Removed; a no-op on the phone (App.tsx:2022-2030) and on desktop (App.tsx:2598) |
+| Sources filter (:411-484) | The "Show Stories From" page |
+| `GroupedSection`/`GroupedRow` (:508-602) | Lifted into ui/Grouped.tsx |
+| Swipe-left dismiss (:132-193) | Replaced by swipe-down on the sheet's top bar |
+| Dead `onResetLocalState` | Gone with the file; App.tsx:2810 removed |
+
+**Settings overlay**
+- Its container is deleted: backdrop, panel, header, the 8-pill tab strip, and the replaceState plus synthetic popstate (Settings.tsx:182-262, 238-246).
+- The tab bodies stay in Settings.tsx, exported as `SettingsPageBody({tab, ...sameProps})`. Each becomes a pushed page.
+- `?view=settings&tab=<id>` still deep-links. `?view=settings` with no tab now means the Menu root.
+- Rename the label "Voted" to "Downvoted"; the id stays `voted`.
+
+### 3.3 Route model (lib/sheetRoute.ts)
+
+URL params live on the dashboard URL, so other params survive:
+
+| Param | Level | Values |
+| --- | --- | --- |
+| `view=settings` | 0, Menu root | opens the sheet (name kept for old links) |
+| `tab` | 1 | `feeds`, `filter` (new), `llm`, `notifications`, `history`, `hidden`, `starred`, `voted`, `reset` |
+| `page` | 2 | `feed-<id>` (under `feeds` or `filter`), `add`, `suggested` (under `feeds`) |
+| `pick` | 3 | `category` (under `page=feed-<id>` or `page=add`) |
+
+**Validation**
+- Invalid combinations are cut back to the longest valid prefix. For example, `tab=feed` falls back to the root. This keeps the intent of the allow-list comment at App.tsx:402-408.
+- A `page=feed-<id>` whose id is not in `sources` (once loaded) is replaced by its parent, with a toast "That feed was removed".
+
+**Single source of truth**
+- `export const SHEET_PAGES = [...] as const` in lib/sheetRoute.ts.
+- `SettingsTab` = `Exclude<(typeof SHEET_PAGES)[number], 'filter'>`.
+- This deletes the three duplicated lists: App.tsx:409-418, Settings.tsx:40-48 and the strip array at Settings.tsx:229-233.
+
+**API**
+- `useSheetRoute()` uses `useSyncExternalStore` and subscribes to `popstate` and a custom `popping:route` event.
+- Functions: `openSheet(levels[])`, `pushLevel(r)`, `popLevel()`, `replaceLevel(r)`, `closeSheet()`.
+
+**App.tsx changes**
+- Delete `settingsOpen`/`settingsTab`, the sync effect, and `openSettings`/`closeSettings` (App.tsx:384-444).
+- Use `const route = useSheetRoute()` instead.
+
+### 3.4 History rules (fixes "Done pushes, Back reopens", App.tsx:438-444)
+
+Every sheet navigation writes `history.state = { poppingSheet: n }`, where n is the number of sheet entries above the dashboard entry.
+
+| Action | What happens |
+| --- | --- |
+| Open (Menu button) | `pushState(root, {poppingSheet: 1})` |
+| Open at a feed (card source tap) | Three `pushState` calls: root (1) → `tab=feeds` (2) → `page=feed-<id>` (3), then one notify. The back chevron walks real entries, and Safari Back behaves the same. |
+| Push (row tap) | `pushState(next, {poppingSheet: n+1})` |
+| Back chevron, n > 1 | `history.back()` |
+| Back chevron, n ≤ 1 or state missing (deep link, bookmark) | `replaceState(parent, {poppingSheet: max(n,1)})` |
+| Close (Done, swipe-down, Esc, desktop backdrop, "Show Only This Feed", first filter pick) | n ≥ 1: `history.go(-n)`. State missing: `replaceState(urlWithout(view,tab,page,pick), null)` |
+| Replace (Add succeeds → the new feed's page) | `replaceState(feedPage, {poppingSheet: n})` |
+| Browser or iOS Back | `popstate` → route is re-read → the stack animates a pop |
+
+Notes:
+- `pushState` does not fire `popstate`, so sheetRoute dispatches `popping:route` itself.
+- Double-tap guard: back and close ignore further back or close until the next `popstate`, or 500ms.
+- After `go(-n)`, if the URL still carries `view=settings` (history changed outside the app), `replaceState` it clean.
+
+### 3.5 Sheet behaviour (components/ui/Sheet.tsx)
+
+**Layering**
+- Portal into `document.body`. While the sheet is open, `#root` gets `inert`, set through a ref effect because React 18 types lack `inert`.
+- ToastHost is also portaled and moves to `z-[60]` (Toast.tsx:117), so toasts sit above the sheet.
+- Sheet `z-50`. ShortcutsSheet z-40 and the desktop card menu z-40/50 are unchanged.
+
+**Phone (below md)**
+- Panel: `absolute inset-x-0 bottom-0 rounded-t-ios-lg bg-bg-app flex flex-col overflow-hidden motion-safe:animate-sheet-up`.
+- The top is pinned at `calc(env(safe-area-inset-top) + 0.75rem)`. This keeps PR #11 (Settings.tsx:198-204); never use vh.
+- Grabber: 36×5, in normal flow (`mx-auto mt-2 h-[5px] w-9 rounded-full bg-label-tertiary`). It is not absolutely positioned, which fixes the Drawer.tsx:303-306 safe-area bug.
+- Exit animation: 220ms `translateY(100%)`, from a keyframe in styles.css. The sheet stays mounted while it plays.
+
+**Desktop (md+)**
+- `md:inset-y-0 md:right-0 md:left-auto md:w-[480px] md:rounded-none md:animate-none`.
+- No grabber, no drag. Backdrop click closes.
+
+**Keyboard**
+- `useVisualViewport()` returns `{height, offsetTop}`. `layoutH = document.documentElement.clientHeight`.
+- While `layoutH - height > 120` (keyboard up):
+  - panel `top: calc(env(safe-area-inset-top) + .75rem + offsetTop px)`
+  - panel `bottom: layoutH - (offsetTop + height) px`
+  - the page scroller drops its safe-area bottom padding
+- On each visualViewport `resize`, the focused field is scrolled into view with `scrollIntoView({block:'nearest'})`.
+- Result: Done and the focused field stay visible. This fixes audit A1 (Settings.tsx:204).
+
+**Gesture**
+- Pointer drag on the grabber and nav bar strip only (`touch-action: none` there). Drags starting on a button are ignored.
+- The panel follows the finger downward.
+- Release closes when dy > 120px or velocity > 0.6px/ms. Otherwise it springs back over 200ms.
+
+**Keys and focus**
+- Esc: capture-phase listener with `stopPropagation`, same as Settings.tsx:169-180.
+- App's global keydown (App.tsx:1753-1894) returns early while `route.open`, so arrow keys can't move the card selection behind the sheet.
+- On open, focus goes to the panel (`tabIndex=-1`). Tab cycles inside it. On close, focus returns to the opener (Menu button or card source button).
+
+**Scrolling**
+- Each page scroller: `flex-1 min-h-0 overflow-y-auto overscroll-contain pb-[calc(2rem+env(safe-area-inset-bottom))]`.
+- styles.css adds `html, body { overscroll-behavior-y: none }`.
+
+**Lifecycle**
+- The sheet unmounts after its exit animation, as Settings did (Settings.tsx:182). Pages fetch their status on mount.
+
+### 3.6 Navigation stack (components/ui/NavStack.tsx)
+
+**Levels**
+- Every level from root to top is mounted, so scroll positions survive Back, as on iOS.
+- Each level is `absolute inset-0 flex flex-col`.
+- Lower levels: `inert aria-hidden="true" -translate-x-[30%] brightness-75`.
+- The top level enters from `translate-x-full` to `0` over 350ms with `cubic-bezier(0.32,0.72,0,1)`, the same curve as `sheet-up`. It renders at `translate-x-full`, then is set to `0` on the next animation frame.
+- A popped level stays mounted as "leaving" and slides back to `translate-x-full`, then unmounts on `transitionend` (380ms fallback).
+- Everything is `motion-safe:`. With reduced motion there is no slide.
+
+**Nav bar (one per level)**
+- `h-11 grid grid-cols-[1fr_auto_1fr] items-center px-2`.
+- Leading: back button, a chevron plus the parent title, `min-h-[44px] min-w-0 truncate text-ios-body text-accent`, `aria-label="Back to <parent>"`.
+- Centre: title, `text-ios-body font-semibold truncate max-w-[56vw]`.
+- Trailing: Done, `justify-self-end min-h-[44px] px-2 text-ios-body font-semibold text-accent`.
+- The root level has no back button. Its title is "Menu".
+
+---
+
+## 4. Screens
+
+### 4.1 Menu (root)
+
+```
+                      Menu                         Done
+ ┌───────────────────────────────────────────────────┐
+ │ ▤  Feeds                                   14   › │
+ │    2 need attention                    (red line) │
+ │ ⧩  Show Stories From              All Feeds    › │
+ └───────────────────────────────────────────────────┘
+ SAVED VIEWS
+ │ ＋ Save This View…              (input row)        │
+ YOUR STORIES
+ │ History                                        › │
+ │ Saved                                     12   › │
+ │ Hidden                                     3   › │
+ │ Downvoted                                  1   › │
+ APP
+ │ AI & Brief                                     › │
+ │ Notifications                            Off   › │
+ │ Refresh Now                 Updated 2 min ago    │
+ │ Sign Out                                 (red)   │
+ ADVANCED
+ │ Reset This Device…                             › │
+ 312 stories · 14 feeds · All good          (footer)
+```
+
+**Feeds row**
+- The value is `sources.length`.
+- The red second line appears when any feed has `auto_disabled`, or `error_count > 0 && last_error`.
+
+**Show Stories From**
+- Value: "All Feeds" when no filter; `sourceLabel(name)` when one feed; "N Feeds" when several.
+
+**Save This View…**
+- The row is itself the `<input>`: placeholder "Save This View…", `enterKeyHint="done"`, 17px. Tapping it opens the keyboard directly.
+- Return calls `savePreset(name)` (App.tsx:1680-1694) and toasts `Saved view “X”`.
+- Empty input does nothing. No `window.prompt`.
+
+**Counts**
+- Saved, Hidden and Downvoted counts come from App's `starredEntries`, `hiddenEntries` and `downvotedEntries`.
+
+**Notifications value**
+- Fetched on root mount (`api.notificationStatus`, as Settings.tsx:150-164 did).
+
+**Refresh Now**
+- Calls `refresh({manual: true})`. A spinner shows while `refreshing`. The subtitle is the last refresh time.
+
+**Sign Out**
+- Shown only when `user && !oidcDisabled` (App.tsx:447-449).
+- Calls `api.logout()` (api.ts:770), the same as UserBadge.tsx:26.
+
+**Footer**
+- Built from `health` (App.tsx:382). Status `ok` reads "All good"; anything else reads "Problem: <status>". This gives phones the status line the desktop sub-row has (App.tsx:2343-2347).
+
+### 4.2 Feeds (`tab=feeds`)
+
+```
+ ‹ Menu                 Feeds                      Done
+ │ ＋ Add a Feed                      (accent)      › │
+ │ ✦ Suggested Feeds                               › │
+ NEWS · 4
+ │ [ic] BBC News                                   › │
+ │      Updated 5m ago · every 15 min                │
+ │ [ic] The Extraordinarily Long Name of a Regio…  › │
+ │      Stopped after 6 failed checks         (red)  │
+ PODCAST · 2
+ …
+```
+
+- One section per category, sorted by `categoryLabel`, with the feed count in the header. Rows are sorted by `sourceLabel`.
+- Each row: SourceIcon 29px in a `rounded-[7px]` tile, title `sourceLabel(name)` (one line, `truncate`), subtitle `line-clamp-2`, chevron.
+- The net-vote badge and inline chips leave the list. This fixes overflow item 7.
+- Subtitle rules, first match wins:
+  1. `auto_disabled`: red "Stopped after N failed checks"
+  2. `!active`: "Paused"
+  3. `error_count > 0 && last_error`: amber "Last check failed · <timeAgo(last_fetch_at)>"
+  4. otherwise: "Updated <timeAgo> · every <interval>"
+- Empty state footer: "No feeds yet. Add one above."
+
+### 4.3 Feed page (`page=feed-<id>`)
+
+```
+ ‹ Feeds              The Verge                    Done
+      [icon 56]
+      The Verge
+      News · RSS feed · your votes +2
+ ┌ Last check failed 2 h ago ─────────────────── (red) ┐
+ │ upstream returned HTTP 403                          │
+ │ [ Use a Browser Identity ]                          │
+ └─────────────────────────────────────────────────────┘
+ │ Show Only This Feed                     (accent) │
+ │ Refresh Now          Got 23 stories, 2 new · now │
+ FEED
+ │ Name        the_verge                     ⟳/✓   │
+ │ Address                                          │
+ │ https://www.theverge.com/rss/index.xml     ⟳/✓  │
+ │ Category                          News       ›  │
+ │ Check Every                    1 hour       ⌃⌄  │
+ │ Paused                                  ( ○ )   │
+ Changing the address resets the feed's icon.   (only while editing it)
+ HEADERS   (rss, podcast, youtube_channel, generic_scrape; not built-in)
+ │ ⊖ User-Agent                                     │
+ │   Mozilla/5.0 (Macintosh; …                ✓    │
+ │ ⊕ Add Header                                     │
+ │ Use a Browser Identity   (hidden once a UA exists)│
+ │ Prefer English           (hidden once present)    │
+ Some sites block apps that don't look like a web browser. …
+ PAGE TRACKING   (generic_scrape only)
+ │ Sitemap Link   (optional)                         │
+ │ Only Links Starting With   /news/                 │
+ │            Delete Feed            (red, centred)  │
+```
+
+**Header block**
+- Name: `text-2xl font-bold break-words`.
+- Second line: category label · type label · votes. Type labels: rss "RSS feed", reddit "Subreddit", podcast "Podcast", youtube_channel "YouTube channel", generic_scrape "Web page", built-in "Built-in". Votes show only when `net_vote_score ≠ 0`.
+
+**Problem card**
+- Shown when `last_error && (error_count > 0 || auto_disabled)`.
+- `last_error` is `line-clamp-3` with a "More" toggle. This puts tooltip-only text on screen (FeedManager.tsx:723-754 today).
+- When the error looks like a 401/403/"forbidden", headers are allowed, and no User-Agent is set, the card shows a "Use a Browser Identity" button. It adds the preset and commits.
+- When `auto_disabled`, the card reads "Popping stopped checking after N failed tries. Turn off Paused to try again."
+
+**Show Only This Feed**
+- `setActiveSources(new Set([name]))`, then `closeSheet()`.
+
+**Refresh Now**
+- Calls `api.ingest(name)`.
+- The subtitle shows the result inline: "Got N stories, M new", or red `r.error`.
+- Then `refresh()` runs in the background, without a toast.
+- This replaces the 13px "fetch" link (FeedManager.tsx:857-891).
+
+**Fields**
+- **Name:** inline field.
+  - Typing is live-slugified: lowercase, runs of other characters become `_`, at most 120 characters. Leading and trailing `_` are trimmed only at commit.
+  - Footer: "Short name used in filters and links."
+  - Read-only for built-ins.
+- **Address:** stacked field (label above, full-width input).
+  - `type="url" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="done"`.
+  - Read-only for built-ins.
+  - When the server returns a different URL (YouTube or Apple resolution), the field shows it, with the caption "Saved as the channel's feed link".
+- **Category:** value row that pushes the picker.
+- **Check Every:** SelectRow with options 15 min, 1 hour, 6 hours, 24 hours (`REFRESH_PRESETS`, FeedManager.tsx:55-60). If the current value isn't a preset, it is added as "Every 5 minutes" so the wheel never lies.
+- **Paused:** SwitchRow; on means `active=false`.
+- Built-in footer: "Built-in feed. Its name and address are fixed. Deleting it is permanent."
+- Built-in status comes from `source.builtin` (PR 2). `KNOWN_BUILT_INS` (FeedManager.tsx:108-119), which is missing `rfd_hot_deals`, is deleted.
+
+**Delete Feed**
+- The red row expands in place into: "Delete “The Verge”? You can't undo this." with two 44pt buttons, Cancel and Delete (red).
+- There is no timer, replacing the 4s auto-cancel (FeedManager.tsx:379, 433-437). See §7.9 for what happens after.
+
+### 4.4 Category picker (`pick=category`)
+
+```
+ ‹ The Verge            Category                   Done
+ YOUR CATEGORIES
+ │ Deals                          2 feeds           │
+ │ News                           4 feeds        ✓  │
+ │ Podcast                        2 feeds           │
+ SUGGESTIONS
+ │ Finance · Gaming · Longform …  (one row each)     │
+ NEW CATEGORY
+ │ ＋ New Category                (input row)        │
+ Feeds in the same category share a column on the dashboard.
+```
+
+**Sections**
+- "Your Categories": the unique categories in `sources`, case-insensitively deduplicated (the stored spelling wins), with a feed count, sorted by label.
+- "Suggestions": `CATEGORY_OPTIONS` (FeedManager.tsx:80-105) minus those already in use.
+
+**Picking**
+- On the feed page: tap → commit → the check moves → pop after 250ms (`popLevel`).
+- On the Add page: the pick sets local form state, then pops.
+
+**New category**
+- Input with placeholder "New Category", `autoCapitalize="words" autoCorrect="off" enterKeyHint="done" maxLength={40}`, 17px.
+- A counter ("32/40") shows past 30 characters.
+- Return validates (§8), then commits and pops.
+
+### 4.5 Add a Feed (`page=add`)
+
+```
+ ‹ Feeds              Add a Feed                   Done
+ PASTE A LINK
+ │ https://…  (type=url, inputMode=url, Go)          │
+ [            Add Feed  (primary, 44)            ]
+ Popping finds the feed for you. YouTube links, @handles and channel IDs work too.
+ (error) couldn't find a feed (or anything scrapeable) at that URL
+ │ Track this URL anyway                  (accent)   │
+ │ More Options                                ⌄    │   (disclosure)
+   TYPE      ○ News feed (RSS / Atom) ✓ · Subreddit · Podcast · YouTube channel ·
+             Track page (no RSS)  – For sites without a feed
+   LINK      (label/placeholder ternaries kept)
+   SHORT NAME  auto-derived, editable, live-slugified
+   CATEGORY  News ›     CHECK EVERY  1 hour ⌃⌄
+   ADVANCED  ⌄  → Headers rows · Sitemap link · Only links starting with (Track page only)
+   [ Test ] [ Add Feed ]   (grid-cols-2, 44 each)
+   (test result card, data-test-result kept)
+```
+
+**Quick add (AutoFeedBlock, kept in FeedManager.tsx)**
+- The client classifies the pasted text before calling anything:
+
+| Pasted | What happens |
+| --- | --- |
+| YouTube host, or a bare `UC…` id | `api.autoAddSource(url, 'video')`; the backend gains YouTube support in PR 2 |
+| `r/x` or reddit.com/r/… | "More Options" opens prefilled with type Subreddit; the auto endpoint can't do Reddit |
+| podcasts.apple.com | "More Options" opens prefilled with type Podcast |
+| Anything else | `api.autoAddSource(url, 'news')` |
+
+- A single default category of `news` is used for all three add paths, except `video` for YouTube. Today the paths default to `other` (api.ts:409) and `news` (FeedManager.tsx:1190).
+- On success: `insertSource(row)`, then `replaceLevel(page=feed-<id>)`, and a toast "Added <label>". The user lands on the new feed's page and can rename or recategorize it at once.
+- On failure, the literals "couldn't find a feed" and "Track this URL anyway" stay inside the `autoMessage.kind === 'err'` branch. `trackAnyway` stays byte-compatible with the guard at test_frontend_slice15_add_generic_scrape.py:264-305.
+
+**Manual form (AddCustomTab, kept in FeedManager.tsx)**
+- **Type:** rows are `<label>`s that wrap visually hidden native radios (`<input type="radio" name="fm-type" value=…>`, kept for the guard at :87-135), with a checkmark accessory.
+  - The generic_scrape label must still contain "Track page" and "no RSS".
+  - Type is auto-selected from the link host until the user taps a type.
+- **Link:** keep `htmlFor="fm-url"`/`id="fm-url"` and the label and placeholder ternaries (FeedManager.tsx:1646-1670). The generic_scrape label must contain "Page URL" and its placeholder must stay exactly `'https://example.com'`. YouTube label: "YouTube link or channel ID".
+- **Short name:** auto-derived until the user edits it.
+  - From a host: same operations as `trackAnyway`.
+  - YouTube handle: `<handle>_yt`.
+  - Subreddit: `r_<name>`.
+  - This replaces the "lowercase letters, digits, underscore" ask (FeedManager.tsx:1541).
+- **Category:** a value row that pushes the picker (replaces the `<select id="fm-category">` at FeedManager.tsx:1722-1731).
+- **Advanced:**
+  - The headers editor, with local state passed to `api.testSource({custom_headers})` (api.ts:389-400) and `api.createSource`.
+  - Sitemap and link pattern stay under `{sourceType === 'generic_scrape' && (`, with `onChange={(e) => setSitemapUrl(...)}` and `onChange={(e) => setLinkPattern(...)}` kept. The `sitemap_url: ` and `link_pattern: ` keys stay in the createSource call.
+- **Errors:** `nameError` and `urlError` (FeedManager.tsx:1363-1364), computed but never rendered today, show as red captions under their fields.
+- **Test results:** `friendlyTestError` (FeedManager.tsx:163-188) loses the "Invalid URL —" prefix (backend messages become plain). `forbidden` reads "This site blocks apps that don't look like a browser." with a button "Use a Browser Identity and Test Again".
+- After Add: same as Quick add (land on the feed page).
+
+### 4.6 Suggested Feeds (`page=suggested`)
+
+- RecommendedTab content restyled as grouped rows.
+- Title `sourceLabel(name)`. Subtitle `categoryLabel(category)` · blurb (`line-clamp-2`), plus "Found for you" when `source === 'llm'`. This replaces the raw slugs (FeedManager.tsx:1110-1111).
+- Trailing "Add" pill: visually 30px, hit area `min-h-[44px] min-w-[44px]`.
+- The last row is "Find More Feeds", with a spinner and a result footer.
+- After Add: `insertSource(row)` and a toast "Added X" with an "Open" action that pushes `page=feed-<id>`.
+
+### 4.7 Show Stories From (`tab=filter`)
+
+- First row: "All Feeds", checked when `activeSources.size === 0`. Tapping it clears the filter (App.tsx:2018-2020) and closes the sheet.
+- One section per category. Rows: SourceIcon, label, a check when active, and a trailing ⓘ (44×44, `aria-label="Edit <label>"`) that pushes `page=feed-<id>`.
+- Tapping a row toggles the feed (App.tsx:1981).
+- The first pick from an empty filter closes the sheet, keeping the deliberate behaviour of App.tsx:2013-2017. Later toggles keep it open.
+- Footer: "The dashboard shows only these feeds until you choose All Feeds."
+
+### 4.8 Other pages
+
+- They render `SettingsPageBody` inside `px-4 pt-4` (or as grouped lists after PR 5):
+  - AI & Brief: tone, LLM section and Generate (Settings.tsx:274-328).
+  - Notifications, History, Saved, Hidden, Downvoted.
+- Reset becomes "Reset This Device…" and uses the inline two-step confirm, replacing `window.confirm` at Settings.tsx:413.
+
+### 4.9 Copy rules
+
+- Never shown to the user: "slug", "generic_scrape", "scheduler", "Feed Manager", ".env", raw HTTP status lines.
+- Errors say what happened and what to do.
+
+---
+
+## 5. Flows, tap by tap (iPhone, starting at the dashboard)
+
+| Task | Today | New |
+| --- | --- | --- |
+| Change a feed's category | 5 taps + typing the exact spelling (gear → row → edit → field → save; App.tsx:2307, FeedManager.tsx:688/798/605/657) | **3**: feed name on a card → Category → pick. Auto-returns; spinner then check. Via Menu: 5 (Menu → Feeds → feed → Category → pick) |
+| Create a new category | 5 + typing | **4** + typing: feed name → Category → New Category field → Return |
+| Change the address | 4 + typing + tiny save | **2** + typing: feed name → Address → Return or tap elsewhere |
+| Add a header | 4 + valid JSON | **4** + typing: feed name → Add Header (the name field gets focus in the same tap via `flushSync` then `focus()`) → Value → Return |
+| Fix a "Forbidden" feed | Write JSON by hand | **2**: feed name → Use a Browser Identity (saves, and the backend refetches at once) |
+| Pause or resume | 3 | **2**: feed name → Paused switch |
+| Refresh interval | 4 | **3**: feed name → Check Every → wheel pick (+ the wheel's Done) |
+| Fetch now | 3 | **2**: feed name → Refresh Now (result shown inline) |
+| Delete | 4, within 4 seconds | **3**: feed name → Delete Feed → Delete |
+| Add a YouTube channel | gear → Add custom → type a slug → YouTube → paste → Add; @handles fail | **4**: Menu → Feeds → Add a Feed → paste → Add Feed (or the keyboard's Go) → lands on the new feed's page |
+| Show one feed only | 2 (hamburger → checkbox) | **2**: feed name on a card → Show Only This Feed. Or Menu → Show Stories From → feed (3) |
+| AI settings | 2 (gear → AI pill) | **2**: Menu → AI & Brief |
+| History, Saved, Hidden | 2 | **2**: Menu → row |
+| Refresh | 1 (icon) | **1 gesture**: pull down. Or Menu → Refresh Now (2) |
+| Save a view | 2 + native prompt | **2** + typing: Menu → Save This View… → Return |
+| Sign out on the phone | Impossible | **2**: Menu → Sign Out |
+| Close | 32pt Done on the left | 44pt Done on the right, swipe down on the sheet top, or Back |
+| Search | 1, but at 320px the icons run off-screen | 1 + typing; Cancel closes |
+
+---
+
+## 6. Components and files
+
+### New
+
+| File | Contents |
+| --- | --- |
+| frontend/src/lib/sheetRoute.ts | Route parse and serialize, `SHEET_PAGES`, `useSheetRoute`, push/pop/replace/close/openSheet, depth state, double-tap guard |
+| frontend/src/lib/useVisualViewport.ts | `{height, offsetTop}`, updated through rAF on visualViewport `resize`/`scroll` |
+| frontend/src/lib/usePullToRefresh.ts | See §12, item P |
+| frontend/src/lib/sourceSaves.ts | Autosave store (§7) |
+| frontend/src/lib/categories.ts | `categoryOptions(sources)`, `matchCategory(input, existing)`, `validateCategory(s)`, `RESERVED_CATEGORIES = ['saved','for you']` (mirrors sources.py:162) |
+| frontend/src/lib/headers.ts | rows ⇄ map, `HEADER_DENY` (mirrors sources.py:169-187), `TOKEN_RE`, `VALUE_RE`, limits 20 and 512, smart-punctuation normalisation, `BROWSER_UA`, `PRESETS` |
+| frontend/src/lib/apiErrors.ts | `parseApiError` and `friendlyTestError`, moved from FeedManager.tsx:163-210; `userMessage(err)` per status; `fieldSaveMessage(err, field)` |
+| frontend/src/lib/slug.ts | `slugifyLive`, `slugifyFinal`, `deriveName(url, type)` |
+| frontend/src/components/ui/Sheet.tsx | §3.5 |
+| frontend/src/components/ui/NavStack.tsx | §3.6 (NavStack + NavBar) |
+| frontend/src/components/ui/Grouped.tsx | `Section`, `Row`, `ValueRow`, `ActionRow`, `DestructiveConfirmRow`. The header comment holds the layout contract (§11.3) |
+| frontend/src/components/ui/Field.tsx | `FieldRow` (inline or stacked; `readOnly`; `status`; `error`) |
+| frontend/src/components/ui/SelectRow.tsx | Value row with an invisible full-size `<select>` overlay (`absolute inset-0 opacity-0 text-ios-body`, so it is still at least 16px and doesn't zoom), up/down chevron, focus ring via `has-[:focus-visible]:ring-2` |
+| frontend/src/components/ui/Switch.tsx | `Switch` (button `role="switch" aria-checked`, track 51×31 `bg-emerald-500`/`bg-white/20`, thumb 27px) and `SwitchRow` (the whole row toggles) |
+| frontend/src/components/ui/SaveIndicator.tsx | Reserved 20px slot: spinner, check (fades 1.2s), or red ! |
+| frontend/src/components/ui/icons.tsx | ChevronRight, ChevronLeft, ChevronUpDown, Check, PlusCircle, MinusCircle, Info, Spinner, Gear, Feeds, Filter (24 viewBox, stroke 1.75, `aria-hidden`) |
+| frontend/src/components/menu/MenuSheet.tsx | Sheet + NavStack. Maps the route to levels and passes App props down |
+| frontend/src/components/menu/MenuHome.tsx | §4.1 |
+| frontend/src/components/menu/FilterPage.tsx | §4.7 |
+| frontend/src/components/feeds/FeedEditorPage.tsx | §4.3 |
+| frontend/src/components/feeds/CategoryPickerPage.tsx | §4.4 |
+| frontend/src/components/feeds/HeadersEditor.tsx | §9, used by the feed page (autosave mode) and the Add page (local mode) |
+| frontend/src/components/PullIndicator.tsx | `aria-hidden` arrow and spinner placed `absolute -top-12` inside the column scroller |
+| frontend/scripts/iphone-audit/guard.cjs | §11.4 |
+
+### Changed
+
+| File | Change |
+| --- | --- |
+| App.tsx | Route; header; mount MenuSheet in place of Drawer and Settings; `sources` overlay and helpers; `onSourceTap`; manual-only refresh toast; preset remap on rename; keydown early return |
+| Settings.tsx | Export `SettingsPageBody`; delete the container and strip; Reset confirm inline; labels |
+| FeedManager.tsx | Export `FeedsListPage`, `AddFeedPage` (AutoFeedBlock + AddCustomTab), `SuggestedFeedsPage`. Delete the sub-tab strip, `SourceRow` and its edit form, the JSON parser, `KNOWN_BUILT_INS`, and `editingRowId`/`editingInterval`. Keep every guard literal |
+| Card.tsx | Source label becomes a button; thumbnail and meta fixes |
+| Column.tsx | Pass `onSourceTap`; `data-ptr-scroller`; PullIndicator slot |
+| Toast.tsx | Lines, durations, portal, `z-[60]` |
+| BriefCard.tsx | Header wrap |
+| api.ts | `Source.builtin`; updateSource adds `sitemap_url`/`link_pattern` and a `keepalive` option; deleteSource throws `ApiError`; autoAddSource `kind` gains `'youtube_channel'` |
+| styles.css | Base form-control rule; overscroll; keyframes for push, pop and sheet-down |
+| LoginPage.tsx | Input attributes |
+| Hamburger.tsx | Comment only |
+| tailwind.config.js (PR 5) | Screens |
+
+### Deleted
+
+- frontend/src/components/Drawer.tsx
+
+---
+
+## 7. State and autosave
+
+### 7.1 Ownership
+
+- **App** keeps owning `sources` (App.tsx:381) and gains:
+  - `applyServerSource(row)`: replaces the row by id with `{...row, net_vote_score: prev.net_vote_score}` (C15), and records a local write.
+  - `insertSource(row)`
+  - `removeSource(id)`: also records a local delete.
+- **sourceSaves.ts** is a module singleton that App configures once:
+  - `configure({ getSource, onServerRow: applyServerSource, onRenamed: onSourceRenamed, onFailedAway })`
+  - The queue outlives page unmounts.
+- **Field components** hold only a `draft` while focused or dirty.
+
+### 7.2 Commit triggers
+
+There is no time-based debounce anywhere:
+- Every effective PATCH on an active feed rebuilds its job with `next_run_time = now`, which is an immediate fetch (scheduler.py:2455-2461, 2144).
+- An idle timer would save half-typed URLs.
+- iOS users end an edit with Return or by tapping elsewhere. Close and app-switch flushes cover the rest.
+
+| Control | Commits when | PATCH body |
+| --- | --- | --- |
+| Name | blur, Return (`enterKeyHint="done"`), page pop/close/pagehide (flush) | `{name}` |
+| Address | same | `{url}` |
+| Category | picker tap, or Return in New Category | `{category}` |
+| Check Every | `<select>` change | `{refresh_interval_seconds}` |
+| Paused | toggle | `{active}` |
+| Headers | focus leaves the whole headers group (`focusout` with `relatedTarget` outside it), Return in a value field, remove, preset, flush | `{custom_headers: map \| null}` |
+| Sitemap link / Only links starting with | blur, Return, flush | `{sitemap_url}` / `{link_pattern}` (empty → `null`) |
+
+### 7.3 Pipeline, queue, coalescing, races
+
+```
+commit(id, field, value):
+  value = normalize(field, value)            // trim, single spaces, slugifyFinal, header map canonicalised
+  effective = queued(field) ?? inFlight(field) ?? server(id, field)
+  if equal(value, effective): clear a stale error for field if value == server; return
+  if queued(field): replace its value        // coalesce same-field commits: last write wins
+  else queue.push({field, value})
+  setState(id, field, {status: 'saving', pending: value})
+  pump(id)
+
+pump(id):                                    // one PATCH in flight per source, FIFO
+  if inFlight(id) or queue empty: return
+  item = queue.shift(); inFlight = item
+  api.updateSource(id, {[item.field]: item.value}, {keepalive: item.keepalive})
+   .then(row => {
+      prev = getSource(id); onServerRow(row); server(id) = row
+      if prev.name != row.name: onRenamed(prev.name, row.name)
+      if no newer pending for field: status 'saved' → 'idle' after 1200 ms
+   })
+   .catch(err => {
+      if network error and !item.retried: item.retried = true; queue.unshift(item) after 2000 ms
+      else status 'error' {error: fieldSaveMessage(err, field), retry: () => commit(id, field, item.value)}
+           if no subscriber for (id, field): onFailedAway(source, field, message)
+   })
+   .finally(() => { inFlight = undefined; pump(id) })
+```
+
+**Equality**
+- Strings are compared after normalisation.
+- Header maps use canonical JSON (keys sorted); `null` ≡ `{}`.
+- An unchanged commit sends nothing. The backend would early-return anyway (scheduler.py:2325-2364).
+
+**Different fields are not merged into one PATCH**
+- That keeps error attribution exact: a 422 belongs to the one field sent.
+- Two quick edits to different fields give two sequential PATCHes. This is rare and harmless.
+
+**Race example**
+1. Pick News, then quickly Deals.
+2. PATCH(News) is in flight; Deals is queued. The display shows Deals (pending).
+3. News returns. The server row is applied, but the display keeps the pending Deals.
+4. PATCH(Deals) is sent and returns. Final state: Deals.
+- If News failed but Deals succeeds, the later success clears the error.
+
+**Deleted feed**
+- `dropSource(id)` cancels queued items. An in-flight result for a deleted id is ignored.
+
+### 7.4 Display value and re-seeding
+
+- The field shows `draft ?? pending ?? source[field]`.
+- `draft` exists only between focus and commit. Polling can therefore never overwrite text being typed.
+- The old re-seed effect, keyed on `source.custom_headers` identity (FeedManager.tsx:465-475), is deleted.
+- **Headers editor:** the local rows array is seeded once per page mount. It is re-seeded only when all of these hold:
+  - no header input is focused,
+  - no headers write is pending,
+  - the server map differs from the last seeded map.
+
+### 7.5 Polling overlay (C16)
+
+- `localWritesRef: Map<id, {at, fields}>` is set by `applyServerSource`. `localDeletesRef: Map<id, at>` is set by `removeSource`.
+- In `refresh()` (App.tsx:1057), record `startedAt = Date.now()` before `Promise.all`. On resolve, overlay the list:
+  - drop ids deleted at or after `startedAt`;
+  - for writes with `at >= startedAt`, overlay the written fields;
+  - prune older entries (the server reflects them).
+  - Then `reconcileById` as now.
+- Entries are capped to the last 60 seconds.
+
+### 7.6 Errors and rollback
+
+| Failure | Text fields (Name, Address, links) | Discrete controls (Category, Check Every, Paused, headers remove/preset) |
+| --- | --- | --- |
+| Client validation | Nothing sent. Red caption under the row; draft kept; Esc (desktop) or "Undo" restores the saved value | n/a: pickers can't produce invalid values; New Category validates in the picker |
+| 4xx | Draft kept. Plain caption with the backend reason plus "Undo" | Value snaps back to the saved one, plus a caption |
+| Network | One silent retry after 2s, then "Couldn't reach Popping. Check your connection." with "Try Again" | Same |
+| 5xx | "Popping had a problem saving. Try Again." | Same |
+| Failure after leaving the page | Error toast (4s): "Couldn't save the <field> for <label>: <reason>", with action "Open" that opens the feed page | Same |
+
+`fieldSaveMessage` mapping:
+
+| Backend response | Message |
+| --- | --- |
+| 409 | "Another feed already uses this name." |
+| 400 built-in | "Built-in feeds keep their name and address." |
+| 422 "category cannot be empty" | "Pick a category." |
+| 422 reserved | "“<X>” is used by the app. Pick another name." |
+| 422 ">40" | "Keep it to 40 characters or fewer." |
+| 422 header messages | Rewritten plainly, for example "Popping can't send the Cookie header." |
+| 422 "url is not reachable" | "That address isn't reachable from Popping." |
+| YouTube errors | Passed through (already plain after PR 2) |
+
+**Error surfaces**
+- Editor errors never go to the dashboard banner hidden under the sheet (App.tsx:2397-2411). The banner stays for dashboard refresh failures only.
+
+### 7.7 Saved feedback
+
+- Spinner while saving, then a check that fades over 1.2s.
+- A visually hidden `aria-live="polite"` region per page announces "Category saved" and similar.
+- There is no toast on success. Toasts are only for leaving-page failures, Add, and Delete.
+
+### 7.8 Close mid-save, page pop, app switch
+
+- The sheet closes immediately; nothing blocks.
+- Before close or pop, `flushRegistered()` runs every page's flusher:
+  - a dirty valid draft commits;
+  - a dirty invalid draft is discarded with the toast "<Field> wasn't saved: <reason>".
+- On `visibilitychange` (hidden) and `pagehide`, flushers run with `{keepalive: true}`, so the PATCH survives app suspension (fetch keepalive).
+- In-flight PATCHes complete after close and update App state. Their failures use `onFailedAway`.
+
+### 7.9 Rename, create, delete
+
+**Rename**
+- `onSourceRenamed(old, new)` (App.tsx:1994-2003) remaps the active filter.
+- PR 4 extends it to remap `filterPresets[].activeSources` (preferences.tsx:122-127), so saved views don't silently filter nothing.
+- The route uses ids, so it is unaffected.
+
+**Create**
+- The create response (`SourceOut`) goes to `insertSource`. Then a background `refresh()` runs without a toast.
+
+**Delete**
+1. `api.deleteSource(id)`, now throwing `ApiError` with `detail` (api.ts:446-452).
+2. `removeSource(id)` and `dropSource(id)`.
+3. `history.back()` to the Feeds list (it exists in the chain) when n > 1; otherwise `replaceLevel(tab=feeds)`.
+4. Toast "Deleted <label>".
+- On failure, a red caption appears and the row stays.
+
+### 7.10 Accessibility
+
+- Captions use `role="alert"`. Switches have `role="switch"`. Selects have `aria-label`. Status icons are `aria-hidden`.
+- Lower NavStack levels and `#root` are `inert`.
+
+---
+
+## 8. Category rules (lib/categories.ts)
+
+**Normalise:** `trim()`, then collapse internal whitespace to one space.
+
+**Validate, in order:**
+1. Not empty: "Pick a name."
+2. At most 40 characters: "Keep it to 40 characters or fewer." (String(40), models.py:46)
+3. Not "saved" or "for you" (case-insensitive): "“Saved” is used by the app. Pick another name." (sources.py:162)
+
+**Match:** if an existing category equals the input case-insensitively, use the stored spelling. This prevents the "news"/"News" duplicate columns that grouping by exact string creates (App.tsx:753-764; entries.py:366).
+
+**New categories:** stored as typed, so "NHL" stays "NHL". `categoryLabel` displays it unchanged.
+
+**Columns and the phone tab:** moving the last feed out of a category removes that column.
+- The phone tab must stay on the same column name.
+- PR 4 includes the "remember the tab by name" change from §12 item 8, because a category change otherwise shifts the index-based tab (App.tsx:1358-1366).
+
+**Backend (PR 2):** `_validate_category` returns the normalised value, and POST, /auto and PATCH store it (sources.py:518, 617, 779).
+
+---
+
+## 9. Header rules (lib/headers.ts)
+
+**Rows**
+- `{key, name, value}`. Seeded from `custom_headers` in object order.
+- Each row is one cell: a leading red ⊖ (44×44, `aria-label="Remove <name>"`), then a Name input (`font-medium`, placeholder "Name, e.g. User-Agent"), a hairline, then a Value input (placeholder "Value").
+- Both inputs are `autoCapitalize="none" autoCorrect="off" spellCheck={false}` at 17px.
+
+**Add Header**
+- A green ⊕ row.
+- `flushSync` adds the row, then the new Name input is focused in the same tap, so iOS opens the keyboard.
+- Hidden at 20 rows.
+
+**Presets** (each hidden when that header is already present):
+- "Use a Browser Identity" → `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15`
+- "Prefer English" → `Accept-Language: en-CA,en;q=0.9`
+
+**Validation, per row, shown as a caption**
+
+| Rule | Caption |
+| --- | --- |
+| Both name and value empty | Ignored |
+| Only one of the two filled | Kept as a local draft: "Fill in both to save this header." |
+| Name not matching `^[!#$%&'*+.^_`\|~0-9A-Za-z-]+$` | "Header names use letters, numbers and dashes." |
+| Name in the deny list (case-insensitive) | "Popping can't send this header." |
+| Duplicate name (case-insensitive) | "Already added." |
+| Value has more than 512 characters | "Too long (512 characters max)." |
+| Value outside `^[\t\x20-\x7e]*$` after normalising (“” → ", ‘’ → ', –— → -, … → ...) | "Use plain letters, numbers and symbols." |
+
+**Sending**
+- When the group commits, it sends only if every complete row is valid.
+- The map holds the complete rows; empty sends `null` (sources.py:354, 754-759).
+
+**Visibility**
+- Shown only for `type ∈ {rss, podcast, youtube_channel, generic_scrape}` and `!builtin`.
+- Reddit and built-in plugins ignore headers (dynamic_reddit.py:171; built-in plugins use static headers).
+
+**Footer:** "Some sites block apps that don't look like a web browser. A browser identity usually fixes “Forbidden” errors. Cookies and passwords can't be added here."
+
+**Backend (PR 2):** add `_HEADER_NAME_RE` in sources.py, with 422 "header name 'X' isn't valid" for blank or non-token names (today only type and deny-list are checked, sources.py:325-334).
+
+---
+
+## 10. YouTube (requirement 9)
+
+### 10.1 Resolver (backend/app/youtube.py)
+
+The order is chosen so that every shape that already carries the id needs no network.
+
+1. **Normalise the input.**
+   - `strip()`.
+   - Bare id `^UC[0-9A-Za-z_-]{22}$` → feed URL. This runs before the host check, because today a bare id falls through and 422s.
+   - Add `https://` when the text starts with `youtube.com/`, `www.youtube.com/`, `m.youtube.com/` or `youtu.be/` without a scheme (iOS paste).
+2. **Host check:** `is_youtube_url` (youtube.py:50-58), unchanged. Anything else passes through unchanged.
+3. **Feed links:** path `/feeds/videos.xml` with `channel_id=UC…` → canonical feed URL with other params stripped. `playlist_id=` or `user=` → canonical feed URL as is.
+4. **Channel path:** `/channel/(UC…)(/|?|#|$)` → feed URL. This covers `music.` and `m.` hosts.
+5. **Everything else needs a lookup.** That is `@handle`, `/c/NAME`, `/user/NAME`, `watch?v=`, `youtu.be/ID`, `/shorts/ID`, `/live/ID`, `/embed/ID`.
+   - Strip tracking params (`si`, `feature`, `pp`, `t`).
+   - Rewrite `m.`/`music.` to `www.youtube.com`, and `youtu.be/ID` to `https://www.youtube.com/watch?v=ID`.
+6. **Optional API (`settings.youtube_api_key` non-empty)** for handle, user and video shapes:
+   - `https://www.googleapis.com/youtube/v3/channels?part=id&forHandle=@x&key=…`, `…channels?part=id&forUsername=x`, `…videos?part=snippet&id=ID`, taking `items[0].id` or `items[0].snippet.channelId`.
+   - Same SSRF guard and hook.
+   - On 403 or `quotaExceeded`, fall through to the page lookup.
+   - `/c/` names always use the page lookup (search costs 100 quota units).
+7. **Page lookup.** A single shared constructor:
+   ```python
+   httpx.AsyncClient(timeout=_FETCH_TIMEOUT, follow_redirects=True, max_redirects=5,
+                     event_hooks={"request": [ssrf_event_hook]}, cookies=jar)
+   ```
+   - Keep the literal `event_hooks={"request": [ssrf_event_hook]}`, which is pinned by test_youtube.py `test_resolve_channel_feed_url_registers_ssrf_event_hook`.
+   - `jar` holds `SOCS=CAI` and `CONSENT=YES+` scoped to `.youtube.com`.
+   - Headers: a desktop Safari `User-Agent` (a module constant `_BROWSER_UA`, not `settings.user_agent`), `Accept: text/html,…`, `Accept-Language: en-US,en;q=0.9`.
+   - Entry check with `check_url_safe`, plus the final-URL check (as youtube.py:83-106).
+   - Stream the body; stop reading at 3,000,000 bytes.
+8. **Markers.** Attribute-order agnostic: find each `<link …>`/`<meta …>` tag, then read its attributes. First hit wins, in this order:
+   1. `<link rel="alternate" type="application/rss+xml" href=".../feeds/videos.xml?channel_id=UC…">`
+   2. `<link rel="canonical" href=".../channel/UC…">`
+   3. `<meta property="og:url" content=".../channel/UC…">`
+   4. `<meta itemprop="channelId|identifier" content="UC…">`
+   5. `"videoDetails":{…"channelId":"UC…"` (no nested braces)
+   6. `"externalId":"UC…"`
+   7. `"channelId":"UC…"` (legacy)
+   - `browseId` is deliberately excluded (C13).
+9. **Blocked detection:** any of the following raises `YouTubeBlockedError(YouTubeResolutionError)`:
+   - the final host is `consent.youtube.com` or `consent.google.com`;
+   - the body has a `consent.youtube.com` form or "Before you continue";
+   - HTTP 429;
+   - the body contains "confirm you’re not a bot" or "Sign in to confirm".
+10. **`/user/NAME` fallback:** when blocked, return `https://www.youtube.com/feeds/videos.xml?user=NAME`. The Test endpoint then shows whether YouTube still serves that feed.
+11. **Messages.** All plain; raw exception text is never included. Log `url` without its query, plus `exc.__class__.__name__`; never log the key.
+
+| Case | Message |
+| --- | --- |
+| Blocked | "YouTube didn't let Popping look this channel up. Paste the channel ID instead: in the YouTube app, open the channel, tap its description, scroll down, tap Share Channel, then Copy Channel ID. It starts with UC." (verify the app wording on the phone during PR 2's check) |
+| 404 | "YouTube says this channel or video doesn't exist." |
+| No marker | "Couldn't find the channel on that YouTube page. Paste the channel ID instead (it starts with UC)." |
+| Network | "Couldn't reach YouTube. Try again in a minute." |
+
+### 10.2 Route changes (backend/app/routes/sources.py)
+
+**Create and test paths** keep calling `resolve_channel_feed_url` (sources.py:446-451, 884-892).
+
+**`/api/sources/auto`** (sources.py:573-644): when `is_youtube_url(url) or is_bare_channel_id(url)`:
+1. Resolve. Map errors to 422 with the message.
+2. Name: `_free_source_name(session, base)`, where `base` is the handle slug plus `_yt`, or `youtube_` plus `id[2:10].lower()`. `sourceLabel` renders `_yt` as " (YouTube)" (labels.ts).
+3. `scheduler.add_source(type_='youtube_channel', refresh=_YOUTUBE_DEFAULT_REFRESH, category=normalised)`.
+4. Return `kind='youtube_channel'`; add it to the `SourceAutoResult.kind` Literal (schemas.py:130-143).
+- No auto-discovery task is spawned for YouTube.
+
+**Config and docs**
+- config.py: `youtube_api_key: str = ""`.
+- .env.example: a commented, optional `YOUTUBE_API_KEY=` with one line: "Optional. Looks up @handles through Google's API instead of loading YouTube pages. Free quota: 10,000 lookups a day."
+- README: a YouTube section with the channel-ID steps.
+
+### 10.3 Offline tests (backend/tests/test_youtube.py)
+
+**Fixture**
+- Patch `app.url_safety.socket.getaddrinfo` to return a public address (`142.250.0.1`) for `*.youtube.com` and `www.googleapis.com`, and `10.0.0.5` for `evil.internal`.
+- The real SSRF guard therefore stays in the path.
+- Patch `app.youtube.httpx.AsyncClient` with `lambda **kw: real(transport=httpx.MockTransport(handler), **kw)`, the pattern at test_reddit_oauth_token.py:15-30.
+
+**No-network cases** (the handler asserts zero calls):
+- bare id, with surrounding spaces
+- `/channel/UC…/videos`
+- `feeds/videos.xml?channel_id=…&foo=1`
+- `music.youtube.com/channel/…`
+- scheme-less `youtube.com/channel/…`
+
+**Lookup cases:**
+- `@handle?si=abc`: the request URL has no `si`; the User-Agent contains "Safari"; the SOCS cookie and Accept-Language are sent.
+- Each marker on its own: alternate link, canonical, og:url, itemprop, videoDetails, externalId, channelId.
+- A watch page whose first `"channelId"` belongs to another channel but whose `videoDetails` holds the right one → the right one.
+- A 302 to `consent.youtube.com`:
+  - without a key → `YouTubeBlockedError` whose message contains "channel ID";
+  - with `settings.youtube_api_key` monkeypatched → resolved through the mocked googleapis JSON; the API request has `forHandle=%40handle`; the error text never contains `key=`.
+- A 429 page → blocked.
+- 404 → not-found message.
+- A redirect to `evil.internal` → rejected, and the handler never sees that host.
+- A 5MB body with the marker after 3MB → no-marker error.
+- `/user/NAME` blocked → `?user=NAME` feed.
+
+**Route cases** (DB, CI, or locally with Postgres):
+- `POST /api/sources` with a bare id → 200 and `url` equals the feed URL.
+- `/api/sources/test` with a bare id → `resolved_url` set.
+- `/api/sources/auto` with an `@handle` (resolver mocked) → row of type `youtube_channel`, name ending in `_yt`.
+
+**Existing network-dependent test:** rewrite `test_resolve_channel_feed_url_raises_for_nonexistent_handle` against a mocked 404.
+
+---
+
+## 11. Overflow (requirement 10)
+
+### 11.1 Root causes, from the measured audit (REDESIGN_PLAN.md §4; scan in shots/390-overflow-scan.json, 320-*)
+
+- **R1. Unruled flex rows.** Text children lack `min-w-0`. Fixed-width siblings sit beside text: `w-44` search (App.tsx:2231), `w-28` thumbnail (Card.tsx:1734). Control rows don't wrap, so each control wraps inside itself (Card.tsx:976-1135).
+- **R2. No shared gutter.** The Feeds tab has 0px (Settings.tsx:265) against 16px elsewhere.
+- **R3. Hand-rolled type and a global override.** Sizes of 9, 10 and 11px (Card.tsx:1174, FeedManager.tsx:576-650, App.tsx:2709). The `!important` 16px override (styles.css:22-26) makes 13px controls jump to 16px on 18px lines, which clips the textarea's third line.
+- **R4. Header crowding.** Four fixed 44px buttons plus a 34px title.
+- **R5. One-line rows that grew features.** The feed row's name line holds 5 `shrink-0` chips (FeedManager.tsx:695-786). BriefCard's first-run header is `flex` without wrap (BriefCard.tsx:562).
+
+### 11.2 Fixes per defect
+
+| # | Defect | Fix | PR |
+| --- | --- | --- | --- |
+| 1 | Feeds tab touches the edges | Interim `pt-4 px-4` (Settings.tsx:265); replaced by grouped pages | 1, then 3 |
+| 2 | Search squeezes the title; buttons off-screen at 320 | Search-bar mode (§3.1) | 1 |
+| 3 | Headline beside thumbnail becomes a 10-17 line ribbon | Below `sm`, Thumbnail renders full-width `aspect-video` above the title (`order-first w-full`); the title is `min-w-0 flex-1`. From `sm` up, unchanged | 1 |
+| 4 | "12m / ago" wraps | Source button `min-w-0 truncate`; dot and `<time>` `shrink-0 whitespace-nowrap` (Card.tsx:955-963) | 1 |
+| 5 | Inline actions wrap mid-phrase | Row `flex flex-wrap gap-x-4 gap-y-1`; each action `inline-flex whitespace-nowrap min-h-[44px] -my-3 items-center` (Card.tsx:976-1135) | 1 |
+| 6 | Auto-add button 49px off-screen at 320 | Interim: input `min-w-0 w-full`. Final: stacked field plus full-width button (§4.5) | 1, then 4 |
+| 7 | Feed names clip early | Interim: chips move to the caption line. Final: Feeds list rows (§4.2) | 1, then 4 |
+| 8 | "Pop…" at rest at 320 | Two-button top bar | 3 |
+| 9 | Settings title wraps, Done squeezed | Interim: Done `shrink-0`, title `min-w-0 truncate`, "Settings → " dropped below `sm`. Final: NavBar | 1, then 3 |
+| 10 | Sub-tab pills wrap | Interim: `px-2 whitespace-nowrap truncate`. Final: strip deleted | 1, then 4 |
+| 11 | 16px override | Delete styles.css:22-26. Add `@layer base { input, select, textarea { font-size: max(1em, 16px); } }` (not important). Every new control uses `text-ios-body`. The guard asserts at least 16px | 1 |
+| 12 | 9 and 10px text | 11px floor for decorative badges (tone chip, new-count badge); 13px for anything read; the 10/11px labels become `text-ios-caption` | 1 |
+| 13 | Two clear buttons in search | `type="text" inputMode="search"` | 1 |
+| 14 (added) | Brief tab first-run header clips Generate (BriefCard.tsx:562) | `flex-wrap` like :673; Generate full width on its own row below `sm`; pills 44pt (BriefCard.tsx:312) | 1 |
+| 15 (added) | Toast clips errors to one line (Toast.tsx:122) | `line-clamp-3 break-words`; durations info 2.5s, error 4s, with action 5s (Toast.tsx:89-96) | 1 |
+| 16 (added) | Hidden/Saved titles one line (Settings.tsx:1436) | `line-clamp-2 break-words` | 5 |
+
+### 11.3 Layout contract
+
+Written as the header comment of ui/Grouped.tsx and checked in review.
+
+1. In a flex row, the text child is `min-w-0 flex-1`. It explicitly chooses either `truncate` (names, values) or `break-words` with `line-clamp-N` (titles, sentences, errors).
+2. Every non-text sibling (icon, button, chip, time) is `shrink-0`. Short metadata is `whitespace-nowrap`.
+3. No fixed widths on text or input containers on the phone. Widths come from flex, or `max-w-[50%]` for trailing values.
+4. Rows with several controls use `flex-wrap gap-x-* gap-y-*`, so a whole control drops to the next line instead of wrapping inside itself.
+5. One gutter: 16px (`px-4`/`mx-4`). Only full-bleed images may touch the edges.
+6. Type comes only from tokens (`ios-large-title`, `ios-body`, `ios-caption`), with an 11px floor for decorative badges.
+7. Form controls are at least 16px by construction. There is no global `!important`.
+8. Horizontal scrollers are deliberate: `overflow-x-auto` plus a right-edge fade mask (`[mask-image:linear-gradient(to_right,black_85%,transparent)]`). They are the only places content extends past the screen.
+
+### 11.4 The guard (frontend/scripts/iphone-audit/guard.cjs)
+
+**Setup**
+- CommonJS. Reuses `mockApi` and `IOS_UA` from capture.cjs:560.
+- Fixtures added to fixtures.cjs:
+  - a source with `builtin: true`
+  - one with a long `custom_headers` User-Agent
+  - an `auto_disabled` source with a 300-character `last_error`
+  - a 40-character category
+  - a YouTube source
+  - a generic_scrape source with a sitemap
+- The PATCH echo (capture.cjs:91-96) also returns `builtin`.
+- Fix capture.cjs:53 to match on the pathname: `context.route(u => /^\/(api|auth|assets)\//.test(new URL(u).pathname), …)`.
+
+**Run matrix**
+- Widths 320×568@2x and 390×844@3x, each in a fresh context per state (avoids the late-session `pointer: coarse` flip, capture.cjs:428-431).
+- Contexts use `isMobile`, `hasTouch` and the iOS user agent.
+- From PR 5, also 844×390 landscape, asserting that the phone `main.md\:hidden` is displayed.
+
+**States**
+
+| PR | States added |
+| --- | --- |
+| 1 | dashboard (For You), a column with long titles, card summary open, search open, Brief tab, Settings Feeds, Add custom |
+| 3 | Menu root, Feeds page, Show Stories From, AI & Brief, Notifications, History, Saved, Hidden, Reset; remove the old Settings states |
+| 4 | feed page (custom with headers and long address), feed page (built-in), category picker, Add a Feed (YouTube selected, More Options open), Suggested, feed page with a 422 error caption |
+
+**Rules (any failure → exit 1, with the element path printed)**
+
+| Rule | Check |
+| --- | --- |
+| a. Document overflow | `documentElement`, `body` and `#root` scrollWidth ≤ innerWidth + 1. The body check matters: `overflow-x: clip` hides overflow from html.scrollWidth (styles.css:36). |
+| b. Control off-screen | Every visible `a[href], button, input, select, textarea, [role=button], [role=switch], [role=tab]` lies within [−1, innerWidth+1] horizontally, unless an ancestor is an active horizontal scroller (`overflow-x: auto/scroll` and scrollWidth > clientWidth) |
+| c. Text cut off | For every non-whitespace text node, each `Range.getClientRects()` rect lies inside its nearest ancestor with `overflow-x ≠ visible` (or the viewport), unless an ancestor up to that clipper has `text-overflow: ellipsis` or `-webkit-line-clamp` |
+| d. Field font | Every `input, select, textarea` not `display: none`, including the `opacity-0` select overlays, has computed font-size ≥ 16px |
+| e. Touch emulation | `matchMedia('(pointer: coarse)').matches === true` |
+| f. Page health | No page errors besides the expected `/auth/me` 404, and no `!! UNMOCKED` request |
+| g. Tap targets (from PR 3) | `[data-sheet] button, [data-sheet] [role=switch], header button` have a hit box ≥ 44px high, and ≥ 44px wide when icon-only. Elsewhere tap targets are warnings only |
+
+**Visibility rule**
+- An element counts as visible when its rect is larger than 1×1, `visibility` isn't hidden, and it is not inside `[inert]` or `[aria-hidden="true"]`. This skips lower NavStack levels, PullIndicator and `sr-only` legends.
+
+**Output**
+- PNGs per state go to an output folder, for eyes-on review. Wrapping that looks wrong is caught by looking, not by the rules.
+
+**CI** (one step appended to `frontend-checks`, .github/workflows/build.yml:116-117; no new permissions or secrets):
+
+```yaml
+      - name: iPhone layout guard
+        run: |
+          npm i --no-save playwright@1.56.1
+          npx playwright install --with-deps chromium
+          ./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173 --strictPort &
+          for i in $(seq 1 60); do curl -sf -o /dev/null http://127.0.0.1:4173/ && break; sleep 0.5; done
+          node scripts/iphone-audit/guard.cjs http://127.0.0.1:4173 guard-out
+```
+
+**Locally:** the same, without `npm i`/`install`; the preinstalled chromium-1194 is used via `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`.
+
+**run.sh fix:** use `./node_modules/.bin/vite preview … --strictPort` so `$!` is the server itself; drop the hardcoded `PLAYWRIGHT_BROWSERS_PATH` when it is already set.
+
+---
+
+## 12. Whole-app iPhone and ease-of-use checklist (requirements 6 and 7)
+
+Each item: file:line, fix, PR. Items superseded by the redesign are marked.
+
+### Real bugs
+
+| # | Item | Fix | PR |
+| --- | --- | --- | --- |
+| 1 | Column header is a hidden "mark all read" (Column.tsx:314-321) | The header becomes static. Add "Mark All as Read" to the ⋯ popover, plus a 44pt text button at the end of the column list. Keep the Undo toast (App.tsx:1954-1971) | 5 |
+| 2 | "+N new" chip triggers a refresh and the count never changes (Column.tsx:341-357) | Non-interactive badge | 5 |
+| 3 | Login username autocapitalises (LoginPage.tsx:72-78) | `autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="go"`; the same on every feed field | 5; feed fields in 4 |
+| 4 | Landscape iPhone gets the desktop grid (App.tsx:2594, 2655; BriefCard/FramingWatch `md:`) | tailwind.config.js `theme.screens = { sm:'640px', md:{raw:'(min-width: 768px) and (min-height: 600px), (min-width: 1024px)'}, lg:'1024px', xl:'1280px', '2xl':'1536px' }`. No `max-*` variants exist in src (checked), so this is safe. Header `sm:` becomes `md:` (App.tsx:2342) | 5 |
+| 5 | `z-15` (App.tsx:2401) is not a Tailwind class | `z-10` | 1 |
+| 6 | Polling toasts "refreshed" every minute (App.tsx:1112, 1245-1249) | `refresh({manual})`; toast only for manual: pull, Menu, desktop button, `r` key | 3 |
+| 7 | Hide toast says "moved to history" (App.tsx:1615) while the menu path says "Entry hidden." | "Hidden" plus Undo on both paths | 5 |
+| 8 | Phone tab remembered by index shifts when Saved or For You appear (App.tsx:835-845, 1358-1366) | Persist the column name under the new key `popping.v1.mobileCol.name` (storage.ts:52 area); migrate the index once; `-1` → `'__brief__'` | 4 |
+| 9 | Bulk Clear all / Hide all downvoted act with no undo (Settings.tsx:1403-1410 → App.tsx:2854-2887) | Action toast with Undo restoring the previous array | 5 |
+| 10 | Preference save failures are swallowed (preferences.tsx:523-532; stale comment :28-30) | One error toast per failure burst plus one retry; fix the comment | 5 |
+| 11 | Native dialogs (App.tsx:306, 2826; Settings.tsx:413) | Inline field, inline chip rename, inline confirm | 3 |
+| 12 | Card swipe lags the finger (Card.tsx:513) | `el.style.transition = animate ? 'transform 180ms ease-out' : 'none'` | 5 |
+| 13 | Long-press copy fights the iOS link callout (Card.tsx:267, 585-593) | Gate the timer on `matchMedia('(hover: hover)')`; on touch the native callout gives Copy and Share | 5 |
+| 14 | Thumbnail is a `div role=button` (Card.tsx:~1690-1760) | `<a href target=_blank rel="noopener noreferrer">` with the same click recording | 5 |
+| 15 | Column popover closes on `mousedown` (Column.tsx:237-246) | `pointerdown` | 5 |
+| 16 | Sign out impossible on the phone (App.tsx:2364) | Menu row | 3 |
+| 17 | Drawer off-screen but focusable (Drawer.tsx:262-295) | Superseded: Drawer deleted; `inert` on `#root` and lower levels | 3 |
+| 18 | Jump to column dead (App.tsx:2022-2030, 2598) | Superseded: removed | 3 |
+| 19 | Back reopens Settings (App.tsx:438-444) | Superseded: §3.4 | 3 |
+| 20 | Settings ignores the keyboard (Settings.tsx:204) | Superseded: §3.5 | 3 |
+| 21 | No overscroll containment anywhere | §3.5, plus `overscroll-y-contain` on the phone column scroller (Column.tsx:489, App.tsx:2720) | 1 |
+| 22 | Side safe areas in landscape | Header, phone `main`, tab strip: `pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))]`. The Sheet pads with the same | 5 |
+| 23 | Inline `minHeight: '100dvh'` fights `height: 100%` (App.tsx:2188, styles.css:17) | Remove the inline minHeight | 5 |
+| 24 | Native selects look like text boxes (Settings.tsx:779, 812, 855; Column.tsx:418, 462) | SelectRow, or the shared select class with an up/down chevron | 5 (feed selects in 4) |
+
+### Tap targets (44pt, padding not visual size)
+
+- PresetChips (App.tsx:273-370)
+- filter chips and "clear all" (App.tsx:2369-2394)
+- mobile column tabs (App.tsx:2677, 2703): `min-h-[44px]` button with an inner 32px pill, plus the fade mask
+- card inline actions (§11.2 item 5)
+- History pills (Settings.tsx:1227-1243): 44pt segmented control like Settings.tsx:299-317
+- row actions in the Hidden, Saved and Downvoted lists (Settings.tsx:1446-1454)
+- the AI Edit/Cancel, "type a name instead" and clear links (Settings.tsx:763-768, 828-834, 904-913)
+- ShortcutsSheet close (ShortcutsSheet.tsx:93)
+- card action icons 40→44 (Card.tsx:1254, 1281, 1324, 1368, 1396, 1431), keeping `data-*` hooks
+- All in PR 5. Sheet and header targets are guaranteed by the primitives in PRs 3 and 4.
+
+### Plain words
+
+| Item | Change |
+| --- | --- |
+| api.ts:284 raw "500 … for /api/…" | `userMessage(err)` in lib/apiErrors.ts, used at App.tsx:1114-1115, SearchResults.tsx:81, LoginPage.tsx:105, Settings pages, BriefCard.tsx:594/785 |
+| Column empty states (Column.tsx:824, 836, 844-849; App.tsx:2495) | "Waiting for the first check"; "Paused after N failed checks. Resume it in Menu → Feeds" |
+| Column popover (Column.tsx:425-460) | Sort "Best First / Newest / Oldest"; the score slider becomes a SelectRow "Hide Lower-Ranked Stories: Off / Some / Most" (minScore 0/40/70) |
+| AI page (Settings.tsx:540-947) | Provider and model become SelectRows, each saved on change, with an "Other…" free-text option. API keys commit on blur (write-only, blank = untouched). The save button goes. "Scoring model" becomes "Ranking model". Copy without ".env" |
+| Brief tone (App.tsx:457) | Persisted per device (`popping.v1.brief.tone` in storage.ts) |
+| Notifications page (Settings.tsx:361-371) | "Push notifications: Off. Whoever runs your Popping server can turn them on." |
+| UserBadge "(local bypass)" (UserBadge.tsx:37), desktop health raw status (App.tsx:2344), desktop "Brief" button (App.tsx:2356-2363) | Bypass label removed; status → "All good" or "Problem"; button → "New Brief" |
+| Settings.tsx:1110, 1165 literal "◯ with strike" | Eye-off icon |
+| Settings.tsx:1526, 1598, 1683 right-click copy | "Tap the eye on a card…", "Tap the star…", "Tap ▼ under a card…" |
+| Card.tsx:1392 star tooltip says "(s)" | "(b)" |
+| Card.tsx:910 headline `aria-label` | Removed |
+| README.md:283-339 Drawer chips | Updated (PR 3) |
+
+### Pull to refresh (P, PR 3)
+
+**Where it attaches**
+- The phone column scroller (Column.tsx:489) gets `data-ptr-scroller` and `overscroll-y-contain`. iOS keeps the element's own rubber-band.
+- `usePullToRefresh` attaches passive `touchstart`/`touchend`, plus a `scroll` listener, to the mobile `main` (App.tsx:2655).
+
+**Behaviour**
+- While a touch is active and `scroller.scrollTop ≤ −64`, the state is "armed" and PullIndicator flips its arrow.
+- On `touchend` while armed: `refresh({manual: true})`; the spinner shows until it resolves.
+- There is no `preventDefault`. Card swipes are horizontal with their own lock (Card.tsx:602-656), so they don't conflict.
+- PullIndicator subscribes to a tiny module store, so Card and Column memo comparators are untouched (Column.tsx:881-909).
+- The Brief tab is excluded.
+- This can't be checked in Chromium (no rubber-band), so it is a manual phone check.
+
+### Optional polish (PR 5, only if time)
+
+- **Edge-swipe back** inside the sheet, only when `navigator.standalone === true` (the home-screen app has no system back gesture).
+- Mechanics: a touch starting within 20px of the left edge with horizontal intent; the page follows the finger; release past 1/3 of the width → `popLevel()`.
+
+---
+
+## 13. Safety (requirement 8)
+
+### Never touched by any PR
+
+- docker-compose.yml, any Dockerfile, frontend/nginx.conf.template, egress-proxy/, ops/.
+- No new published ports, services, daemons, containers, cron jobs or background processes.
+- No new asyncio background tasks. The YouTube auto path deliberately does not spawn the discovery task.
+- No new API routes; only the behaviour of existing ones changes.
+- No service worker or PWA plugin (a service worker is a background process on the phone).
+- No external fonts, scripts or styles (the nginx CSP is self-only, nginx.conf.template:29).
+
+### Allowed files
+
+- frontend/src/**
+- frontend/scripts/iphone-audit/**
+- frontend/tailwind.config.js (PR 5 screens; build-time CSS only)
+- backend/app/youtube.py, config.py, schemas.py, scheduler.py, routes/sources.py
+- backend/tests/**
+- README.md, .env.example
+- One step in `frontend-checks` of .github/workflows/build.yml (no `permissions`, no secrets)
+
+### Outbound requests
+
+| Host | When |
+| --- | --- |
+| youtube.com | Unchanged host; now with browser headers and consent cookies |
+| www.googleapis.com | Only when the owner sets `YOUTUBE_API_KEY` |
+
+- Every fetch goes through `check_url_safe`, `ssrf_event_hook` per hop, and the final-URL re-check (url_safety.py). If the hardened profile is on, the squid egress proxy still applies (it allows public hosts and denies private ranges, egress-proxy/squid.conf).
+- The key is never logged and never echoed; error strings never contain the request URL's query.
+
+### CI and Docker
+
+- Playwright is installed only on the GitHub runner (`npm i --no-save`). It is not in package.json, so it never reaches the frontend Docker build stage (frontend/Dockerfile runs `npm ci` from the lockfile) or the runtime image (the nginx stage copies only `dist`).
+
+### Per-PR gate
+
+```
+git diff --name-only origin/main...HEAD | grep -vE '^(frontend/src/|frontend/scripts/iphone-audit/|frontend/tailwind\.config\.js$|backend/app/(youtube|config|schemas|scheduler)\.py$|backend/app/routes/sources\.py$|backend/tests/|README\.md$|\.env\.example$|\.github/workflows/build\.yml$)'
+```
+- This must print nothing.
+- Run the security-review skill on the diff.
+- All four CI checks green.
+- After popping-update on the VPS:
+  - `docker compose ps` shows only `127.0.0.1:14789->8080`;
+  - `ss -ltnp` shows no new listeners;
+  - a feed refreshes.
+- Rollback: `POPPING_IMAGE_TAG`, as in the plan's §2.
+
+---
+
+## 14. PR sequence (each branches from main, draft PR, CI green, merge)
+
+Letters in brackets map to REDESIGN_PLAN.md §12. PR 1 and PR 2 are independent and can run in parallel. PR 3 needs PR 1 (guard). PR 4 needs PR 2 (`builtin`, header rule) and PR 3 (sheet and route).
+
+### PR 1 [A]: Text that fits, and the guard
+
+**Files**
+- frontend/src/styles.css
+- App.tsx: search-bar mode, z-10
+- Card.tsx: thumbnail, meta row, inline actions, 11px tone chip
+- BriefCard.tsx: header wrap, pills
+- Toast.tsx: lines, durations
+- Settings.tsx: interim gutter and header
+- FeedManager.tsx: interim Auto-add, pills, chip line, 13px labels
+- Column.tsx: `overscroll-y-contain`
+- frontend/scripts/iphone-audit/guard.cjs (new), capture.cjs, fixtures.cjs, run.sh
+- .github/workflows/build.yml (one step)
+
+**Done when**
+- `node guard.cjs` exits 0 at 320 and 390 for every PR 1 state.
+- A scratch edit (`w-[420px]` on the search pill) makes it exit 1 naming that element, at 390. Revert the edit; it is not committed.
+- `grep -rn "!important" frontend/src/styles.css` returns nothing.
+- The guard's field-font rule passes, so every control is at least 16px.
+- PNGs reviewed:
+  - the headline reads in one column at 320;
+  - "12m ago" stays on one line;
+  - "Discussed on Reddit" doesn't break mid-phrase;
+  - search with Cancel fits at 320;
+  - the Brief tab shows Generate.
+- `npm run lint` has 0 errors and at most the 6 baseline warnings; `npm run build` passes.
+- CI is green, including the new step.
+
+### PR 2 [C]: Backend: YouTube that adds, plus the editor contract
+
+**Files**
+- backend/app/youtube.py, config.py, schemas.py (`SourceOut.builtin: bool = False`; auto kind), scheduler.py (category-only change skips the job rebuild), routes/sources.py
+- .env.example, README.md
+- backend/tests/test_youtube.py, backend/tests/test_source_editor_contract.py (new)
+- frontend/src/components/FeedManager.tsx: `friendlyTestError` `invalid_url` passes the raw text through; YouTube label "YouTube link or channel ID" and the channel-ID footer
+- frontend/src/api.ts: `Source.builtin`, auto kind
+
+**sources.py changes**
+- A `_source_out(row, builtin_names)` helper used by list, get, create, auto and patch.
+- `_validate_category` returns the normalised value, which is then stored.
+- `_HEADER_NAME_RE`.
+- Reddit Test: `from app.reddit_client import fetch_subreddit` and `fetch_subreddit(normalize_subreddit(url), listing="hot", limit=50)`. An empty list maps to `ok=False, error_kind="not_found"` with "Reddit returned no posts. The subreddit may be private, banned or rate-limited."
+- The auto endpoint handles YouTube.
+
+**Done when**
+- New tests pass with the network off (`-m no_db` locally, plus DB tests via the §15 recipe), and in CI.
+- `GET /api/sources` has `builtin: true` exactly for the 7 registry names, including `rfd_hot_deals`.
+- PATCH `{"category":"  Tech  "}` stores "Tech".
+- PATCH `{category}` alone causes no `add_job` call on a fake `_scheduler`; PATCH `{custom_headers}` and `{url}` do.
+- PATCH with header `{"": "x"}` or `{"Bad Header": "x"}` → 422.
+- Each existing 422/400/409 rule has a route test: deny list, 20 entries, 512 characters, CRLF, empty category, more than 40, reserved, name regex, built-in rename, collision, refresh clamp.
+- YouTube: bare id, feed link and `/channel/` resolve with zero HTTP calls; a consent redirect yields the channel-ID message; with a key the API path resolves; no message contains `key=` or a stack text; the auto endpoint creates `youtube_channel`.
+- Existing YouTube, sitemap and frontend-guard tests are unchanged and passing.
+- Manual after deploy: on the phone, add one channel by @handle, and one by channel ID.
+
+### PR 3 [B]: One Menu button and the Menu sheet
+
+**Files**
+- New: lib/sheetRoute.ts, lib/useVisualViewport.ts, lib/usePullToRefresh.ts, components/ui/{Sheet,NavStack,Grouped,Field,SelectRow,Switch,SaveIndicator,icons}.tsx, components/menu/{MenuSheet,MenuHome,FilterPage}.tsx, components/PullIndicator.tsx
+- Changed: App.tsx, Settings.tsx (`SettingsPageBody`, Reset inline, labels), Toast.tsx (portal, `z-[60]`), Column.tsx (`data-ptr-scroller` and indicator), Hamburger.tsx (comment), README.md
+- Deleted: Drawer.tsx
+- Guard: states and selectors updated (capture.cjs:478-541 and probe.cjs:27-37 use the new labels)
+- In this PR, the Feeds page still renders FeedManager's existing content, and the ⓘ in Show Stories From is hidden until PR 4.
+
+**Done when**
+- At 320 and 390, the header has exactly three elements: title, search, menu.
+- `grep -rn "open settings\|data-settings-gear\|window.prompt\|window.confirm" frontend/src` returns nothing.
+- Playwright:
+  - open the Menu; push and pop every row's page; Done from depth 2 leaves `location.search` without `view`, `tab`, `page` or `pick`;
+  - after Done, `history.back()` does not reopen the sheet;
+  - `?view=settings&tab=history` opens History, and its back chevron shows the Menu;
+  - Esc closes and focus returns to the menu button;
+  - with the sheet open, Tab never reaches a card;
+  - the first pick in Show Stories From closes the sheet and the Filtering column shows;
+  - Save This View creates a preset chip;
+  - Sign Out shows when the mock `/auth/me` returns a user.
+- The poll produces no toast; Refresh Now produces one.
+- Guard green, including the tap-target rule.
+- Manual phone checks:
+  - focus a field: the sheet stays above the keyboard and Done stays visible;
+  - swipe down to close;
+  - pull to refresh;
+  - Back in Safari tab mode walks the pages.
+
+### PR 4 [D]: The feed page that saves itself, category picker, headers
+
+**Files**
+- New: components/feeds/{FeedEditorPage,CategoryPickerPage,HeadersEditor}.tsx, lib/{sourceSaves,categories,headers,apiErrors,slug}.ts
+- FeedManager.tsx: page exports; deletions per §6; guard literals kept
+- api.ts
+- App.tsx: overlay and helpers, `onSourceTap` stable through a ref, preset remap, tab-by-name
+- Card.tsx: the source label becomes `<button data-card-interactive onTouchStart={e => e.stopPropagation()} onClick={e => {e.stopPropagation(); onSourceTap?.(sourceName)}} className="min-w-0 truncate font-semibold -mx-2 px-2 -my-3 py-3">`
+- Column.tsx: thread `onSourceTap`. The comparators ignore callbacks (Card.tsx:1460-1475, Column.tsx:881-909), so it must stay stable.
+- menu/MenuSheet.tsx, menu/FilterPage.tsx: ⓘ
+- Guard states, plus guard-behaviour checks
+
+**Done when (Playwright with the mocked API, counting `request.method() === 'PATCH'`)**
+- Typing in Name without leaving it → 0 PATCHes.
+- Return → exactly 1, with body `{name}`.
+- Tapping a category → 1, with body `{category}`; the page pops.
+- Toggling Paused → 1.
+- Changing Check Every → 1.
+- Editing a header's name then its value then tapping outside → 1, with body `{custom_headers:{…}}`.
+- Removing the last header → `{custom_headers:null}`.
+- "Use a Browser Identity" → 1, with a User-Agent.
+- A page-level `route.fulfill({status:422, json:{detail:"category 'For You' is reserved for a built-in column"}})`:
+  - discrete control: value rolls back and the caption shows;
+  - text field: the draft is kept.
+- `route.abort('failed')` twice → the "Couldn't reach Popping" caption with Try Again.
+- PATCH delayed 1s, then Done → the request completes and the Feeds row shows the new value on reopen.
+- A stale list response delivered after the PATCH → the UI keeps the new value.
+- A built-in fixture shows read-only Name and Address and no Headers section.
+- A rename remaps the active filter chip and preset names.
+- Card source tap opens the feed page; back chevron → Feeds; back → Menu; Done → dashboard with a clean URL.
+- Quick add with a YouTube link lands on the new feed page.
+- Guard green.
+- `pytest -m no_db` passes with test_frontend_slice15 and test_source_create_sitemap_link_pattern unchanged.
+- lint and build pass.
+
+### PR 5 [E]: Sweep
+
+**Files:** §12 items marked 5, across frontend/src, plus tailwind.config.js.
+
+**Done when**
+- Every §12 item is either fixed (file:line in the PR description) or struck with a one-line reason.
+- The guard runs the landscape state (844×390, phone layout) and passes.
+- Manual phone check: rotate the phone, and try Page Zoom at 125%.
+
+---
+
+## 15. Verification recipe (corrects the plan's §13)
+
+**Frontend**
+```
+cd frontend && npm ci && npm run lint && npm run build
+./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173 --strictPort &
+node scripts/iphone-audit/guard.cjs http://127.0.0.1:4173 <scratchpad>/guard-out
+kill %1
+```
+- Look at the PNGs.
+- Never run `npx playwright install` in the container: the CDN is blocked; chromium-1194 is preinstalled.
+
+**Backend, locally (C9)**
+1. Postgres 16 cluster via `initdb`/`pg_ctl` as the postgres user.
+2. `apt-get install -y postgresql-16-pgvector`, or the verified pgvector v0.8.7 source build.
+3. `CREATE EXTENSION vector`.
+4. Add /etc/hosts entries for example.com/org/net and reddit.com; the SSRF guard resolves DNS (url_safety.py:150).
+5. `uv venv --python 3.12` and `uv pip install --no-deps -r backend/requirements-dev.lock`.
+6. `PYTHONPATH=$PWD python -m pytest -ra`. Baseline is 623 passed. `-m no_db` needs no Postgres.
+
+**Notes**
+- The YouTube tests need no DNS, because `getaddrinfo` is patched.
+- CI stays the authority. Use REST for checks (`gh api …/commits/<sha>/check-runs`); `gh pr view` fails with a GraphQL 403.
+
+---
+
+## 16. Risks and mitigations
+
+| Risk | Mitigation |
+| --- | --- |
+| History edge cases (rapid taps, external history changes, reload of deep links) | Depth in `history.state`; double-tap guard; post-close URL check; Playwright cases in PR 3 |
+| visualViewport jank on older iOS | rAF throttle; fallback to the static top-pinned layout when `visualViewport` is missing |
+| Pull to refresh relies on WebKit rubber-band and negative `scrollTop`; Chromium can't test it | Menu → Refresh Now and the 60s poll remain; manual phone check; the hook is a no-op when `scrollTop` never goes negative |
+| Removing the 16px override reintroduces focus zoom somewhere | Base `max(1em,16px)` rule; primitives at 17px; guard rule d covers every state, including `opacity-0` selects |
+| Every effective PATCH starts an immediate fetch (scheduler.py:2455-2461) | Commit-on-end only; category-only skip in PR 2; headers and URL rebuild on purpose (C1) |
+| Polling overwrites optimistic state | §7.5 overlay; Playwright stale-list test |
+| Pinned source-text tests | Keep literals in FeedManager.tsx; run `pytest -m no_db` before every push |
+| YouTube still blocks the VPS IP even with consent cookies | A plain message that teaches the channel ID (always works, no network); `/user/` feed fallback; optional API key; Test shows the result before Add |
+| Smart-punctuation or curly quotes in header values | Normalisation plus a clear caption |
+| `inert` support (iOS 15.5+) and portal changes | Feature-detect: if `'inert' in HTMLElement.prototype` is false, fall back to `aria-hidden` plus the focus trap |
+| Toast portal ordering | Explicit `z-[60]` |
+| Card source label mis-taps near the headline link | The label sits on its own meta line; negative-margin hit area stays inside the card padding; `data-card-interactive` stops swipe and long-press arming |
+| Menu replaces the Drawer's right-hand panel (muscle memory) | That was the owner's request; filtering is one tap from a card |
+| PR 5 is large | Split by area (cards, column, AI page, lists) if needed; each item is independent |
+| A Dependabot-style Playwright bump would need an unavailable Chromium revision | Avoided: not a package.json dependency; CI pins `1.56.1` in the command |
+
+---
+
+## 17. Alternatives considered and rejected
+
+| Alternative | Why rejected |
+| --- | --- |
+| A second editor sheet over Settings, with the Drawer as the Menu (the draft) | Two presentations, stacked sheets, the same duplication the owner reported |
+| A custom div picker instead of a native `<select>` | Loses the iOS wheel, needs its own focus and zoom handling, and global shortcuts would fire while "typing" (App.tsx:1754-1764) |
+| Time-debounced autosave (600ms) | Saves half-typed URLs and triggers a fetch per pause |
+| Merging different fields into one PATCH | Ambiguous error attribution |
+| A long-press action sheet on cards for "Edit feed" | Conflicts with the native link callout; the source-label tap is discoverable and one tap |
+| The InnerTube `resolve_url` endpoint for YouTube handles | Unofficial and fragile |
+| A service worker for offline use | A background process on the device; out of scope |
+| Vitest | Outside the plan's dependency scope; Playwright behaviour checks cover autosave |
+| `md` breakpoint by pointer type | iPads with keyboards would flip; width plus height is more predictable |
 
 
 ## Code reader reports
