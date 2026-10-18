@@ -1532,6 +1532,33 @@ export function App() {
     setReadEntries(columnName, next)
   }, [setReadEntries])
 
+  // The per-card ✓ (and swipe-right) toggles, like Mail: an unread
+  // card is marked read, a read card goes back to unread. "Read" is
+  // the union of every column's read-set (see ``globalReadIds``), so
+  // unread has to clear the id from all of them. Reads the ref, not
+  // ``globalReadIds``, because Column's memo keeps old callbacks.
+  const toggleEntryRead = useCallback((columnName: string, entryId: number) => {
+    const readIn = Object.entries(readEntriesRef.current)
+      .filter(([, ids]) => ids.includes(entryId))
+      .map(([col]) => col)
+    if (readIn.length === 0) {
+      markEntryRead(columnName, entryId)
+      toast('Marked as read', {
+        kind: 'info',
+        action: { label: 'Undo', onClick: () => unmarkEntryRead(columnName, entryId) },
+      })
+      return
+    }
+    for (const col of readIn) unmarkEntryRead(col, entryId)
+    toast('Marked as unread', {
+      kind: 'info',
+      action: {
+        label: 'Undo',
+        onClick: () => { for (const col of readIn) markEntryRead(col, entryId) },
+      },
+    })
+  }, [markEntryRead, unmarkEntryRead])
+
   // Hide an entry from every column + the For You row. The
   // entry stays in the DB; it just gets filtered out of the
   // dashboard until the user clears the hidden set (a future
@@ -2419,16 +2446,7 @@ export function App() {
             readIds={globalReadIds}
             expandedSummaries={expandedSummaries}
             onToggleSummary={toggleSummary}
-            onMarkRead={(entryId) => {
-              markEntryRead('Search', entryId)
-              toast('Marked as read', {
-                kind: 'info',
-                action: {
-                  label: 'Undo',
-                  onClick: () => unmarkEntryRead('Search', entryId),
-                },
-              })
-            }}
+            onMarkRead={(entryId) => toggleEntryRead('Search', entryId)}
             onHide={(entryId) => {
               hideEntry(entryId)
               toast('Entry hidden.', {
@@ -2534,16 +2552,7 @@ export function App() {
                       unread={!isRead}
                       expanded={expandedSummaries.has(e.id)}
                       onToggleSummary={() => toggleSummary(e.id)}
-                      onMarkRead={() => {
-                        markEntryRead('For You', e.id)
-                        toast('Marked as read', {
-                          kind: 'info',
-                          action: {
-                            label: 'Undo',
-                            onClick: () => unmarkEntryRead('For You', e.id),
-                          },
-                        })
-                      }}
+                      onMarkRead={() => toggleEntryRead('For You', e.id)}
                       onHide={() => {
                         hideEntry(e.id)
                         toast('Entry hidden.', {
@@ -2597,16 +2606,7 @@ export function App() {
                     selectedId={ci === selectedColumnIndex ? selectedCardId ?? undefined : undefined}
                     cardRefs={cardRefs}
                     onMarkRead={() => markColumnRead(col.name)}
-                    onMarkEntryRead={(entryId) => {
-                      markEntryRead(col.name, entryId)
-                      toast('Marked as read', {
-                        kind: 'info',
-                        action: {
-                          label: 'Undo',
-                          onClick: () => unmarkEntryRead(col.name, entryId),
-                        },
-                      })
-                    }}
+                    onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
                     onHideEntry={(entryId) => {
                       hideEntry(entryId)
                       toast('Entry hidden.', {
@@ -2743,17 +2743,7 @@ export function App() {
                   }
                   cardRefs={cardRefs}
                   onMarkRead={() => markColumnRead(columns[mobileCol]?.name ?? '')}
-                  onMarkEntryRead={(entryId) => {
-                    const col = columns[mobileCol]?.name ?? ''
-                    markEntryRead(col, entryId)
-                    toast('Marked as read', {
-                      kind: 'info',
-                      action: {
-                        label: 'Undo',
-                        onClick: () => unmarkEntryRead(col, entryId),
-                      },
-                    })
-                  }}
+                  onMarkEntryRead={(entryId) => toggleEntryRead(columns[mobileCol]?.name ?? '', entryId)}
                   onHideEntry={(entryId) => {
                     hideEntry(entryId)
                     toast('Entry hidden.', {
