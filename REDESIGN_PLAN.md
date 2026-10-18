@@ -1,7 +1,7 @@
 # Popping redesign plan
 
-Status: in progress. Written 2026-10-18 by a Claude Code session on top of main after PR #12 (mark as unread).
-This file is the working record. Sections marked **pending** fill in as the deep dive finishes.
+Status: complete enough to execute. Written 2026-10-18 by a Claude Code session on top of main after PR #12 (mark as unread).
+This file is the plan a fresh Claude Code session executes. The design sections (5 to 9, 12) were written from the code readings in the working notes; the deep-dive design panel was cut short to save quota, so the implementation session should re-check each file:line before changing it.
 
 Scope agreed with the owner:
 
@@ -116,27 +116,103 @@ So this class of bug cannot come back: the sweep PR adds a Playwright smoke test
 
 ## 5. What you will see on the phone
 
-**pending**: filled from the design synthesis.
+Top bar: the Popping title, a search icon, one Menu button. Nothing else.
+
+Menu (the panel that slides in from the right): Settings as the first row, then Refresh now, New brief, Save this view, the Sources filter list, and Sign out when you are signed in. "Jump to column" goes away on the phone because the column tabs already do that.
+
+Editing a feed, three ways to get there, all ending in the same editor:
+
+1. Menu > Settings > Feeds > tap the feed. Three taps.
+2. On any card, open its options (the chevron under the card) > "Edit this feed". Two taps.
+3. In the Menu's Sources list, tap the arrow beside a feed. Two taps.
+
+The editor is a sheet that slides up over whatever you were doing. It is a grouped list, like iOS Settings:
+
+- Name
+- Address
+- Category (shows the current one; tap to pick from your categories or add a new one)
+- Refresh every (picker)
+- Paused (switch)
+- Headers (a short list of name and value rows, hidden for built-in feeds and subreddits)
+- Test fetch (shows "Looks good, 23 items" or the reason it failed)
+- Delete (asks once, right there)
+
+There is no save button. Each row saves when you leave it or pick a value, shows a small tick for a moment, and shows a red line under the row if the server refused the change, with your text kept so you can fix it. Done, swipe down, or Back closes the sheet.
 
 ## 6. Feed editor that saves on its own
 
-**pending**.
+New files:
+
+- `frontend/src/components/FeedEditorSheet.tsx`: the sheet. Props: `source`, `sources` (for the category list), `onClose`, `onSaved(updated)`, `onRenamed(old, new)`, `onDeleted(id)`. Rendered by App next to Settings, above it in stacking order (z-50 after Settings), so it opens from Settings, from a card, or from the Menu.
+- `frontend/src/components/sheet/Sheet.tsx`: the shared bottom sheet (backdrop, slide-up, safe-area top and bottom, `overscroll-contain`, Esc and swipe-down to close, `visualViewport` sizing so the keyboard never covers a field). Settings and the Drawer move onto it in the sweep PR; the editor uses it from day one.
+- `frontend/src/components/sheet/Row.tsx`: a 44px grouped-list row with label, control slot, and a status slot (saving spinner, tick, or error line).
+- `frontend/src/lib/useAutosave.ts`: the hook described below.
+- `frontend/src/components/CategoryPicker.tsx` and `HeadersEditor.tsx`: sections 7 and 8.
+
+Opening and closing: App keeps `editingSourceId` in state and in the URL as `?edit=<id>` with pushState, the same pattern as `?view=settings` (App.tsx 394 to 444), so Back closes it. Done calls `history.back()` when the sheet was opened in this session, else replaceState. The same fix applies to `closeSettings`.
+
+Autosave, field by field:
+
+- Each row owns a local value seeded from `source`. Text rows commit on blur and on Enter; pickers and switches commit on change. Nothing is sent per keystroke, because every effective PATCH makes the backend rebuild the feed's schedule and fetch immediately (scheduler.py about 2461).
+- A commit compares the trimmed value with `source`. Unchanged: nothing happens. Changed: client-side validation first (name `^[a-z0-9_]{1,120}$`; address parses as a URL; category non-empty, at most 40 characters, not a reserved column name; built-in feeds cannot change name, address or headers, so those rows are read-only with a one-line note). A validation failure shows the error under the row and sends nothing.
+- The PATCH body holds only that field: `api.updateSource(id, { category: 'deals' })`. One queue per source: a commit that arrives while a PATCH is in flight waits for it, then sends; the last write wins. The hook exposes `status: 'idle' | 'saving' | 'saved' | 'error'` and `error: string` per row; "saved" shows a tick for 1.5 seconds.
+- On a 4xx the row keeps the user's text and shows the backend's `detail` in plain words (the API already returns readable messages such as "category 'For You' is reserved for a built-in column"). On a network error: "Couldn't reach the server. Try again." and a Retry link. Errors never go to the dashboard banner behind the sheet.
+- After a successful PATCH the hook calls `onSaved(updated)`; App replaces the source in its list without a full refetch, and on a rename calls the existing filter remap (`onRenamed`, FeedManager.tsx about 554).
+- Closing mid-save: the sheet closes at once; the in-flight PATCH finishes; a failure shows an error toast with the field name.
+
+Backend changes in the same PR (backend/app/routes/sources.py and schemas.py):
+
+- `SourceOut.builtin: bool` computed from the plugin registry, so the frontend drops its hardcoded KNOWN_BUILT_INS list (FeedManager.tsx:108), which is already wrong (6 names, 7 built-ins).
+- Strip the category in the route before persisting (today only validated stripped, stored unstripped).
+- Skip the scheduler job rebuild when a PATCH changes only `category`, `name` or `custom_headers`.
+- Fix the subreddit Test path: import `fetch_subreddit` from `app.reddit_client` (sources.py:1008).
+- Reject blank or non-token header names (sources.py:325).
+- Route tests via `app_client` for: each validation error, the built-in lock, the no-rebuild rule, the reddit Test path.
+
+Tests that grep the FeedManager source text (backend/tests/test_frontend_slice15_add_generic_scrape.py, test_source_create_sitemap_link_pattern.py 199 to 280) must be rewritten in this PR to check the new files, or CI goes red.
 
 ## 7. Category picker
 
-**pending**.
+Tap the Category row and a list slides up: every category you already use (derived from `sources`, in column order, labelled with `categoryLabel` from frontend/src/lib/labels.ts), the current one ticked, then "New category…". Picking one commits and closes the list. "New category…" reveals a text field with `autoCapitalize="none"`; the value is trimmed and lowercased; Enter or Done commits.
+
+Rules, checked before anything is sent: not empty, at most 40 characters (the column is `String(40)`), and not one of the reserved column names the backend refuses (the exact list is `_RESERVED_CATEGORIES` near sources.py:154; the picker reads a copy exported from `frontend/src/lib/labels.ts`, and the backend remains the authority). A reserved or long name shows "That name is used by a built-in column" or "Keep it under 40 characters" under the field.
+
+What happens to columns: App builds the dashboard columns from the categories present in `sources`, so moving the last feed out of a category removes that column and the feed appears under its new one on the next render. The phone remembers the open tab by index today (App.tsx 835 to 841), which makes tabs shift; the sweep PR changes that to remember the column by name, and this PR must not make it worse (after a category change, keep the user on the same column name if it still exists, else the first column).
+
+The Add custom form uses the same picker instead of its `<select>` (FeedManager.tsx 1722 to 1740).
 
 ## 8. Headers without code
 
-**pending**.
+The Headers section of the editor is a list of rows, each with a Name field and a Value field and a remove button, plus an "Add header" row. Two preset chips sit above the list: "Pretend to be a browser" (adds `User-Agent` with a current Safari string) and "Language" (adds `Accept-Language: en-CA,en`). A one-line note explains why anyone needs this: "Some sites block automated readers. A browser identity usually fixes it."
+
+Saving: each row commits on blur like every other field. The editor sends the whole map in one PATCH: `{ custom_headers: { 'User-Agent': '...' } }`; an empty list sends `null`, which the backend treats as "use defaults" (sources.py 754 to 760). Rows with a blank name are dropped before sending. Names the backend forbids (`Cookie`, `Authorization` and the rest of the deny list near sources.py:164) are refused inline before sending: "Popping can't send that header."
+
+Hidden for built-in feeds (the backend ignores headers there) and for subreddits (the fetch does not use them, dynamic_reddit.py:171).
+
+Test fetch uses the headers currently in the editor, because the test endpoint honours `custom_headers` (sources.py 855 to 870), so the user sees "Looks good" before the next scheduled fetch.
+
+The Add custom form keeps its hidden `default_headers` from recommendations (FeedManager.tsx 1042 to 1050) and shows the same HeadersEditor under an Advanced disclosure.
 
 ## 9. One button in the top bar
 
-**pending**.
+Remove the gear (App.tsx 2272 to 2301) and its `data-settings-gear` attribute. The Hamburger (App.tsx:2306) stays and is labelled "Menu". The search icon stays. The standalone refresh icon leaves the top bar on phones narrower than 360px and moves into the Menu as "Refresh now" (it is already the second path to refresh).
+
+The Drawer becomes the Menu (Drawer.tsx):
+
+- Row 1: Settings, with a gear glyph, opening Settings on the Feeds tab (`onOpenSettings('feeds')`). The Drawer closes as Settings opens.
+- Rows: Refresh now, New brief, Save this view (inline name field, no `window.prompt`), then the Sources filter list, each row with an arrow that opens the feed editor.
+- Remove "Jump to column" on the phone (the tab strip does it); on desktop fix the ref so it scrolls (App.tsx:2598 attaches the ref to a `display: contents` element).
+- Add Sign out when `user` is set (today only in a desktop-only row).
+- Delete the dead `onResetLocalState` prop, the unused sheetUp animation, and the comments describing a bottom sheet.
+- Header: title on the left, Done on the right, 44px, matching Settings after the sweep.
+
+Settings keeps its tabs for now; the sweep PR regroups them (Feeds, AI, Lists, Advanced). The URL contract stays: `?view=settings&tab=` with the allow-list exported once as `SETTINGS_TABS` from Settings.tsx and imported by App.
+
+Keyboard shortcut and deep links that open Settings (`openSettings` callers: Drawer rows, the History row, the BriefCard pills) keep working because `openSettings` does not change.
 
 ## 10. iPhone sweep checklist
 
-Preliminary (from the code audit, high and medium confidence; the deep dive's verifiers will confirm or strike each one, and the overflow items from section 4 join this list). File:line as of main 721713e.
+From the code audit, high and medium confidence. Not independently verified: the implementation session confirms each one at the file before fixing it, and strikes any that do not reproduce. The overflow items from section 4 join this list. File:line as of main 721713e.
 
 Real bugs, not polish:
 
@@ -176,7 +252,7 @@ Other phone defects:
 
 ## 11. Ease-of-use sweep checklist
 
-Preliminary (same caveat as section 10).
+Same caveat as section 10.
 
 Behaviour that misleads:
 
@@ -213,7 +289,17 @@ Structure:
 
 ## 12. Build order (PR-sized steps)
 
-**pending**.
+Each PR: branch from main, run the recipe in section 13, open a draft PR, let CI go green, merge, then popping-update on the VPS when you want it live. Order matters: C before D.
+
+| PR | Scope | Files | Done when |
+| --- | --- | --- | --- |
+| A | Overflow fixes (section 4, all 13 items) and the Playwright smoke test in CI | Card.tsx, App.tsx, Settings.tsx, FeedManager.tsx, styles.css, frontend/scripts/iphone-audit, .github/workflows/build.yml (one new step in the frontend job only) | The audit scan reports zero flagged elements at 390 and 320; screenshots look right; the CI step fails on a deliberately broken row and passes after |
+| B | One top-bar button and the Menu (section 9), Back closes Settings | App.tsx, Drawer.tsx, Hamburger.tsx, Settings.tsx | Top bar shows title, search, Menu; every Menu row works on the phone; Back closes Settings and the Menu; no dead props left |
+| C | Backend: `builtin` flag, category strip, no-rebuild rule, reddit Test fix, header-name rule, YouTube fix (section 3), tests | backend/app/routes/sources.py, schemas.py, scheduler.py, youtube.py, config.py, .env.example, backend/tests | pytest green in CI with the new tests; `GET /api/sources` carries `builtin`; a YouTube feed link and a bare channel id both resolve without network in tests |
+| D | Feed editor sheet, category picker, headers editor, autosave (sections 5 to 8); migrate the source-text tests | New files in section 6, FeedManager.tsx, App.tsx, api.ts, Card.tsx options menu, Drawer.tsx rows, backend/tests (the two grep tests) | Every flow in section 5 works in the Playwright run with a mocked API, including a 422 and a network failure; no field sends more than one PATCH per commit; built-in rows are read-only where they must be |
+| E | Ease-of-use sweep (section 11) and the remaining iPhone items (section 10) not covered above; Settings regrouped; Sheet shared by Settings and Menu | Across frontend/src | Each checklist item is either fixed with a file:line in the PR description or struck with a one-line reason |
+
+Each PR description lists the checklist items it closes. A PR that needs a change outside the files in section 2 stops and asks.
 
 ## 13. How to verify
 
@@ -240,7 +326,13 @@ Browser-level checks that only a real iPhone can do, after popping-update: focus
 
 ## 14. How to start the session
 
-**pending**: the message to paste into Claude Code.
+Open a new Claude Code session on this repository with Claude Fable 5.1 at xhigh effort, ultracode on, and paste:
+
+```
+Implement REDESIGN_PLAN.md from the claude/redesign-plan branch (merge PR #13 first, or read the file from that branch). Work PR by PR in the order of section 12, one draft PR each, branching from main. Before every push run the recipe in section 13 and look at the screenshots. Respect section 2: touch only the files it lists; if a change needs anything else, stop and ask. Re-check every file:line in the plan against the current code before editing, since line numbers drift. Plain, non-technical wording in every string the app shows. When a PR is green, tell me what to look at on the phone after popping-update, in three lines or fewer.
+```
+
+If you only have quota for one PR, start with A: it is independent, visible immediately, and installs the test that keeps overflow from coming back.
 
 ---
 
@@ -254,6 +346,7 @@ Browser-level checks that only a real iPhone can do, after popping-update: focus
 - Tests that pin the current FeedManager source text: backend/tests/test_frontend_slice15_add_generic_scrape.py (68 to 341) and test_source_create_sitemap_link_pattern.py (199 to 280) grep FeedManager.tsx and api.ts for literal strings. A rewrite must update those tests in the same PR or CI goes red.
 - Settings tab allow-list is duplicated in App.tsx 409 to 418, Settings.tsx 40 to 48 and 233; export one SETTINGS_TABS array.
 - Dead code to remove with the top-bar change: Drawer `onResetLocalState` prop (Drawer.tsx 61 to 92, App.tsx 2810), the `data-settings-gear` attribute (App.tsx:2309), the unused sheetUp animation, and Drawer header comments that describe a bottom sheet that no longer exists.
+- Deep-dive workflow stopped at 98% quota after 9 of 10 readers; the design panel, judges and verifiers did not run. Sections 5 to 9 and 12 are my synthesis from the readings.
 - Deployment surface read: docker-compose.yml, nginx.conf.template, egress-proxy, ops/popping-update.sh. See section 2.
 - Reader reports done so far: feed editor, Settings overlay. Constraints they pinned down (each must hold in the redesign):
   - Settings tab identity is URL state (`?view=settings&tab=`), parsed by an allow-list in App.tsx 394 to 428 and set by pushState in 430 to 444. Settings.tsx 238 to 246 switches tabs with replaceState plus a synthetic popstate that App listens to. Any new tab or rename must be added in both places, and the Drawer deep-links by tab id (Drawer.tsx 345 and 384).
