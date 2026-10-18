@@ -2,7 +2,7 @@
 
 Generated from the deep-dive workflow journal. Raw agent output, not edited. REDESIGN_PLAN.md is the curated plan; this file is the evidence behind it and survives if the session ends.
 
-Progress: 10 code readers, 3 designs, 3 judges, synthesis done, 3 verifiers, critic not yet.
+Progress: 10 code readers, 3 designs, 3 judges, synthesis done, 4 verifiers, critic not yet.
 
 ## Verifier findings
 
@@ -255,6 +255,100 @@ Additions:
 - Existing rows may already store header names that fail the new token rule. The UI will seed them, and any headers commit is then blocked until the bad row is fixed or removed. Show the row error at once on open (not only after blur), so the user knows why nothing saves. Add a flows case with a fixture source whose custom_headers has {'Bad Header': 'x'}.
 - test_source_editor_contract.py (PR 1): add cases for cbc_top default_headers POST → 200 (alembic/versions/0017_feed_recommendation_candidates.py:53-58); lower-case 'user-agent' stored canonically; /test with a 'Cookie' header → error_kind 'invalid_headers'; omitting custom_headers on a PATCH of url leaves the map unchanged (alongside the existing category-only test at test_source_patch_unset_regression.py:41-57).
 - Value input in HeadersEditor: autoCapitalize=none, autoCorrect=off, spellCheck=false, enterKeyHint=done, so iOS cannot alter User-Agent strings. Replace the <details>/<summary> Advanced toggle with a 44px aria-expanded button, so the C7 tap-target rule covers it.
+
+### Top bar and navigation: gear removal, Menu as the only Settings entry, Drawer rows, pushState/popstate, Back closing, chip bar, search/refresh placement, keyboard shortcuts, other openSettings callers. Working tree frontend/src matches origin/main 721713e (no diff), so the line numbers below are baseline lines.
+
+- [needs_change] PR 3 deletes the gear at App.tsx:2296-2331 (comment, data-settings-gear button, SVG)
+  - Evidence: App.tsx:2296 is the Refresh button's <RefreshIcon> and 2297 is its </button>. 2298 is blank, the gear comment starts at 2299, data-settings-gear is at 2309, and the gear's </button> is at 2329. Lines 2330-2332 are the three-line Hamburger comment, and <Hamburger> is at 2333.
+  - Correction: Delete App.tsx:2298-2329 only. If the Hamburger comment is removed too, remove all of 2330-2332. Deleting only 2330-2331 leaves a dangling `*/}` and breaks the JSX. Deleting from 2296 breaks the Refresh button.
+- [confirmed] Nothing else references the gear
+  - Evidence: `data-settings-gear` appears only at App.tsx:2309. No backend test reads it: the only backend tests that read App.tsx are test_slice21_column_memo.py and test_frontend_slice19, and neither touches the header. The aria-label "open settings" is used by frontend/scripts/iphone-audit/capture.cjs:486 and probe.cjs:72.
+  - Correction: None for src. Update capture.cjs:486 and probe.cjs:72 to Menu → Settings in the same PR 3 commit, or the audit scripts fail. The plan already lists this.
+- [confirmed] The only openSettings callers are App.tsx:2307 and :2811; no keyboard shortcut or BriefCard pill opens Settings
+  - Evidence: A grep of src finds openSettings defined at App.tsx:430 and called at 2307 (gear) and 2811 (Drawer's onOpenSettings). The Drawer calls it at Drawer.tsx:345 ('history') and :384 (no arg). The keydown handler (App.tsx:1753-1894) handles / ? Esc, the arrows, Enter, m, s, b, h and r, and none of them opens Settings. ShortcutsSheet has no settings entry.
+  - Correction: None. The new signature openSettings(tab='feeds', sourceId?) stays compatible with `(tab) => openSettings(tab ?? 'feeds')` at 2811.
+- [confirmed] Done re-pushes history so Back reopens Settings (App.tsx:438-444); Settings.tsx:241 replaceState(null) wipes the flag
+  - Evidence: closeSettings (App.tsx:438-444) calls pushState(null,…) after deleting view and tab. Settings.tsx:241 calls replaceState(null, '', u), then :246 dispatches a synthetic popstate. No other code writes history.
+  - Correction: None.
+- [needs_change] openSettings pushes {popping:'settings'}; closeSettings calls history.back() when that state is present, else replaceState; one Back never reopens Settings
+  - Evidence: In PR 4, onFailedAway's toast 'Open' action calls openSettings('feeds', id), and the toast sits at z-[60], above the open Settings sheet (z-50). Calling openSettings while Settings is open pushes a second settings entry. Done → back() then lands on the first settings entry, so Settings stays open on the old tab and Done needs two taps. Also, history.back() is async: the plan's close path only calls back(), so the sheet stays up until popstate arrives. That contradicts F8's 'Settings closes immediately'. sync() (App.tsx:395-424) currently never clears any source state.
+  - Correction: (a) In openSettings, if the current URL already has view=settings, use replaceState(window.history.state ?? {popping:'settings'}, '', url) instead of pushState. Read the URL, not state, so the useCallback keeps empty deps. (b) In closeSettings, call setSettingsOpen(false) and setSettingsSourceId(null) synchronously in both branches, then back() or replaceState. (c) In sync(), set settingsSourceId to null when `source` is absent or view≠settings. (d) Add a flow-FG variant: open from the Menu, trigger openSettings again while open, then Done → closed after one tap, and goBack keeps it closed.
+- [refuted] export const SETTINGS_TABS = [...] as const from Settings.tsx is allowed by allowConstantExport
+  - Evidence: eslint.config.js:39-41 sets react-refresh/only-export-components to 'warn' with allowConstantExport. In node_modules/eslint-plugin-react-refresh 0.5.3, skipTSWrapper strips `as const`, and constantExportExpressions is only {Literal, UnaryExpression, TemplateLiteral, BinaryExpression}. An ArrayExpression is not allowed, so Settings.tsx (which exports a component) gets a new warning. That breaks §13's 'warnings at most the 6 of the baseline'.
+  - Correction: Put `SETTINGS_TABS` and `type SettingsTab` in a new src/lib/settingsTabs.ts with no component exports. Import it in App.tsx and Settings.tsx, and re-export the type from Settings.tsx (`export type { SettingsTab }`) so the Drawer import at Drawer.tsx:34 keeps working.
+- [refuted] PR 3 acceptance: grep -rn 'data-settings-gear\|onResetLocalState' frontend/src is empty
+  - Evidence: onResetLocalState is a live Settings prop: Settings.tsx:80 (type), :129 (destructure), :414 (the Reset tab calls it). App.tsx:2846 passes it to <Settings>. Only the Drawer prop (Drawer.tsx:61-66, 89-92; App.tsx:2810) is dead.
+  - Correction: Replace it with: `grep -n 'onResetLocalState' frontend/src/components/Drawer.tsx` is empty, `grep -rn 'data-settings-gear' frontend/src` is empty, and App's <Drawer> call no longer passes onResetLocalState. Settings keeps its prop.
+- [needs_change] PR 2 changes the search input to type="text" inputMode="search"
+  - Evidence: App.tsx:1762, in the global keydown handler, clears search on Esc only when `ae instanceof HTMLInputElement && ae.type === 'search'`. With type=text, Esc inside the field no longer blurs or clears it, and the early return at 1767 swallows the key. The '/' shortcut (App.tsx:1769-1772) calls getElementById('app-search')?.focus(), but #app-search exists only while searchOpen (2230), so '/' already does nothing when search is collapsed.
+  - Correction: In PR 2, change 1762 to `ae instanceof HTMLInputElement && ae.id === 'app-search'`. On Esc it should also call setSearchOpen(false), because onBlur at 2244 reads a stale non-empty searchInput. Change '/' to setSearchOpen(true) followed by the existing rAF focus. Add onKeyDown Enter → e.currentTarget.blur() so iOS's Search key dismisses the keyboard and keeps the query.
+- [confirmed] Removing the gear gives the title 148px at 320 (R7)
+  - Evidence: The header row is px-4 (App.tsx:2220), leaving 288px at 320. The cluster is gap-1 (2224) holding search, refresh (sm:hidden, so shown on phones) and Hamburger, all w-11: 3×44 + 2×4 = 140. 288 − 140 = 148.
+  - Correction: None.
+- [confirmed] Search row fix: h1 hidden while searchOpen below sm, cluster flex-1 min-w-0, pill flex-1 min-w-0 sm:w-72, refresh hidden while searching, clear ✕ w-11 h-11
+  - Evidence: App.tsx:2221 h1 is truncate. 2231 pill is `w-44 sm:w-72`. 2294 refresh is `sm:hidden`. 2248-2257 clear button has no size and uses onMouseDown preventDefault, which must be kept.
+  - Correction: Keep onMouseDown={e=>e.preventDefault()} on the enlarged clear button, or the blur at 2240-2245 races the click.
+- [confirmed] Drawer line references (header 314-325, grabber 303-306, History 336-351, Save 366-376, All settings 377-390, Jump 393-409, footnote 415, Clear 420-426, sources 454-479, category 477, dead prop 61-66/89-92)
+  - Evidence: Every range matches Drawer.tsx at baseline. Done (315-321) is min-h-[32px] min-w-[32px] with pl-10 on the leading edge. The grabber is `absolute top-3 left-2` (305).
+  - Correction: When swapping title and Done: (1) move the grabber clearance from Done's pl-10 to the title (e.g. pl-3 md:pl-0 on the h2), because the grabber is at left-2 w-1 and only 4px from a px-4 title; (2) rewrite the stale comments at Drawer.tsx:266-273 (says Done is rendered first) and 307-313 (says title on the right, Done on the left), as well as 3-9, 71-75 and 257-261; (3) keep aria-label="close menu", which firstFocusableRef (274-276) and capture.cjs:482 query.
+- [needs_change] Menu: Settings row first ('gear icon'), replacing All settings…
+  - Evidence: GroupedRow (Drawer.tsx:556-604) takes only title, subtitle, onClick, showChevron and tone; it has no icon slot. The group label is 'Quick settings' (Drawer.tsx:335), which reads oddly above a row called Settings.
+  - Correction: Add an optional `icon?: React.ReactNode` to GroupedRow, rendered shrink-0 before the text, or drop 'gear icon' from the spec. Rename the section label (e.g. no label, or 'Menu') in the same PR.
+- [needs_change] Sign out row in the Menu when user is set, mirroring UserBadge
+  - Evidence: UserBadge.tsx:5-10 says that for auth_method 'bypass' sign-out is a no-op server-side. After the plan's reload the user is signed straight back in, so the row would do nothing. LoginPage.tsx:72 (username) still autocapitalises until PR 5. The audit says this makes local sign-in fail ('Adam'), yet Sign out ships on the phone in PR 3.
+  - Correction: Pass onSignOut only when `user && user.auth_method !== 'bypass'`. Move the LoginPage.tsx:72/84 iOS attributes (autoCapitalize=none autoCorrect=off spellCheck=false, enterKeyHint) from PR 5 into PR 3, so the first phone sign-out cannot lock the owner out. Give the row tone 'destructive'.
+- [needs_change] Sources rows: wrapper div with the existing label (flex-1 min-w-0 pl-4) and a 44px › sibling button calling onEditSource then onClose
+  - Evidence: The category span at Drawer.tsx:476-478 is `shrink-0` and untruncated. The aside is w-[88vw] (293), so at 320 the card is about 249px wide. That leaves 16 checkbox + 12 gap + 18 icon + 12 gap + 44 ›, plus the plan's 40-character category fixture, and the row overflows (C3/C5 in the Menu state). The label's `border-b border-hairline last:border-b-0` (459) also has to move to the wrapper, or every row loses its divider because each label becomes its wrapper's last child. The checkbox aria-label uses the raw s.name (468).
+  - Correction: Make the category span `min-w-0 max-w-[40%] truncate` (or put it on a second line under the name). Move border-b/last:border-b-0 to the wrapper div. Use sourceLabel(s.name) in the checkbox aria-label. The sibling (not nested) button is right, because toggleSourceAndMaybeClose (App.tsx:2013-2017) must not fire.
+- [confirmed] jumpToCategory is a no-op on phone and desktop; fix with setMobileCol(idx) and el.firstElementChild.scrollIntoView
+  - Evidence: App.tsx:2022-2030 sets only selectedColumnIndex. The ref is the `className="contents"` wrapper at 2598 inside `hidden md:grid` (2594). The phone uses mobileCol (2722-2792).
+  - Correction: Also: (1) scroll the newly selected phone tab into view in the horizontal strip (App.tsx:2668-2717), e.g. `[role=tab][aria-selected=true]`.scrollIntoView({inline:'nearest', block:'nearest'}); (2) if showSearchView is true (App.tsx:2436), clear the search first, because columns are not rendered while searching and the jump is otherwise invisible.
+- [confirmed] Closed Drawer stays focusable; add inert and aria-hidden via a ref effect
+  - Evidence: The aside (Drawer.tsx:262-295) is always mounted with role=dialog aria-modal=true and only translate-x-full when closed. React is ^18.3.1 (package.json:14), which has no inert prop.
+  - Correction: Also return focus to the Hamburger when the Drawer closes, unless Settings opened. Capture document.activeElement on open, or pass a ref. Add aria-expanded={drawerOpen} and aria-haspopup="dialog" to Hamburger.tsx:13-16, which becomes more than a comment-only change.
+- [needs_change] FeedManager in PR 3: single openRowId initialised from focusSourceId, scrollIntoView feed-${id}
+  - Evidence: The row's expanded state is local to each SourceRow (FeedManager.tsx:384 `const [open, setOpen] = useState(false)`, toggled at 687-689). The edit form is a separate editingRowId in FeedManager (:215), passed through MyFeedsTab (:327). With only an initial value, a later focusSourceId change while FeedManager stays mounted does nothing: Settings open on Feeds, then the toast 'Open' for another feed.
+  - Correction: In PR 3, lift `open` into MyFeedsTab as openRowId and pass isOpen/onToggle to SourceRow. Also set editingRowId to the focused id, so ≡ → › lands in the edit form (2 taps) before PR 4. Drive both from a useEffect keyed on focusSourceId (plus a nonce from App, so re-focusing the same id works), and force tab='mine'. Put the li id on FeedManager.tsx:321.
+- [confirmed] Settings close path (Done, Esc, backdrop) blurs, flushes, then calls onClose
+  - Evidence: Done is at Settings.tsx:213-218. The backdrop onClick is at :190-194. The Esc capture listener (Settings.tsx:167-180) calls onClose directly, with deps [open, onClose].
+  - Correction: Route all three through one local handleClose, including the Esc effect, so Esc also blurs and flushes. With closeSettings in useCallback the Esc listener stops re-registering every App render.
+- [confirmed] Settings tab buttons replaceState(window.history.state) and delete source; keep the synthetic popstate
+  - Evidence: Settings.tsx:237-247. App's sync listens to popstate only (App.tsx:425-427), so the synthetic event is the only way App re-reads the tab.
+  - Correction: FeedManager's replaceState that drops `source` should not dispatch popstate, to avoid re-running sync mid-edit, but App's settingsSourceId must not be read again afterwards. Rely on correction (c) above.
+- [needs_change] Filter chip bar App.tsx:2369 gets data-hscroll; chip/clear-all tap targets in PR 5
+  - Evidence: App.tsx:2369-2393: the chips render the raw source name (`{src} ✕` at 2384, aria-label at 2382) while the Drawer shows sourceLabel. The 'filtering:' footnote (Drawer.tsx:415) has the same problem, and the plan fixes only that one.
+  - Correction: Use sourceLabel(src) for the chip text and aria-label in PR 3, alongside the Drawer label fixes. Keep `key={src}` raw.
+- [needs_change] PR 6: header sm: switches at App.tsx:2231, 2290, 2342 become md:
+  - Evidence: The sm: classes in the header are at App.tsx:2220 (pt/pb), 2224 (gap), 2231 (pill sm:w-72), 2294 (refresh sm:hidden) and 2341 (sub-row hidden sm:flex). Line 2290 is `disabled={refreshing}` and 2342 is the health span. After PR 2 the h1 and cluster also carry the new `sm:` search classes.
+  - Correction: List 2220, 2224, 2231, 2294 and 2341, plus the PR 2 `hidden sm:block` and `sm:flex-none` search classes, all switched to md: together. Otherwise iPhone landscape (sm but not md) shows the phone refresh icon hidden while the sub-row is visible, which is inconsistent.
+- [needs_change] F1/PR 3 phone check: Done, the browser's Back, or Esc closes Settings; after PR 3 'Done, then the back gesture: Settings stays closed'
+  - Evidence: The owner uses a home-screen web app. iOS standalone web apps show no Back button, and an edge-swipe Back is not reliably available. The history fix is observable mainly in a Safari tab and on desktop. This is from platform knowledge and was not verifiable in the container.
+  - Correction: Word the phone check as 'in a Safari tab (not the home-screen icon): open via ≡ → Settings, Done, swipe back → Settings stays closed'. Flow FG in Playwright is the real gate.
+- [confirmed] Stacking: header z-20 < Drawer z-30/40 < Settings z-50 < Toast z-[60]
+  - Evidence: Header z-20 (App.tsx:2210), backdrop z-30 (Drawer.tsx:253), aside z-40 (:289), Settings z-50 (Settings.tsx:189). The error banner uses `z-15` (App.tsx:2401), which Tailwind does not emit.
+  - Correction: None.
+
+Additions:
+- App.tsx:430-444: openSettings must reuse the current entry (replaceState) when view=settings is already in the URL. This prevents a double history entry from the PR 4 toast 'Open' action while Settings is open.
+- App.tsx:438-444 and 395-424: closeSettings sets settingsOpen false and settingsSourceId null synchronously before history.back(). sync() nulls settingsSourceId whenever `source` is absent.
+- frontend/src/lib/settingsTabs.ts (new): SETTINGS_TABS and SettingsTab live here, not in Settings.tsx, to avoid a react-refresh/only-export-components warning (eslint.config.js:39-41; plugin 0.5.3 allows only Literal/Unary/Template/Binary constants). Drawer.tsx:34 keeps importing the type through a Settings.tsx re-export.
+- App.tsx:1762: the Esc-in-search check moves from ae.type === 'search' to ae.id === 'app-search' in the same PR 2 commit that changes the input to type=text. Esc also calls setSearchOpen(false).
+- App.tsx:1769-1772: '/' opens search (setSearchOpen(true) + rAF focus); today it only works when search is already open.
+- App.tsx:2233-2246: Enter in the search field blurs it (dismisses the iOS keyboard) and keeps the query.
+- PR 3 acceptance grep: replace `grep -rn 'data-settings-gear\|onResetLocalState' frontend/src` with a Drawer-scoped check. Settings.tsx:80/129/414 and App.tsx:2846 legitimately keep onResetLocalState.
+- Drawer.tsx:556-604: add an `icon` prop to GroupedRow if the Settings row is to carry a gear icon. Rename the 'Quick settings' label (Drawer.tsx:335).
+- Drawer.tsx:476-478: the category span becomes min-w-0 truncate with a max width so the new 44px › button and the 40-character category fixture fit at 320. Move border-b/last:border-b-0 from the label (459) to the new wrapper. The checkbox aria-label at 468 uses sourceLabel.
+- Drawer.tsx:307-321: move the grabber clearance (Done's pl-10) to the left-aligned title. Rewrite the stale comments at 266-273 and 307-313.
+- Sign out row: hide it for auth_method 'bypass' (UserBadge.tsx:5-10). Ship the LoginPage.tsx:72/84 autoCapitalize/autoCorrect/spellCheck fix in PR 3, not PR 5, so a phone sign-out cannot strand the owner at a login that autocapitalises the username.
+- Hamburger.tsx:13-16: add aria-expanded={open} and aria-haspopup="dialog"; App.tsx:2333 passes drawerOpen. On Drawer close, restore focus to the Hamburger unless Settings is opening.
+- FeedManager.tsx:384 and :215: in PR 3, lift SourceRow's local `open` state to MyFeedsTab and also set editingRowId for the focused feed, driven by an effect on focusSourceId plus a nonce, so ≡ → › opens the edit form in 2 taps before PR 4 and re-focus while mounted works.
+- App.tsx:2668-2717: after jumpToCategory or any tab change, scroll the selected phone tab into view inside the horizontal strip. Clear the search first when showSearchView (App.tsx:2436) is active.
+- App.tsx:2379-2385: active filter chips show sourceLabel(src) instead of the raw slug, in text and aria-label (PR 3, with the Drawer label fixes).
+- PR 6: the header breakpoint list should be App.tsx:2220, 2224, 2231, 2294 and 2341, plus the PR 2 search classes. The plan's 2290 and 2342 are wrong lines.
+- Settings.tsx:167-180: the Esc capture listener must call the same blur/flush handleClose as Done and the backdrop.
+- §9 'Where Settings lives' should also list the onFailedAway toast 'Open' action (PR 4) as an entry point. It is the case that needs the openSettings re-entry guard.
+- Optional: Drawer swipe-to-dismiss is leftward (Drawer.tsx:11-13, 175) on a right-anchored panel that slides out to the right. Consider dismissing on a rightward drag, or document it as intentional.
+- Optional, desktop: removing the gear makes Settings 2 clicks on desktop. A ',' keyboard shortcut in App.tsx:1753-1894 and ShortcutsSheet.tsx:29 would restore one-step access without adding a top-bar button.
 
 ## Synthesized plan
 
