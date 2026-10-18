@@ -129,7 +129,7 @@ const RELATED_TONE_STYLES: Record<string, string> = {
 // mark, closer to how Apollo's per-community color bar pops against
 // a dark background.
 function categoryStripeClass(category: string | undefined): string {
-  switch (category) {
+  switch (category?.toLowerCase().trim()) {
     case 'news':     return 'bg-blue-500'
     case 'tech':     return 'bg-violet-500'
     case 'vulns':    return 'bg-red-500'
@@ -169,7 +169,7 @@ function categoryStripeClass(category: string | undefined): string {
 // selected/unread state, which still needs to read as the stronger
 // signal.
 function categoryBorderClass(category: string | undefined): string {
-  switch (category) {
+  switch (category?.toLowerCase().trim()) {
     case 'news':     return 'border-blue-500/25'
     case 'tech':     return 'border-violet-500/25'
     case 'vulns':    return 'border-red-500/25'
@@ -190,7 +190,7 @@ function categoryBorderClass(category: string | undefined): string {
 }
 
 function categorySourceTextClass(category: string | undefined): string {
-  switch (category) {
+  switch (category?.toLowerCase().trim()) {
     case 'news':     return 'text-blue-400'
     case 'tech':     return 'text-violet-400'
     case 'vulns':    return 'text-red-400'

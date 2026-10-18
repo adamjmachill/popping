@@ -26,6 +26,7 @@ import tseslint from 'typescript-eslint'
 const MOBILE_SCOPE = [
   'src/components/{Card,Toast,BriefCard,FramingWatch,SourceIcon,SearchResults}.tsx',
   'src/lib/**',
+  'src/components/feeds/**',
 ]
 
 // A class-name pattern banned in string literals and template text.

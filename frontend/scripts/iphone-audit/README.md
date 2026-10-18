@@ -10,7 +10,7 @@ desktop grid too.
 | File | What it is |
 |---|---|
 | `smoke.cjs` | The layout guard. Runs in CI on every push; exit 1 on any failure. |
-| `flows.cjs` | Behaviour flows (PATCH/PUT counting). Arrives in PR4; `smoke.cjs` loads it when the file exists. |
+| `flows.cjs` | Behaviour flows: what the app sends when a person uses it. `smoke.cjs` loads it and runs each flow at 390. |
 | `capture.cjs` | The original audit: screenshots plus a raw overflow scan per state. Exports `mockApi` and `IOS_UA`. |
 | `probe.cjs` | Targeted measurements behind the audit. |
 | `fixtures.cjs` | Sources, entries and settings the mock serves, plus the long strings the checks lean on. |
@@ -90,6 +90,10 @@ and `clock.setFixedTime(F.NOW)`, so relative times ("12m ago") are stable. Then:
 | `menu` | the Menu (≡, `open menu`) after its slide-in |
 | `settings-feeds` | Settings → Feeds (`?view=settings&tab=feeds`) |
 | `settings-add-youtube` | Feeds → the third feed-manager tab (Add), YouTube selected, long name and URL typed |
+| `settings-add-error` | Add, YouTube, a Test that fails with YouTube's longest message (`F.YOUTUBE_BLOCKED_MESSAGE`) |
+| `settings-add-newcat` | Add, the category picker's New-category field with a long name |
+| `settings-add-headers` | Add, Advanced open: a browser identity and a refused `Cookie` header |
+| `settings-suggested` | Feeds → the second feed-manager tab (Suggested) |
 | `settings-llm` | the AI tab |
 | `settings-notifications`, `settings-history`, `settings-hidden`, `settings-starred` (Saved), `settings-voted` (Downvoted), `settings-reset` | one per tab via `?view=settings&tab=` |
 | `brief-empty` | 320 only: the phone Brief tab with `/api/brief/latest` returning `[]` |
@@ -173,13 +177,24 @@ PR9 adds `--strict` to the Chromium command.
 Read CI failures with
 `gh api repos/<owner>/<repo>/check-runs/<id>/annotations`.
 
-## flows.cjs (PR4)
+## flows.cjs
 
-Behaviour flows arrive in PR4. They count `page.on('request')` events with
-`method() === 'PATCH'` (or `'PUT'` for the AI tab). `smoke.cjs` requires
-`flows.cjs` when it exists; it exports an array of entries shaped like a state
-(usually `checks: false` with a `run`), and each runs in its own context with
-the same mock, clock, CSP and C8 listeners.
+Each flow is shaped like a state with `checks: false` and a `run`, and runs at
+390 in its own context with the same mock, clock, CSP and C8 listeners. A flow
+records the requests it cares about with a page route (`record()`), which runs
+before `capture.cjs`'s context mock and then falls through to it, or answers
+for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
+
+| Flow | What it proves |
+|---|---|
+| `flow-fj-youtube-handle` | YouTube, `@handle`, Name blank: Test and Add are enabled; Add sends the resolved feed and `somehandle_yt` |
+| `flow-fj2-youtube-video-link` | a watch link with Name blank says "Name is chosen after Test."; Add runs one Test, then one POST named `channel_<id6>_yt` |
+| `flow-fp-auto-subreddit` | Auto-add with `r/python` fills the form as Subreddit and sends nothing |
+| `flow-fq-new-category` | New category "NEWS" lands in "news"; Add feed waits while a new category is pending; "Hockey" shows as "Hockey (new)" and is sent as typed |
+| `flow-fr-headers` | a half-filled header holds Test and Add with its message; switching to Subreddit drops the headers from the POST |
+| `flow-fs-auto-already-added` | Auto-add answering with a feed already followed shows "Already added: …" |
+
+Run one with `--only <name>`; PR6 and PR8 add the PATCH and PUT counting flows.
 
 ## capture.cjs, probe.cjs, run.sh
 

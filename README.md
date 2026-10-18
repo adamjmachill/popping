@@ -398,8 +398,12 @@ tier-specific endpoints).
 
 ### Adding a YouTube channel
 
-Settings → Feeds → Add custom → YouTube (or paste into Auto feed).
-Popping turns what you paste into the channel's free YouTube feed:
+Settings → Feeds → Add, then either paste the link, `@handle` or
+channel ID into Auto feed and tap Auto-add, or pick YouTube under Type
+in the form below. Name is optional: Popping names the feed after the
+handle (`mkbhd_yt`) or, for a video link, after the channel once Test
+has looked it up. Popping turns what you paste into the channel's free
+YouTube feed:
 
 | You paste | What happens |
 | --- | --- |
