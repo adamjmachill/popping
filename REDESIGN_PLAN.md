@@ -86,7 +86,33 @@ After the next popping-update, try adding one channel by @handle on the phone. I
 
 ## 4. Text that overflows rows and boxes
 
-**pending**: an agent is rendering the built app at 390x844 and 320x568 with touch emulation and measuring every element that overflows its box. Prime suspect: PR #11 added `input, textarea, select { font-size: 16px !important }` under `(pointer: coarse)` in frontend/src/styles.css (line 24). That stops focus zoom but forces 16px text into fields and rows that were sized for 13px, which matches "extends past rows and outside boxes". The real fix is to size every form control at 16px or more by design (iOS body text is 17px) and lay out rows for that size, then delete the `!important` override. Results and the exact defect list go here.
+Measured, not guessed: the built app was rendered in Chromium with iPhone emulation (390x844 at 3x and 320x568 at 2x, touch on, so the `(pointer: coarse)` rule is in force) against a mocked API with long names, long titles and long URLs. Every element was scanned for text or boxes extending past their container. Screenshots and the scan live in the scratchpad folder `shots/` of this session; the re-run recipe is in section 13.
+
+Root cause, in one sentence: rows are flex layouts that mix fixed-width pieces (a 176px search box, a 112px thumbnail, 44px icon buttons, inputs at their natural width) with text that is allowed to shrink, and nothing was ever laid out for a 320px to 390px screen. The 16px rule from PR #11 is not what causes the overflow; it only makes some controls look mismatched (item 11).
+
+Defects, ranked by how often you will hit them:
+
+| # | Where (file:line) | What you see | Cause | Real fix |
+| --- | --- | --- | --- | --- |
+| 1 | Settings.tsx:265 | Feeds tab has no side margin: the tab pills, the feed rows, the Add form inputs and buttons touch both screen edges. This is the literal "inputs outside boxes". | The feeds tab wrapper is `pt-4`; every other tab is `pt-4 px-4`. | `pt-4 px-4` on that wrapper. |
+| 2 | App.tsx:2227 and 2237 | Open search and the title collapses to "P…" at 390; at 320 the icon buttons run 16px past the screen edge. The search field itself is only 104px wide. | Fixed `w-44` search box beside three fixed `w-11` buttons; the title is the only thing allowed to shrink. | Below `sm`, hide the title and the standalone refresh icon while search is open; make the search box `flex-1 min-w-0` so the field takes the width. |
+| 3 | Card.tsx about 901 and 1731 | A long headline beside a thumbnail becomes a 10-line ribbon at 390 and 17 lines with mid-word breaks ("Saskatchewa/n") at 320. | Fixed `w-28` thumbnail beside the title on a 250px to 325px card leaves the title 44% to 56% of the width. | Below `sm`, do not put the thumbnail beside the headline: full-width 16:9 above or below the title, or a small square. |
+| 4 | Card.tsx about 948 | Time stamp wraps to "12m / ago" with a stray dot, next to a long source name. | Source name and time both shrink; neither has `min-w-0` or `shrink-0`. | `min-w-0 truncate` on the source name, `shrink-0 whitespace-nowrap` on the dot and time. |
+| 5 | Card.tsx about 975 to 1015 and 1061 to 1093 | "Discussed on / Reddit", "· 403 / comments", "Summarize / comments", "Listen · 2:26:53" wrap mid-phrase. | Row is `nowrap` so each control shrinks and wraps inside itself. | `flex-wrap gap-x-3 gap-y-1` on the row, `whitespace-nowrap` on each control, so a second control drops to its own line whole. |
+| 6 | FeedManager.tsx about 1258 | At 320 the Auto-add button sits 49px outside the sheet ("Aut" visible). Fits at 390 with 8px to spare, so iPhone page zoom breaks it too. | Input is `flex-1` without `min-w-0`, so it cannot shrink below its natural 266px. | `min-w-0 w-full` on the input. |
+| 7 | FeedManager.tsx about 745 to 815 | Feed names in Settings clip early ("Risky Business Pod…") because five fixed chips share the line. | Category, status, warning, score and chevron are all `shrink-0` on the name line. | Move status chips to the second line (updated … · every …); keep category and chevron on the name line. |
+| 8 | App.tsx:2227 | At 320 the "Popping" title reads "Pop…" even at rest. | 34px title plus four 44px buttons leaves 100px. | Drop the standalone refresh icon on narrow phones (the menu has refresh) or use a smaller title below 360px. |
+| 9 | Settings.tsx:209 to 222 | At 320 "Settings → Notifications" wraps to two lines and squeezes Done to 38px. | Done lacks `shrink-0`; the heading lacks `min-w-0 truncate`. | Add both; drop the "Settings → " prefix below `sm`. |
+| 10 | FeedManager.tsx about 270 to 285 | "My feeds (14)" wraps inside its pill at 320; labels touch the pill edges at 390. | Pills have no horizontal padding and allow wrapping. | `px-2 whitespace-nowrap truncate` on the pill. |
+| 11 | styles.css:24 | 17px fields shrink to 16px; 13px controls (the refresh interval select, the headers textarea) jump to 16px on an 18px line height, so the textarea's third line is clipped. Cosmetic, but it is the duct tape. | The `!important` override from PR #11. | Design every input, select and textarea at 16px with a 24px line height and rows sized for that, then delete the override. The feed editor redesign (section 6) does this for the editor; the sweep does it for the rest. |
+| 12 | Card.tsx:1177, FeedManager.tsx about 690 and 700, App.tsx:2710 | 9px and 10px text (tone chip, headers helper lines, new-count badge). | Fixed tiny sizes. | 11px minimum. |
+| 13 | App.tsx:2239 | Two clear buttons in the search field (the browser's own and the app's). | `type="search"` draws a native cancel button; the app adds its own. | `type="text" inputMode="search" enterKeyHint="search"`. |
+
+What already works: no page-level horizontal scroll at 390; long unbroken URLs and 90-character tokens wrap cleanly in titles and summaries; the Drawer truncates every row correctly; the AI tab, the API-key rows and the Notifications tab fit at both widths; the feed edit form inputs sit inside their labels.
+
+Two things about Safari versus this test: the container renders text in Inter rather than SF Pro, which is a few percent wider, but every defect above comes from a fixed-width box, not glyph widths, so they reproduce on an iPhone. And iPhone Page Zoom or the Larger Text setting multiplies CSS pixels: at 125% an iPhone 14 lays out at 312 CSS pixels, so the 320 findings apply to a normal-size phone with zoom on.
+
+So this class of bug cannot come back: the sweep PR adds a Playwright smoke test (the capture script from this audit, trimmed) that renders the dashboard, a card, Settings and the Add form at 390 and 320 with a mocked API and fails when any element's text or box extends past its parent. It runs in CI next to lint and build.
 
 ## 5. What you will see on the phone
 
