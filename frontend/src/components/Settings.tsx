@@ -105,7 +105,7 @@ type Props = {
 
 const TAB_META: Record<SettingsTab, { label: string; icon: string }> = {
   feeds: { label: 'Feeds', icon: 'feeds' },
-  llm: { label: 'LLM', icon: 'llm' },
+  llm: { label: 'AI', icon: 'llm' },
   notifications: { label: 'Notifications', icon: 'bell' },
   history: { label: 'History', icon: 'history' },
   hidden: { label: 'Hidden', icon: 'eye-off' },
@@ -257,7 +257,7 @@ export function Settings({
         {/* Body. ``min-h-0`` lets the section actually scroll when
             the content overflows the viewport. Same pattern as the
             Drawer. */}
-        <div className="flex-1 min-h-0 overflow-y-auto bg-bg-app pb-8">
+        <div className="flex-1 min-h-0 overflow-y-auto bg-bg-app pb-[calc(2rem+env(safe-area-inset-bottom))]">
           {tab === 'feeds' && (
             <div className="pt-4">
               <FeedManager
@@ -289,9 +289,9 @@ export function Settings({
                 <div className="grid grid-cols-3 gap-0 rounded-ios overflow-hidden border border-hairline">
                   {(
                     [
-                      { value: 'terse' as const, label: 'terse' },
-                      { value: 'narrative' as const, label: 'narrative' },
-                      { value: 'alert' as const, label: 'alert' },
+                      { value: 'terse' as const, label: 'Short' },
+                      { value: 'narrative' as const, label: 'Story' },
+                      { value: 'alert' as const, label: 'Alerts' },
                     ]
                   ).map((t) => {
                     const active = t.value === briefTone
@@ -737,7 +737,7 @@ function LLMSection({
           </button>
         ) : llm === null ? (
           <div className="flex-1 min-w-0">
-            <div className="text-ios-body text-label-primary truncate">LLM</div>
+            <div className="text-ios-body text-label-primary truncate">AI model</div>
             <div className="text-ios-caption text-label-secondary truncate">checking…</div>
           </div>
         ) : llm.configured ? (
@@ -775,7 +775,7 @@ function LLMSection({
               onChange={(e) => void changeProvider(e.target.value)}
               className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
             >
-              <option value="">— env default —</option>
+              <option value="">Default</option>
               <option value="ollama_cloud">Ollama Cloud</option>
               <option value="ollama">Ollama (local)</option>
               <option value="anthropic">Anthropic</option>
@@ -811,7 +811,7 @@ function LLMSection({
                 onChange={(e) => setModelBrief(e.target.value)}
                 className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
               >
-                <option value="">— env default —</option>
+                <option value="">Default</option>
                 {tagOptions.map((m) => (
                   <option key={m.name} value={m.name}>
                     {m.recommended ? '★ ' : ''}
@@ -854,7 +854,7 @@ function LLMSection({
                 onChange={(e) => setModelScoring(e.target.value)}
                 className="w-full min-h-[36px] rounded-ios bg-bg-elevated border border-hairline px-2 text-label-primary"
               >
-                <option value="">— env default —</option>
+                <option value="">Default</option>
                 {/* A saved name missing from the list still has to be an
                     option, or the select shows "env default" while Save
                     sends the stale name back. */}

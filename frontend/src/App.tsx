@@ -2180,7 +2180,7 @@ export function App() {
           UI leans on these 1px ``rgba(255,255,255,0.08)`` lines as
           the only border treatment. ``z-20`` keeps the bar above
           column content but below the Drawer (z-30+). */}
-      <header className="sticky top-0 z-20 bg-bg-app/85 supports-[backdrop-filter]:backdrop-blur-xl border-b border-hairline">
+      <header className="sticky top-0 z-20 pt-[env(safe-area-inset-top)] bg-bg-app/85 supports-[backdrop-filter]:backdrop-blur-xl border-b border-hairline">
         {/* Title row. The hamburger sits on the trailing edge of the
             row (right-aligned) rather than the leading edge — this
             matches iOS where leading space is reserved for the title
@@ -2282,19 +2282,22 @@ export function App() {
               data-settings-gear
               className="w-11 h-11 flex items-center justify-center rounded-full text-label-primary active:bg-bg-elevated"
             >
+              {/* A toothed gear (Feather "settings", MIT). The previous
+                  circle-with-rays glyph read as a sun / brightness
+                  control rather than Settings. */}
               <svg
                 width="22"
                 height="22"
-                viewBox="0 0 22 22"
+                viewBox="0 0 24 24"
                 fill="none"
                 stroke="currentColor"
-                strokeWidth={1.5}
+                strokeWidth={1.6}
                 strokeLinecap="round"
                 strokeLinejoin="round"
                 aria-hidden="true"
               >
-                <circle cx="11" cy="11" r="3" />
-                <path d="M11 2v2M11 18v2M2 11h2M18 11h2M4.93 4.93l1.41 1.41M15.66 15.66l1.41 1.41M4.93 17.07l1.41-1.41M15.66 6.34l1.41-1.41" />
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
             </button>
             {/* Hamburger lives next to the search/refresh affordances
@@ -2723,6 +2726,7 @@ export function App() {
                   tone={briefTone}
                   onToneChange={setBriefTone}
                   triggerGenerate={triggerBriefGenerate}
+                  startExpanded
                 />
               ) : (
                 <Column

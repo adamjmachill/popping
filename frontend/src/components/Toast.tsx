@@ -114,7 +114,7 @@ export function ToastHost() {
       // (when present) is clickable.
       role="status"
       aria-live="polite"
-      className="fixed inset-x-0 bottom-6 z-50 flex justify-center pointer-events-none"
+      className="fixed inset-x-0 bottom-[calc(1.5rem+env(safe-area-inset-bottom))] z-50 flex justify-center pointer-events-none"
     >
       <div
         className={`pointer-events-auto flex items-center gap-3 rounded-ios border px-4 py-2 text-ios-body shadow-glow-md max-w-[min(90vw,420px)] ${color}`}

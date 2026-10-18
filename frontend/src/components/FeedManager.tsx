@@ -378,6 +378,10 @@ function SourceRow({
   // the drawer's frame.
   const CONFIRM_TIMEOUT_MS = 4000
   const [confirmingDelete, setConfirmingDelete] = useState(false)
+  // Rows show name, category and freshness; the controls (pause,
+  // edit, interval, fetch, delete) appear when the row is tapped,
+  // like an iOS settings list, instead of six links on every row.
+  const [open, setOpen] = useState(false)
 
   const toggleActive = async () => {
     setBusy(true)
@@ -678,8 +682,13 @@ function SourceRow({
   }
 
   return (
-    <div className={`px-3 py-2 text-ios-caption border-b border-hairline last:border-b-0 ${busy ? 'opacity-60' : ''}`}>
-      <div className="flex items-center gap-2 min-w-0">
+    <div className={`px-3 py-0.5 text-ios-caption border-b border-hairline last:border-b-0 ${busy ? 'opacity-60' : ''}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="w-full min-h-[44px] flex items-center gap-2 min-w-0 text-left"
+      >
         {/* SourceIcon — colored-letter fallback when the favicon
             hasn't landed yet. ``size={14}`` matches the original
             w-3.5 h-3.5 img (14px). */}
@@ -764,12 +773,24 @@ function SourceRow({
             {source.net_vote_score}
           </span>
         )}
-      </div>
-      <div className="flex items-center gap-2 mt-1">
+        <span
+          aria-hidden="true"
+          className={`ml-auto shrink-0 text-label-tertiary transition-transform ${open ? 'rotate-90' : ''}`}
+        >
+          ›
+        </span>
+      </button>
+      {!open && (
+        <div className={`-mt-2 pb-2 pl-[22px] text-[11px] ${isStale(source) ? 'text-amber-400' : 'text-label-tertiary'}`}>
+          updated {timeAgo(source.last_fetch_at)} · every {refreshLabel(source.refresh_interval_seconds)}
+        </div>
+      )}
+      {open && (
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 pb-2 pl-[22px]">
         <button
           onClick={toggleActive}
           disabled={busy}
-          className="text-ios-caption text-accent active:opacity-60 disabled:opacity-40"
+          className="min-h-[36px] text-ios-caption text-accent active:opacity-60 disabled:opacity-40"
           aria-label={source.active ? 'pause source' : 'resume source'}
         >
           {source.active ? 'pause' : 'resume'}
@@ -908,6 +929,7 @@ function SourceRow({
           </span>
         )}
       </div>
+      )}
     </div>
   )
 }
