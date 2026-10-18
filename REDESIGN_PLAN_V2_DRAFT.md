@@ -169,7 +169,7 @@ def _client() -> httpx.AsyncClient:
 **Lookup steps:**
 1. `check_url_safe(rebuilt_url)`. Failure: the unreachable message, log `blocked:ssrf`.
 2. `async with _client() as client, client.stream("GET", url, headers=_PAGE_HEADERS) as resp:` read with `resp.aiter_bytes()` (decoded bytes, so the cap bounds decompressed size against the backend's 2 GB limit, docker-compose.yml:106). Append `chunk[: _MAX_BODY - len(buf)]`, stop at the cap, then `buf = buf[:_MAX_BODY]` (MockTransport delivers the whole body as one chunk). Decode with `errors="replace"`.
-3. Catch only `httpx.HTTPError`, never `except Exception`. A `RequestError` whose message starts with "SSRF guard aborted" gives the unreachable message (`blocked:ssrf`); other transport errors and timeouts give the network message.
+3. Catch only `httpx.HTTPError` around the page fetch, never `except Exception` (the /user fallback below also catches `ValueError` from `fetch_rss`). A `RequestError` whose message starts with "SSRF guard aborted" gives the unreachable message (`blocked:ssrf`); other transport errors and timeouts give the network message.
 4. Host chain: every URL in `resp.history` plus `resp.url` must have a host matching `(^|\.)(youtube\.com|youtu\.be)$`, or be consent.google.com, accounts.google.com, or (www.)google.com with a path starting `/sorry/`. Anything else gives the unexpected-host message (`blocked:host`) and no marker is read.
 5. Final-URL `check_url_safe` (kept).
 6. Status 404: not found. Status 429: blocked. Any other status ≥ 400: the HTTP-error message.
@@ -192,7 +192,7 @@ def _client() -> httpx.AsyncClient:
 - status 429;
 - body contains `action="https://consent.youtube.com` or `Before you continue to YouTube`, or matches `confirm you(?:’|'|\\u2019|\\u0027)re not a bot` (case-insensitive). A bare "Sign in to confirm" is not a rule.
 
-**/user fallback.** Import lazily inside the function (`from app.sources.rss import fetch_rss`). Accept `feeds/videos.xml?user=NAME` only when it returns at least one item; otherwise raise `YouTubeBlockedError`. Wrap the call in `except (httpx.HTTPError, ValueError)`: `fetch_rss` raises httpx errors (`raise_for_status`, rss.py:394; a retried transport error, :500-503), and `ValueError` for a redirect to a denied host (rss.py:411-413) and for a body that is not a feed (rss.py:476-481). Either becomes `YouTubeBlockedError`, so nothing escapes as a 500. This is the one place besides lookup step 3 that catches, and it still never uses `except Exception`. Log `fallback:user_ok` or `fallback:user_failed`. This also covers POST, PATCH and /auto, which never fetch the feed themselves.
+**/user fallback.** Import lazily inside the function (`from app.sources.rss import fetch_rss`). Accept `feeds/videos.xml?user=NAME` only when it returns at least one item; otherwise raise `YouTubeBlockedError`. Wrap the call in `except (httpx.HTTPError, ValueError)`: `fetch_rss` raises httpx errors (`raise_for_status`, rss.py:394, re-raised at :501; a transport error after its retry, :505), and `ValueError` for a redirect to a denied host (rss.py:411-413) and for a body that is not a feed (rss.py:476). Either becomes `YouTubeBlockedError`, so nothing escapes as a 500. This is the one place besides lookup step 3 that catches, and it still never uses `except Exception`. Log `fallback:user_ok` or `fallback:user_failed`. This also covers POST, PATCH and /auto, which never fetch the feed themselves.
 
 **Slug** (`youtube_source_slug`, also mirrored by `suggestName` in lib/feedRules.ts):
 - `@handle`, `/c/NAME`, `/user/NAME` or `?user=NAME` → `<name>_yt`;
@@ -348,7 +348,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 
 **Card action rows** (Card.tsx:978, :1052, :1122):
 - Each row becomes `flex flex-wrap items-center gap-x-4 gap-y-2`, and consecutive rows use `mt-2` instead of `mt-1.5`, so the 44px hit boxes never overlap.
-- Each action becomes `inline-flex items-center whitespace-nowrap min-h-[44px] -my-2`.
+- Each action becomes `inline-flex items-center whitespace-nowrap min-h-[44px] -my-2`. The two links (Reddit thread :979, audio :1053) also get `data-one-line`, so C11 checks them explicitly.
 - Keep `data-card-interactive` and the stopPropagation handlers.
 
 **Card thumbnail** (R4) uses arbitrary container-query utilities on the elements, not `@layer components` rules (Tailwind 3.4 emits components before utilities, so `.w-28` and `.aspect-video` would win at equal specificity):
@@ -399,7 +399,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 **Root-cause one-liners:**
 - App.tsx:2188: remove `minHeight: '100dvh'` (keep `backgroundColor`); update the comment at :2180-2187. Guard C2b.
 - Card.tsx:513: `el.style.transition = animate ? 'transform 180ms ease-out' : 'none'`. Today `''` lets the class's 200ms transition (Card.tsx:893) make the card trail the finger.
-- frontend/tailwind.config.js: add `future: { hoverOnlyWhenSupported: true }`, so hover styles stop sticking after a tap (Card.tsx:891, :919, :1745 and about 14 others); fix the stale sheetUp comment (:93-96 says the Drawer uses it).
+- frontend/tailwind.config.js: add `future: { hoverOnlyWhenSupported: true }`, so hover styles stop sticking after a tap (Card.tsx:891, :919, :1745 and about 14 others); fix the stale sheetUp comment (:93-96 says the Drawer uses it) so it reads "used by the Settings sheet on phones (PR5)". PR5 applies `animate-sheet-up` to that sheet (section 9) and may not touch this file, so the comment is written for that state now.
 - App.tsx:2401: `z-15` (not a Tailwind class, so the banner has no z-index) becomes `z-10`.
 
 ### Later PRs
@@ -463,14 +463,14 @@ Then, in PR9:
 | C2 page width | `document.body.scrollWidth` and `#root.scrollWidth` ≤ innerWidth. `html` alone misses overflow because of `overflow-x: clip` (styles.css:36). | PR2 |
 | C2b page height | In the dashboard state at both widths, inject `#root{padding-bottom:34px}` (Chromium's `env()` is 0) and assert `document.scrollingElement.scrollHeight ≤ innerHeight + 1`. | PR2 |
 | C3 viewport escape | Every visible element (has rects, not `visibility:hidden`, opacity > 0, not inside `[inert]` or `[aria-hidden="true"]`, not inside a closed Drawer whose aside starts at or beyond innerWidth) has `left ≥ -1` and `right ≤ innerWidth + 1`. Skip only descendants of `[data-hscroll]`, never `overflow-x:auto/hidden` ancestors in general. | PR2 |
-| C4 vertical scrollers | Every visible element with computed `overflow-y` auto or scroll has `scrollWidth ≤ clientWidth + 1` (unless `data-hscroll`) and computed `overscroll-behavior-y: contain`. Catches the Settings body at 369/320 that C2 and C3 miss. | PR2 |
+| C4 vertical scrollers | Every visible element with computed `overflow-y` auto or scroll, except `[data-hscroll]` elements, has `scrollWidth ≤ clientWidth + 1` and computed `overscroll-behavior-y: contain`. The exception is needed because an `overflow-x-auto` strip (App.tsx:226, :2369, :2671; Settings.tsx:228) computes `overflow-y: auto` too (a `visible` axis becomes `auto` when the other is not visible). Catches the Settings body at 369/320 that C2 and C3 miss. | PR2 |
 | C5 clipped text | For every non-whitespace text node, each `Range.getClientRects()` rect's **left and right** lie inside its nearest ancestor whose `overflow-x` is not visible (or the viewport). Exceptions: an ancestor up to that clipper has `text-overflow: ellipsis` or `-webkit-line-clamp`; a `data-hscroll` strip is in between; the clipper's rect is ≤ 1px wide or tall, or its computed `clip` is `rect(0px, 0px, 0px, 0px)` (sr-only, e.g. FeedManager.tsx:1555). | PR2 |
 | C6 field font | Delete the coarse-pointer rule through CSSOM (find the `CSSMediaRule` whose `conditionText` includes `pointer: coarse`, then `deleteRule`). Every visible input (not checkbox, radio or range), select and textarea must then compute ≥ 16px. Warn-only until `--strict`; after PR9 the rule no longer exists. | warn PR2, strict PR9 |
 | C7 tap targets | Inside `[role="dialog"]`, `aside[aria-label="menu"]`, `header`, `[role="tablist"]`, `[role="status"] button` (and `main.md\:hidden article` from PR7): every visible `button`, `a[href]`, `select`, `[role=button\|tab\|switch]` is ≥ 43.5px tall, and ≥ 43.5px wide when it has no text. Checkboxes and radios are measured on `closest('label')`. Skip descendants of `[data-tap-exempt]` (article prose). | warn PR2, strict PR9 |
 | C8 runtime | Fail on any `pageerror`; any console error except the known `/auth/me` 404, matched by `new URL(msg.location().url).pathname === '/auth/me'` (Chromium's text has no URL); any `onUnmocked` call; any `page.on('dialog')` event, whose handler records the failure and calls `dialog.dismiss()` so the page does not hang. | PR2 |
 | C9 CSP (`--csp`, chromium only) | `page.route('**/*', …)`: for `request().resourceType() === 'document'` do `const response = await route.fetch(); await route.fulfill({ response, headers: { ...response.headers(), 'content-security-policy': CSP } })`; otherwise `route.fallback()` so `mockApi` still answers. CSP is read from frontend/nginx.conf.template with one regex over the whole file (`/Content-Security-Policy "([^"]+)"/`); exit 1 if it is missing. Fail on any console "Refused to". | PR2 |
 | C10 no Save | No visible button whose accessible name matches `/^save$/i` inside `[role=dialog][aria-label=settings]`. | PR8 |
-| C11 one line | For every visible text node inside `button`, `a`, `[role=tab]`, `time`, or an element marked `data-one-line`, the distinct tops of `Range.getClientRects()` number 1. Catches "12m / ago", mid-phrase action wraps, the two-line Settings header and two-line pills. | PR2 |
+| C11 one line | For every visible text node inside `button`, `[role=tab]`, `time`, an element marked `data-one-line`, or an `a` whose computed `white-space` is `nowrap`, the distinct tops of `Range.getClientRects()` number 1. Links in general are excluded because several wrap by design: the card headline (Card.tsx:906-929, full title, no clamp), related-article links (:1148), History rows (Settings.tsx:1155, whole `block` anchors) and, after PR8, Hidden and Saved titles (`line-clamp-2`). PR2 marks the Card inline action links (Card.tsx:979, :1053) `data-one-line`. Catches "12m / ago", mid-phrase action wraps, the two-line Settings header and two-line pills. | PR2 |
 | C12 gutter | Inside `main.md\:hidden`, `[role=dialog][aria-label=settings]` and `aside[aria-label=menu]`: every visible text rect and every input, select and button rect has `left ≥ 8` and `right ≤ innerWidth - 8`, unless an ancestor has `data-bleed` or `data-hscroll`. Catches the Feeds tab, which passes C3's `left ≥ -1`. | PR2 |
 | C13 measure | A headline anchor (`article a[aria-label="open in new tab"]`) narrower than 55% of its article's content box, or any text block taller than 8 lines while narrower than 160px, fails. Catches the thumbnail ribbon. | PR2 |
 | C14 ellipsis floor | An element with computed `text-overflow: ellipsis` whose `clientWidth < min(96, scrollWidth)` fails. Catches feed names squeezed by chips and the Menu › regression. | PR2 |
@@ -629,7 +629,7 @@ Result: 4 taps, no typing, no Save. One tap fewer from a card (F11).
 
 **F12. AI settings** (PR8): ≡ → Settings → AI.
 - Provider and models are lists that save when picked. "Other…" reveals a field that saves when you leave it.
-- Switching to a provider that needs a key shows its key field first; the switch saves once the key is saved.
+- Switching provider saves at once. If Popping holds no key for it from this screen, its key field appears with "If your <Provider> key isn't in the server's settings file, paste it here."; when Popping then reports that provider has no usable key, the line reads "Popping has no <Provider> key yet. Paste one above."
 - A key saves when you leave its field and then shows "Key saved". Leaving an empty key field changes nothing. Removing a key asks once, inline.
 - There is no Edit button and no Save button.
 
@@ -675,7 +675,7 @@ Desktop (md and up) keeps the 480px right-hand panel and the sub-row. Only the g
 
 ### FeedEditor, top to bottom
 
-`FeedEditor({ source, sources, onDeleted }: { source: Source; sources: Source[]; onDeleted(id: number): void })`. Every control is `min-h-[44px] text-ios-body`; labels are `text-ios-caption`; each label row is `flex justify-between` with `<SaveStatus>` on the right. Every button inside the editor (Undo, Try again, Add header, remove, presets, New category, Add, Cancel, Pause, Check now, Delete, More) has `onPointerDown={(e) => e.preventDefault()}`: WebKit does not focus a button on tap, so without it the field's blur fires first with a null `relatedTarget` and commits mid-edit.
+`FeedEditor({ source, sources, onDeleted }: { source: Source; sources: Source[]; onDeleted(id: number): void })`. Every control is `min-h-[44px] text-ios-body`; labels are `text-ios-caption`; each label row is `flex justify-between` with `<SaveStatus>` on the right. The buttons that must keep focus in a field (Undo, Try again, Add header, the header remove buttons, the header presets, and the New-category Add and Cancel) have both `onPointerDown={(e) => e.preventDefault()}` and `onMouseDown={(e) => e.preventDefault()}`, as the search clear button does (section 4): WebKit does not focus a button on tap, so without them the field's blur fires first with a null `relatedTarget` and commits mid-edit, and engines differ on whether a cancelled pointerdown also cancels the mousedown focus change. The other buttons (New category, Pause, Check now, Delete, More) do not prevent it, so tapping them blurs and commits an edited field first, which is the wanted order.
 
 1. **Last problem** (only when `last_error` is set):
    - `lastErrorMessage(last_error)` maps the scheduler's prefix (scheduler.py:220-242, :522-527) to plain words: `[blocked]` → "This site is refusing Popping (HTTP <code>)." (code from `\b40[123]\b`, else no code); `[not found]` → "The address no longer exists (HTTP 404)."; `[upstream error]` → "The site had a problem on its end (HTTP <code>)."; `[http error]` → "The site answered with an error (HTTP <code>)."; `[network]` → "Couldn't reach the site."; anything else → "Popping couldn't read this feed."
@@ -692,7 +692,7 @@ Desktop (md and up) keeps the 480px right-hand panel and the sub-row. Only the g
 7. **Website rows** (`generic_scrape` only): **Sitemap address** (`type="url"`) and **Only links starting with** (text; must start with "/" and contain no "://", else "Start it with /"). Empty sends `null`.
 8. **Actions** (`flex flex-wrap gap-2`, each 44px):
    - **Pause feed** / **Resume feed**: `commitField(id, 'active', !(pending ?? active), 'pause setting')`.
-   - **Check now**: `await whenIdle(id)`, then `api.ingest(currentSource(id).name)`; toast "Checked <label>: <n> new" or "Couldn't check <label>: <lastErrorMessage(r.error)>" (replacing FeedManager.tsx:871, :874).
+   - **Check now**: `(document.activeElement as HTMLElement | null)?.blur()` and `flushEditors()` (so an edited Address is committed even if the tap did not blur it), then `await whenIdle(id)`, then `api.ingest(currentSource(id).name)`; toast "Checked <label>: <n> new" or "Couldn't check <label>: <lastErrorMessage(r.error)>" (replacing FeedManager.tsx:871, :874).
    - **Delete feed…**: inline confirm with no timer, **Pause instead**, **Delete**, **Keep**. Delete: `await whenIdle(id)`, `api.deleteSource(id)`, then `onDeleted(id)` (App's `removeSource`, toast "Deleted <label>").
 
 Built-ins can still be paused, recategorised and deleted; their name, address, headers and interval are fixed.
@@ -754,14 +754,14 @@ Why no debounce timer: every effective PATCH on an active feed rebuilds its job 
 - Per item: `AbortController`; a 35 s timer that aborts; an 8 s timer that sets `slow`; `patch(id, { [field]: value }, { keepalive: pageHiding, signal })`. Each body holds **one key**, so a 422 belongs to one field.
 - **Success** (`row`): `prev = getSource(id)`; `onServerRow(row)`; if `prev && prev.name !== row.name`, `onRenamed(prev.name, row.name)`; `lastRejected.delete(field)`; if no newer value is queued for the field, set `saved`, then `idle` after 1500 ms.
 - **Failure:**
-  - A `TypeError` (network) not yet retried moves to `retrying` with a 2000 ms timer, then goes back to the front of the queue. `retrying` counts as busy for `whenIdle`, for `pump`, and for step 1's comparison.
+  - A `TypeError` (network) not yet retried moves to `retrying` with a 2000 ms timer, then goes back to the front of the queue. While the page is hiding it skips the timer and goes straight back to the front of the queue, so its one retry is sent at once with `keepalive`. `retrying` counts as busy for `whenIdle`, for `pump`, and for step 1's comparison.
   - HTTP 404: `onGone(id)` (App's `removeSource`), `dropSource(id)`, state "This feed was deleted.".
   - Otherwise `describe(err, field, value)` → `{ status: 'error', message, failedValue: value, retryable }`; a non-retryable 4xx sets `lastRejected`.
   - If nobody is subscribed to (id, field), the editor is gone: collect `{ label, message }` per source and call `onFailedAway(id, failures)` once per source per tick (`setTimeout(0)`), because Toast.tsx shows one toast at a time (:71-96). The failed value and message stay in the store, so a reopened editor shows the draft and the reason.
 - `finally`: clear timers and in-flight state, then `pump(id)`.
 - `dropSource(id)` clears the queue and the retry timer; a result arriving for a dropped id is ignored (a per-source generation counter).
 - `whenIdle(id)` resolves when the queue is empty, nothing is in flight and `retrying` is empty.
-- `setPageHiding(true)` pumps every source synchronously, inside the `visibilitychange`/`pagehide` handler (no microtask, no timer: timers do not run while iOS suspends the page).
+- `setPageHiding(true)` first cancels every retry timer and moves each `retrying` item back to the front of its source's queue (a 2 s timer would not run while iOS suspends the page, and the item sits outside the queue), then pumps every source synchronously, inside the `visibilitychange`/`pagehide` handler (no microtask, no timer). App registers that handler for the whole session, not only while Settings is open (section 6, App wiring).
 
 **Text fields in the editor:**
 - The draft is local state seeded from `source[field]`. It reseeds from the server only when the field is not focused, not queued, in flight or retrying, and not in error. After a successful save it takes `row[field]` when not focused (reddit canonicalises at routes/sources.py:244-263; Apple and YouTube resolve at :688-699), so a later blur does not re-send and re-fetch.
@@ -800,7 +800,7 @@ Why no debounce timer: every effective PATCH on an active feed rebuilds its job 
 | `TypeError` | "Couldn't reach Popping. Check your connection." |
 | `AbortError` | "That took too long. Try again." |
 
-`friendlyTestError` uses the same mappings for `error` strings, plus: `forbidden` → "This site blocks automated readers. Open “Headers” below, tap “Use a browser identity”, then Test again." (FeedManager.tsx:171 points at a section that does not exist); `parse_error` → "That address answered, but it isn't a feed." (:175); `invalid_headers` → the header message for `raw`; `network_error` → "Couldn't reach that site. Check the address."; `name_conflict` → "Another feed already uses this name."
+`friendlyTestError` uses the same mappings for `error` strings, plus: `forbidden` → the wording in section 8, Add form (the only caller is the Add form, whose toggle is labelled “Advanced”; FeedManager.tsx:171 today points at a section that does not exist); `parse_error` → "That address answered, but it isn't a feed." (:175); `invalid_headers` → the header message for `raw`; `network_error` → "Couldn't reach that site. Check the address."; `name_conflict` → "Another feed already uses this name."
 
 `errorMessage(err)` for every other call site: 401 "Please sign in again."; 5xx "Popping had a problem. Try again."; `TypeError` "Couldn't reach Popping. Check your connection."; else "Something went wrong. Try again."
 
@@ -823,6 +823,8 @@ Why no debounce timer: every effective PATCH on an active feed rebuilds its job 
 - Keep the `testSource` body union and the `createSource` body shape exactly (slice15 :326-341 and test_source_create_sitemap_link_pattern.py:183-190 pin them).
 
 ### App wiring (App.tsx, PR6)
+
+**Page hiding (always on):** in the same effect that calls `configureSourceSaves`, App registers `visibilitychange` (hidden → `setPageHiding(true)`, visible → `setPageHiding(false)`) and `pagehide` (`setPageHiding(true)`), and removes them on cleanup. Settings adds the blur and `flushEditors()` part, calling the idempotent `setPageHiding(true)` first (section 6, Settings wiring).
 
 **`applyServerSource(row)`:** `setSources(prev => prev.map(s => s.id === row.id ? { ...row, net_vote_score: s.net_vote_score } : s))` (the PATCH response carries `net_vote_score: 0`, routes/sources.py:798) and record the write time. If the row's category changed and the phone shows a column (`mobileCol >= 0`), remember the current column's name in `followTabRef` (below).
 
@@ -847,7 +849,7 @@ Why no debounce timer: every effective PATCH on an active feed rebuilds its job 
 
 **`onSourceRenamed`** (App.tsx:1994-2003): stays `const onSourceRenamed = useCallback(` (slice21 pins it); also remaps `filterPresets[].activeSources` with the destructured `setFilterPresets` (App.tsx:605) and `filterPresetsRef`; deps `[setActiveSources, setFilterPresets]`.
 
-**Phone tab across a category change** (scope cut to the editor case): today the phone remembers its tab by index (App.tsx:445, :1358-1367). When a category save lands, `followTabRef` holds the open column's name; an effect on `columns` sets `mobileCol` to that name's new index if it still exists, else leaves the existing clamp (:1358-1367) to land on a neighbour; then clears the ref. Nothing new is stored; the Brief tab (-1) and cold starts behave as today.
+**Phone tab across a category change** (scope cut to the editor case): today the phone remembers its tab by index (App.tsx:445, :1358-1367). When a category save lands, `followTabRef` holds the open column's name; an effect on `columns` sets `mobileCol` to that name's new index if it still exists, else leaves the existing clamp (:1358-1367) to land on a neighbour; then clears the ref. Every manual tab change also clears the ref first: the Brief and column tab taps (App.tsx:2677, :2699) and Jump to column (section 9) go through one `selectMobileCol(i)` helper that sets `followTabRef.current = null` before `setMobileCol(i)`. Otherwise a save that leaves `columns` unchanged (the moved feed has no visible entries) keeps the ref alive, and a later columns change would snap the phone back to the old tab over the one the user picked. Nothing new is stored; the Brief tab (-1) and cold starts behave as today.
 
 **Desktop `selectedColumnIndex`** (App.tsx:671): clamp it to `columns.length - 1` in the same effect, so j/k/o never target a vanished column.
 
@@ -867,7 +869,7 @@ Why no debounce timer: every effective PATCH on an active feed rebuilds its job 
   1. `(document.activeElement as HTMLElement | null)?.blur()`; the blur commits a pending text field;
   2. `flushEditors()`: each FeedEditor registered a flusher that commits any dirty, valid text draft. A CategoryPicker New-category draft is never committed and is discarded;
   3. `onClose()`; nothing waits.
-- **App switching:** while Settings is open, `visibilitychange` (hidden) and `pagehide` call `setPageHiding(true)`, blur the active element and `flushEditors()`; the store pumps synchronously with `keepalive`. `setPageHiding(false)` on visible.
+- **App switching (editor part):** while Settings is open, `visibilitychange` (hidden) and `pagehide` call `setPageHiding(true)` (idempotent; called first so the commits below go out with `keepalive` straight away, whatever order the two listeners run in), then blur the active element and `flushEditors()`. The always-on part lives in App (App wiring, above), so a save still queued, in flight or retrying after Done (flow FF) also goes out when the user switches apps.
 
 ## 7. Category picker
 
@@ -877,9 +879,11 @@ Why no debounce timer: every effective PATCH on an active feed rebuilds its job 
 
 lib/categories.ts:
 - `CATEGORY_OPTIONS` (moved, exported), `CATEGORY_MAX = 40`, `RESERVED_CATEGORIES = ['saved', 'for you']`.
-- `categoryOptions(sources, current, label, { defaultInSuggestions })` returns `{ yours: Array<{ value, text, count }>, suggestions: Array<{ value, text }> }`:
-  - **yours:** unique exact raw strings, plus `current` when missing (editor), sorted by `label(value)` with `localeCompare(undefined, { sensitivity: 'base' })`. `text = label(value)`; when two raw values share a label ("news" and "News", or "news " with a trailing space), each text becomes `${label} (“${raw}”)` so whitespace twins show.
-  - **suggestions:** `CATEGORY_OPTIONS` minus anything matching "yours" by `toLowerCase()` or by `label(x).toLowerCase()`. In the Add form the default 'news' sits here when no feed uses it (no invented "yours" entry with count 0). On a fresh install this is the only group.
+- `fold(s) = s.toLowerCase().replace(/[_\s-]+/g, ' ').trim()`, exported: the same normalisation as the backend's reserved check (`re.sub(r"[_\s-]+", " ", stripped.lower()).strip()`, below). Every "same category" comparison uses it, never `label(x).toLowerCase()`: `categoryLabel` returns any name containing a capital unchanged (labels.ts:66), so `label('For_You')` is "For_You" and `label('Tech_News')` never equals `label('tech news')`.
+- `categoryOptions(sources, current, label, { defaultInSuggestions })` (the Add form passes `defaultInSuggestions: true`; the editor omits it) returns `{ yours: Array<{ value, text, count }>, suggestions: Array<{ value, text }> }`:
+  - **yours:** unique exact raw strings from `sources`, sorted by `label(value)` with `localeCompare(undefined, { sensitivity: 'base' })`. `text = label(value)`; when two raw values share a label ("news" and "News", or "news " with a trailing space), each text becomes `${label} (“${raw}”)` so whitespace twins show.
+  - **suggestions:** `CATEGORY_OPTIONS` minus anything whose `fold` equals the `fold` of an entry in "yours". In the Add form the default 'news' sits here when no feed uses it (no invented "yours" entry with count 0). On a fresh install this is the only group.
+  - **`current`:** in the editor and the Add form alike, when the exact `current` string is in neither group, it is added to "yours" (count 0) so the controlled select always has a matching option. Its text is `label(current)` in the editor (a pending category not yet echoed by a poll) and `${label(current)} (new)` in the Add form (a New-category value such as "Hockey" that no feed uses yet). Without this the select would show its first option while the POST sends "Hockey".
 - `label` is passed in (`categoryLabel`, labels.ts:64-68); the module has no imports.
 
 **Rendering:**
@@ -890,7 +894,7 @@ lib/categories.ts:
 **New-category mode:**
 - `<input ref={inputRef} type="text" autoCapitalize="words" autoCorrect="off" spellCheck={false} enterKeyHint="done" placeholder="e.g. Hockey">`, no `maxLength` (it silently truncates pastes and counts UTF-16 units).
 - A live line: "Shows as “<label(normalised)>”", or "Using your existing “News” category", or the error.
-- 44px **Add** (disabled while the input is invalid) and **Cancel**, both with `onPointerDown` preventDefault.
+- 44px **Add** (disabled while the input is invalid) and **Cancel**, both with `onPointerDown` and `onMouseDown` preventDefault (section 6).
 - **Return or Add commits. Blur does not.** Cancel returns to the select with the current value. `flushEditors` never commits this draft.
 - Add form: while New-category mode holds a non-empty draft, **Add feed** is disabled with the hint "Finish or cancel the new category." Otherwise the feed would silently land in the previous category.
 
@@ -898,9 +902,9 @@ lib/categories.ts:
 1. Normalise: `trim()`, collapse inner whitespace to one space. **Keep the case as typed.** Lower-casing would turn "NHL" into "nhl", which `categoryLabel` shows as "Nhl" (ACRONYMS, labels.ts:21-25).
 2. Empty: "Type a name."
 3. `Array.from(s).length > 40` (code points, like Python `len` and Postgres `varchar(40)`): "Keep it to 40 characters or fewer."
-4. `s.toLowerCase()` or `label(s).toLowerCase()` in `RESERVED_CATEGORIES`: "“<input>” is used by the app. Pick another name." ("for_you" and "saved_" display as "For You" and "Saved".)
-5. Equal ignoring case, or equal by `label(x).toLowerCase()` ("tech_news" vs "Tech News"), to an existing category: return the existing raw spelling, `reused: 'existing'`.
-6. Same against a suggestion: return the suggestion slug ("Tech" → "tech"), `reused: 'suggestion'`, so Card colours (case-sensitive switches) still apply.
+4. `fold(s)` in `RESERVED_CATEGORIES`: "“<input>” is used by the app. Pick another name." This is exactly the backend rule, so "for_you", "For_You", "For-You" and "saved_" are refused on the phone before the server would answer 422.
+5. `fold(x) === fold(s)` for an existing category x ("NEWS" vs "news", "tech news" vs "Tech_News"): return the existing raw spelling, `reused: 'existing'`.
+6. `fold(x) === fold(s)` for a suggestion x: return the suggestion slug ("Tech" → "tech"), `reused: 'suggestion'`, so Card colours (case-sensitive switches) still apply.
 7. Otherwise the normalised input.
 
 **Where it is used beyond the picker** (PR4): Suggested-tab adds (`rec.category`, FeedManager.tsx:1042), Auto-add and Track anyway (`resolveDefault`, section 3) resolve through `resolveNewCategory`, so an existing "News" is reused instead of creating a second column with the same label (columns group by the raw string, App.tsx:753-762).
@@ -937,11 +941,11 @@ lib/categories.ts:
 - **Presets**, each hidden when that header already exists (case-insensitive):
   - **Use a browser identity:** `User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15`.
   - **Prefer English:** `Accept-Language: en-CA,en;q=0.9`.
-- Every button in the group has `onPointerDown={(e) => e.preventDefault()}`, so focus stays in the input and no premature focusout fires.
+- Every button in the group (Add header, remove, presets, Undo, Try again) has `onPointerDown={(e) => e.preventDefault()}` and `onMouseDown={(e) => e.preventDefault()}`, so focus stays in the input and no premature focusout fires.
 - Footnote: "Some sites block automated readers. A browser identity usually fixes it. Headers are saved as plain text that anyone who can open Popping can read, so don't put passwords or keys here."
 
 **Commit triggers (autosave mode):**
-- `onBlur` on the group container when `!e.currentTarget.contains(e.relatedTarget as Node)`. With the pointerdown rule above, a null `relatedTarget` now only means a tap outside the group, which commits.
+- `onBlur` on the group container when `!e.currentTarget.contains(e.relatedTarget as Node)`. With the pointerdown and mousedown rule above, a null `relatedTarget` now only means a tap outside the group, which commits.
 - Removing a row commits; tapping a preset commits; Return in a value field blurs it.
 - The "Fill in both to save this header." message appears only after focus has left the group.
 
@@ -991,7 +995,7 @@ lib/categories.ts:
 - The gear: App.tsx:2298-2329 (the blank line, the comment starting at :2299, the button with `data-settings-gear`, the SVG, its `</button>` at :2329). :2296-2297 are the Refresh button's icon and closing tag and stay. If the Hamburger comment (:2330-2332) is also removed, remove all three lines, or the JSX breaks.
 - The Menu's "All settings…" row (Drawer.tsx:377-390) and the "History" row (:336-351).
 - The dead Drawer prop `onResetLocalState` (Drawer.tsx:61-66, :89-92; App.tsx:2810). Settings keeps its own live `onResetLocalState` (Settings.tsx:80, :129, :414; App.tsx:2846).
-- Stale comments at App.tsx:1-17 (swipe, localStorage read state) and :2202-2219, and Drawer.tsx:3-28, :71-75, :257-261, :266-273, :307-313.
+- Stale comments at App.tsx:1-17 (swipe, localStorage read state) and :2202-2219, and Drawer.tsx:3-28, :71-75, :257-261. (Drawer.tsx:266-273 and :307-313 describe the header order and are rewritten in PR2 with the header, section 4.)
 
 **Header title** (App.tsx:2221): `shrink-0 whitespace-nowrap` instead of `truncate`, plus `max-[359px]:text-[28px] max-[359px]:leading-[34px]` (guard C16 at 320 and 312).
 
@@ -1012,7 +1016,7 @@ lib/categories.ts:
 - Grabber (Drawer.tsx:303-306): `top-3` becomes `top-[calc(env(safe-area-inset-top)+0.75rem)]`.
 - While closed the aside is inert: an effect does `drawerRef.current?.toggleAttribute('inert', !open)` and sets `aria-hidden` (React 18 has no `inert` prop; the ref is `drawerRef`, Drawer.tsx:203). On close, focus returns to the Hamburger unless Settings is opening.
 - Backdrop and panel transitions get the `motion-safe:` prefix.
-- Swipe to dismiss (Drawer.tsx:148-193): also close on a rightward drag of more than 100px (the direction the right-anchored panel slides out); update the comments at :11-13 and :142-147.
+- Swipe to dismiss (Drawer.tsx:148-193; the leftward checks are :165 and :178): also close on a rightward drag of more than 100px (the direction the right-anchored panel slides out); update the comments at :11-13 and :142-147.
 - Desktop shortcut: `,` opens Settings on Feeds (App.tsx keydown handler :1753-1894, after the input guard), listed in ShortcutsSheet.tsx:29.
 - LoginPage stays as is until PR7.
 
@@ -1025,7 +1029,7 @@ lib/categories.ts:
 - **Settings tab buttons** (Settings.tsx:236-247): `u.searchParams.delete('source')` and `window.history.replaceState(window.history.state, '', u.toString())`, keeping the flag (today `null` at :241). Keep the synthetic popstate.
 - **FeedManager focus:** lift SourceRow's local `open` (FeedManager.tsx:384) into MyFeedsTab as `openRowId`, passing `isOpen`/`onToggle`. A `useEffect` keyed on `focusSourceId` plus a nonce from App (so re-focusing the same id while mounted works) forces the tab to 'mine', sets `openRowId` and, until PR6 deletes it, `editingRowId` (:215) so › lands in the old edit form in 2 taps; then on the next frame `` document.getElementById(`feed-${id}`)?.scrollIntoView({ block: 'start' }) ``. Put the li id on :321. When the user collapses or changes the open row, remove `source` the same way (replaceState with the current state).
 - **One tab list:** `export const SETTINGS_TABS = ['feeds','llm','notifications','history','hidden','starred','voted','reset'] as const` and `export type SettingsTab = typeof SETTINGS_TABS[number]` in lib/settingsTabs.ts. Settings.tsx uses it for the strip (:229) and keeps `export type { SettingsTab }` so Drawer.tsx:34 still compiles; App's allow-list (App.tsx:409-418) becomes `(SETTINGS_TABS as readonly string[]).includes(t)`.
-- **Panel animation:** `motion-safe:animate-sheet-up md:animate-none` (the keyframe exists at tailwind.config.js:97-100, unused).
+- **Panel animation:** `motion-safe:animate-sheet-up md:animate-none` (the keyframe exists at tailwind.config.js:97-100, unused until now; PR2 already rewrote its comment for this use, and PR5 does not touch tailwind.config.js).
 - **Stacking:** header z-20 < Drawer z-30/40 < Settings z-50 < Toast z-[60]. Esc capture listeners are unchanged except that Settings' calls `handleClose`.
 - Severity: the Back fix is low priority. The home-screen app (manifest `display: standalone`, index.html:15) has no Back gesture; it shows in a Safari tab and on desktop. Flow FG is the real gate.
 
@@ -1068,7 +1072,7 @@ Each line was checked against the code. The PR column is where it closes; the PR
 | 5 | Drawer.tsx:262-295 | The closed Drawer stays focusable off-screen. | `inert` and `aria-hidden` while closed; focus back to ≡. |
 | 5 | Drawer.tsx:454-479 | A › button would leave names about 67px at 320. | Category text `hidden md:inline`; divider on the wrapper. |
 | 5 | Hamburger.tsx:13-16 | No `aria-expanded`. | `aria-expanded`, `aria-haspopup="dialog"`. |
-| 5 | Drawer.tsx:148-178 | Dismiss only by dragging left, against the panel's direction. | Rightward drag also closes. |
+| 5 | Drawer.tsx:148-193 (:165, :178) | Dismiss only by dragging left, against the panel's direction. | Rightward drag also closes. |
 | 5 (low) | App.tsx:430-444; Settings.tsx:241 | Done pushes history, so Back reopens Settings (Safari tab and desktop only). | `pushState({popping:'settings'})`, synchronous close, `back()`/`replaceState`, tabs keep state. |
 | 5 | App.tsx:2022-2030, :2598 | Jump to column does nothing on phone or desktop. | `setMobileCol`, tab into view, clear search; scroll `firstElementChild`. |
 | 6 | Settings.tsx:204 | The sheet ignores the keyboard: Done pans off and lower fields stay covered. | `useVisualViewport` top and bottom; `scrollIntoView` nearest. |
@@ -1113,7 +1117,7 @@ Each line was checked against the code. The PR column is where it closes; the PR
 |---|---|---|---|
 | 3 | FeedManager.tsx:108-115 | KNOWN_BUILT_INS lacks rfd_hot_deals, so its name and address look editable and the backend answers 400. | Add it in lib/feedRules.ts; no_db guard test against the plugin registry. |
 | 3 | api.ts:446-452; :284 | deleteSource throws a plain Error; raw "<status> for <url>" text reaches users. | `ApiError` with status and detail; `errorMessage()` at call sites (PR7, PR8). |
-| 3 | FeedManager.tsx:171, :175 | The forbidden hint points at "Advanced → Custom headers", which does not exist; "Is this a valid RSS/Atom URL?". | New wording (section 6). |
+| 3 | FeedManager.tsx:171, :175 | The forbidden hint points at "Advanced → Custom headers", which does not exist; "Is this a valid RSS/Atom URL?". | New wording (section 6; the forbidden hint text is in section 8, Add form). |
 | 4 | FeedManager.tsx:1368-1424 | The Add form requires an invented slug; nameError and urlError are never rendered, so Add stays grey with no reason. | Optional name with `suggestName`; rendered errors; `normalizeFeedInput`. |
 | 4 | FeedManager.tsx:1426-1432, :1473 | Add failures and invalid typed names go to the hidden banner. | Inline in the result box; names normalised. |
 | 4 | FeedManager.tsx:1446-1458 | Add sends the typed URL, not Test's resolved one. | `resolvedUrl` after an ok Test; auto-Test for video links with no name. |
@@ -1156,7 +1160,7 @@ Each line was checked against the code. The PR column is where it closes; the PR
 
 **AI tab autosave rules (PR8, LLMSection at Settings.tsx:540-939, routes/settings.py:91-170).** The per-source store does not apply; SaveStatus is reused.
 - The controls are always shown: `openPicker` (:605-620) runs when the tab opens; delete the Edit/Cancel toggle (:763-768) and the save button (:928-934).
-- Provider select: a change sends one PUT `{ provider, model_brief: '', model_scoring: '' }` (models are provider-specific, :622-638). For anthropic, openai, groq or ollama_cloud with `apiKeySet[provider]` false, show that provider's key field with "Paste your <Provider> key to switch." and send the provider PUT only after the key PUT succeeds. Default ('') and ollama send at once.
+- Provider select: a change sends one PUT `{ provider, model_brief: '', model_scoring: '' }` at once, for every provider (models are provider-specific, :622-638). `apiKeySet[provider]` reflects only a key saved from this tab (`*_api_key_set` is `bool(values["llm.<id>_api_key"])` over runtime settings, routes/settings.py:70-88), not a key in the server's settings file, so it cannot gate the switch. For anthropic, openai, groq or ollama_cloud with `apiKeySet[provider]` false, also show that provider's key field with the hint "If your <Provider> key isn't in the server's settings file, paste it here." After the provider PUT, call `api.llmStatus()` (api.ts:729; `configured` is false when the pinned provider has no usable key, llm/__init__.py:202-208); if `configured` is false, show "Popping has no <Provider> key yet. Paste one above." under the key field.
 - Model selects send `{ model_brief }` or `{ model_scoring }` alone on change. "Other…" reveals a text field that sends on blur when non-empty. A saved name missing from the list stays its first option (as :864-866 does).
 - Key fields (`type="password" autoComplete="off"`): blur on an empty or untouched field sends nothing (`""` deletes the key server-side, routes/settings.py:165-169). A typed key sends `{ <id>_api_key: value }` alone, then the input state resets to '' and the row shows "Key saved". Removing a key is an inline confirm ("Remove the <Provider> key? Popping falls back to the server's settings file." **Remove** / **Keep**) calling the existing `clearApiKey` (:696-714).
 - Never put a key in a toast, an error string or a console line. Errors use `errorMessage`.
@@ -1237,8 +1241,8 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
 - **Files:** frontend/src/lib/{feedRules,categories,headers,apiErrors,sourceSaves}.ts (new); frontend/src/api.ts; frontend/src/components/FeedManager.tsx (imports the moved constants and helpers; no UI change); frontend/scripts/unit/{feedRules,categories,headers,apiErrors,sourceSaves}.test.ts (new); backend/tests/test_frontend_feed_editor_rules.py (new, no_db); frontend/eslint.config.js (scope `src/lib/**`); .github/workflows/build.yml (the unit-test step).
 - **Change:** sections 6, 7 and 8 for the libs; the api.ts list in section 6.
 - **Unit tests** (`node:test`, `node:assert/strict`; `mock.timers` for the store):
-  - sourceSaves: equal value → 0 calls; same-field coalescing with the first call pending → exactly 2 calls, the second with the last value; different fields → serial one-key bodies; a TypeError → one retry after 2 s and `whenIdle` unresolved during the wait; two dirty fields plus `setPageHiding(true)` → two calls with `keepalive: true` sent without waiting; `getSaveState` returns the identical object across calls and a frozen IDLE; a 4xx-rejected value is not re-sent by an identical commit while `retryField` re-sends; 404 → `onGone` and the queue dropped; two failures in one tick with no subscribers → one `onFailedAway` call with two entries; a late result for a dropped id is ignored.
-  - categories: reuse via a suggestion slug ("Tech" → "tech"); label-equal reuse ("tech_news" vs "Tech News"); "NEWS" reuses "news"; 41 code points rejected while 21 emoji (42 UTF-16 units) are accepted; "for_you", "saved_", " Saved " rejected; whitespace collapse; quoted-raw text for twins; the Add-form default 'news' in Suggestions.
+  - sourceSaves: equal value → 0 calls; same-field coalescing with the first call pending → exactly 2 calls, the second with the last value; different fields → serial one-key bodies; a TypeError → one retry after 2 s and `whenIdle` unresolved during the wait; two dirty fields plus `setPageHiding(true)` → two calls with `keepalive: true` sent without waiting; an item in `retrying` (TypeError, 2 s timer pending) plus `setPageHiding(true)` → one immediate `keepalive: true` call with no timer advance, and the old timer sends nothing when it later fires; `getSaveState` returns the identical object across calls and a frozen IDLE; a 4xx-rejected value is not re-sent by an identical commit while `retryField` re-sends; 404 → `onGone` and the queue dropped; two failures in one tick with no subscribers → one `onFailedAway` call with two entries; a late result for a dropped id is ignored.
+  - categories: `fold` matches the backend normalisation on "For_You", "for-you", " Saved_ "; reuse via a suggestion slug ("Tech" → "tech"); fold-equal reuse ("tech_news" vs "Tech News", and "Tech_News" typed against an existing "tech news"); "NEWS" reuses "news"; 41 code points rejected while 21 emoji (42 UTF-16 units) are accepted; "for_you", "For_You", "For-You", "saved_", " Saved " rejected; whitespace collapse; quoted-raw text for twins; the Add-form default 'news' in Suggestions; `current` "Hockey" used by no feed appears in "yours" as "Hockey (new)" with `defaultInSuggestions`, and as "Hockey" without it.
   - headers: each validation rule and message; smart punctuation in names and values; canonical names; `rowsToMap` with an incomplete saved row (keeps the saved value) and an incomplete new row (left out); `null` vs `{}`; `sameHeaders` key order.
   - apiErrors: each `fieldSaveMessage` row, in table order; `lastErrorMessage` for each prefix; `friendlyTestError` kinds.
   - feedRules: `normalizeFeedInput` and `suggestName` for the same examples as the backend slug tests (including `@ゆっくり実況`, a playlist and `/user/`); `normalizeName`.
@@ -1259,7 +1263,7 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
   - FJ: YouTube type, `@handle`, Name empty → Test and Add enabled; Add after a mocked Test posts `resolved_url`; the name sent is `handle_yt`.
   - FJ2: a watch link with Name empty → hint "Name is chosen after Test."; Add triggers one Test request, then one POST with `resolved_url` and a `channel_<id6>_yt` name.
   - FP: Auto feed paste `r/python` → the form shows Subreddit with the value; no POST.
-  - FQ: Add form, New category, type "NEWS", Add → the POST body has `category: "news"`; "Add feed" is disabled while a draft is pending.
+  - FQ: Add form, New category, type "NEWS", Add → the POST body has `category: "news"`; "Add feed" is disabled while a draft is pending. Second case: New category → type "Hockey" → Add → the select's selected option is "Hockey (new)" (`value === "Hockey"`) and the POST body has `category: "Hockey"`.
   - FR: headers section with a half-filled row → Test and Add disabled with the row error; switching the type to Subreddit clears the map and the POST has no `custom_headers`.
   - FS: Auto-add returning an id already in sources → toast "Already added: …".
 - **Acceptance:** flows pass at 390; smoke green at 390 and 320 including the new states; slice15 and the sitemap tests pass (the first `placeholder={` is still the fm-url ternary); lint 0 errors; build passes; no `datalist` in the Add form.
@@ -1283,11 +1287,11 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
 
 ### PR6. Feed editor that saves on its own; one tap from a card
 
-- **Files:** frontend/src/components/FeedManager.tsx; frontend/src/components/feeds/{FeedEditor,SaveStatus}.tsx (new), HeadersEditor.tsx (`autosave` mode), CategoryPicker.tsx; frontend/src/components/Settings.tsx (reportError, keyboard, handleClose, visibility flush); frontend/src/App.tsx (store wiring, overlay, `refresh({ silent })`, `removeSource`, `insertSource`, presets, follow-tab, clamp, `onSourceTap`, follow-up check, `onFailedAway`); frontend/src/components/Card.tsx (source-name button); frontend/src/components/Column.tsx (passes `onSourceTap`); frontend/scripts/iphone-audit/{smoke.cjs, flows.cjs, fixtures.cjs, capture.cjs}; backend/tests/test_frontend_feed_editor_rules.py (adds the FeedManager absence checks); frontend/eslint.config.js (adds FeedManager.tsx).
+- **Files:** frontend/src/components/FeedManager.tsx; frontend/src/components/feeds/{FeedEditor,SaveStatus}.tsx (new), HeadersEditor.tsx (`autosave` mode), CategoryPicker.tsx; frontend/src/components/Settings.tsx (reportError, keyboard, handleClose, visibility flush); frontend/src/App.tsx (store wiring and the always-on page-hide listener, overlay, `refresh({ silent })`, `removeSource`, `insertSource`, presets, follow-tab with `selectMobileCol`, clamp, `onSourceTap`, follow-up check, `onFailedAway`); frontend/src/components/Card.tsx (source-name button); frontend/src/components/Column.tsx (passes `onSourceTap`); frontend/scripts/iphone-audit/{smoke.cjs, flows.cjs, fixtures.cjs, capture.cjs}; backend/tests/test_frontend_feed_editor_rules.py (adds the FeedManager absence checks); frontend/eslint.config.js (adds FeedManager.tsx).
 - **Change:** sections 6 and 8 (editor parts); delete the old edit form and links; Edit action on add toasts; guard test adds: `<datalist`, `custom headers (JSON)` and `JSON.parse(editHeaders` are absent from FeedManager.tsx.
 - **Flows** (mock delays use `page.route` on `**/api/sources/<id>` with a timer before `route.fulfill`):
   - FA: ≡ → › on the_verge → pick "Tech" from Suggestions → exactly 1 PATCH, body `{"category":"tech"}`; "Saved ✓" visible.
-  - FA2: New category → type "NEWS" → Add → 1 PATCH `{"category":"news"}`; the line "Using your existing “News” category" was visible.
+  - FA2: on darknet_diaries (id 11, category 'podcast'; the_verge is already 'news' in fixtures.cjs:49, so "NEWS" would equal its current value and send nothing) ≡ → › → New category → type "NEWS" → Add → 1 PATCH `{"category":"news"}`; the line "Using your existing “News” category" was visible.
   - FA3: New category → "For You", then "for_you" → 0 PATCHes; the reserved error is visible and Add is disabled.
   - FB: type 10 characters into Address without leaving → 0 PATCHes; Enter, then blur → exactly 1.
   - FC: route a 422 `{ detail: "category 'For You' is reserved for a built-in column" }`, pick a category → the picker shows the old value; "“For You” is used by the app…" is visible (`elementFromPoint` at its centre returns it or a descendant).
@@ -1324,7 +1328,7 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
 - **Change:** every row marked 8; the AI autosave rules (section 11).
 - **Flows:**
   - FX: switch provider from Default to Ollama (local) → exactly 1 PUT with `provider`, `model_brief: ""`, `model_scoring: ""`.
-  - FX2: switch to Anthropic with no key set → 0 PUTs and the key field shown; type a key, blur → 1 PUT with only `anthropic_api_key`, then 1 PUT with the provider fields.
+  - FX2: switch to Anthropic with no runtime key (`anthropic_api_key_set: false`) → exactly 1 PUT with `provider`, `model_brief: ""`, `model_scoring: ""`; the key field is shown with "If your Anthropic key isn't in the server's settings file, paste it here."; with `/api/llm/status` mocked to `{ configured: false }`, "Popping has no Anthropic key yet. Paste one above." shows; type a key, blur → 1 more PUT with only `anthropic_api_key`.
   - FY: focus an empty key field and blur → 0 PUTs; type a key and blur → 1 PUT whose body has exactly one key; the input is empty afterwards and "Key saved" shows.
   - FZ: Reset → inline confirm, no dialog event.
 - **Acceptance:** C10 passes; flows pass; no `window.confirm` in Settings.tsx; smoke green; lint 0 errors; build; `pytest -m no_db`.
