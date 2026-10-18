@@ -136,7 +136,10 @@ class SourceAutoResult(BaseModel):
     URL itself, or a feed it linked to) or ``"generic_scrape"`` when
     no feed exists but the site's sitemap produced at least one
     extractable article, so periodic scraping was set up instead of a
-    feed subscription. ``source`` is the created row on success.
+    feed subscription. ``kind`` is ``"youtube_channel"`` when the URL
+    was a YouTube link, bare channel id or @handle; then ``source`` may
+    be an existing row that already follows the same feed, and nothing
+    new was created. ``source`` is the created row on success.
     """
     found: bool
     kind: Optional[str] = None
@@ -183,9 +186,9 @@ class SourceUpdate(BaseModel):
     # route layer enforces this so the same-origin safety
     # check isn't bypassed.
     link_pattern: Optional[str] = None
-    # Set to ``{}`` (or empty dict) to clear an existing override.
-    # ``None`` leaves the column untouched (the PATCH endpoint
-    # treats missing fields as no-ops).
+    # An explicit ``null`` (or ``{}``) clears an existing override;
+    # omitting the field leaves the column untouched. The PATCH
+    # endpoint tells the two apart with ``model_fields_set``.
     custom_headers: Optional[dict] = None
 
 
@@ -237,14 +240,17 @@ class SourceTestResult(BaseModel):
       - ``invalid_url``      URL failed the http/https / subreddit
                              validator
       - ``unsupported_type`` ``type`` is not in the accepted set
+      - ``invalid_headers``  ``custom_headers`` failed validation
+                             (bad name, denied name, duplicate,
+                             value too long or not printable ASCII)
       - ``network_error``    connection refused, DNS, TLS, etc.
       - ``unknown``          catch-all
 
     ``resolved_url`` is set when the submitted URL was an Apple
-    Podcasts show page (``podcasts.apple.com/.../id<N>``) that got
-    resolved to its actual RSS feed via ``app.apple_podcasts`` —
-    null for every other URL, including one that was already a
-    direct feed URL. The frontend shows this so the user sees what
+    Podcasts show page (``podcasts.apple.com/.../id<N>``) or a YouTube
+    link that got resolved to its actual feed (``app.apple_podcasts``,
+    ``app.youtube``) — null for every other URL, including one that
+    was already a direct feed URL. The frontend shows this so the user sees what
     actually got fetched/would be added, rather than the resolution
     happening invisibly.
     """

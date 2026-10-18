@@ -392,9 +392,39 @@ header, which is enough to get past those filters without any
 unconventional headers.
 
 Sources intentionally deferred to a later phase: RedFlagDeals (rate-limit
-sensitive), ESPN (sport-specific endpoints), YouTube RSS (channel
-resolution), Reddit / Mastodon (privacy-policy noise), Podcast Index
-and Keepa (API keys + tier-specific endpoints).
+sensitive), ESPN (sport-specific endpoints), Reddit / Mastodon
+(privacy-policy noise), Podcast Index and Keepa (API keys +
+tier-specific endpoints).
+
+### Adding a YouTube channel
+
+Settings → Feeds → Add custom → YouTube (or paste into Auto feed).
+Popping turns what you paste into the channel's free YouTube feed:
+
+| You paste | What happens |
+| --- | --- |
+| The channel ID (starts with `UC`), a `/channel/UC…` link, the feed link (`feeds/videos.xml?channel_id=…`), or a channel's uploads playlist (`list=UU…`) | Used directly. No lookup. |
+| A public playlist link (`list=PL…`) | Follows that playlist. No lookup. |
+| An `@handle`, a `/c/name` or `/user/name` link, a video link (`watch?v=`, `youtu.be`, `/shorts/`, `/live/`), or an old `youtube.com/name` link | Popping opens that one YouTube page and reads the channel ID from it. |
+| Watch later, Liked videos, mixes, the home page, search results | Refused with a message: they have no feed. |
+
+YouTube sometimes answers a server with a consent page or a "confirm
+you're not a bot" check instead of the channel page. Popping then says
+so and asks for the channel ID. In the YouTube app: open the channel,
+tap "more about this channel", then Share channel, then Copy channel
+ID, and paste that.
+
+Each lookup writes one log line, without the link's query string:
+
+```bash
+cd /opt/popping && docker compose logs backend | grep "youtube: lookup"
+```
+
+`result=` names the page marker that worked (`canonical`, `rss_link`,
+`channel_id`, …) or why it failed: `blocked:consent` or `blocked:bot`
+(YouTube refused the server), `not_found`, `http_<code>`, `network`,
+`blocked:ssrf` or `blocked:host` (the link led somewhere Popping won't
+go).
 
 ## Adding a new source plugin
 
