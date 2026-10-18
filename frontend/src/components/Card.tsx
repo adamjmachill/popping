@@ -505,12 +505,14 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   // Push the current drag offset onto the DOM directly (no React
   // state) so a fast finger doesn't queue a render per pixel.
   // ``animate`` adds a short transition for the release snap;
-  // during an active drag we want 1:1 finger tracking, so it's
-  // omitted on every touchmove call.
+  // during an active drag we want 1:1 finger tracking, so every
+  // touchmove sets ``none``. An empty string would let the
+  // article's own 200ms transition class apply, and the card would
+  // trail the finger.
   const applySwipeVisual = (dx: number, animate: boolean) => {
     const el = articleRef.current
     if (el) {
-      el.style.transition = animate ? 'transform 180ms ease-out' : ''
+      el.style.transition = animate ? 'transform 180ms ease-out' : 'none'
       el.style.transform = dx === 0 ? '' : `translateX(${dx}px)`
     }
     const progress = Math.min(1, Math.abs(dx) / SWIPE_MAX_REVEAL_PX)
@@ -887,7 +889,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
         // dragging the card. Vertical scrolling starting on the card
         // stays fully native; horizontal gestures are delivered to
         // JS untouched.
-        className={`group relative touch-pan-y-zoom rounded-ios-lg bg-bg-surface border p-4 pl-5
+        className={`group relative touch-pan-y-zoom rounded-ios-lg bg-bg-surface border p-4 pl-5 max-md:[container-type:inline-size]
                     hover:-translate-y-px hover:shadow-glow-md
                     active:scale-[0.985] active:shadow-glow-sm
                     transition-[transform,box-shadow,border-color,opacity,filter] duration-200
@@ -902,7 +904,10 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
         aria-hidden="true"
         className={`absolute left-0 top-0 bottom-0 w-[3px] rounded-l-ios-lg ${stripeClass}`}
       />
-      <div className="flex items-center justify-between gap-3 mb-2">
+      {/* On narrow phone cards the thumbnail shrinks to a square, then
+          moves under the headline (container queries on the article),
+          so the headline keeps a readable width. */}
+      <div className="flex items-start md:items-center justify-between gap-3 mb-2 [@container(max-width:299px)]:flex-col">
         <a
           href={safeExternalUrl(entry.url)}
           target="_blank"
@@ -943,7 +948,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
             tile, and the ranking score stays out of the reader's way
             (it still orders the list). */}
         {entry.image_path && (
-          <div className="shrink-0">
+          <div className="shrink-0 [@container(max-width:299px)]:w-full [@container(max-width:299px)]:self-stretch">
             <Thumbnail
               path={entry.image_path}
               title={entry.title}
@@ -958,9 +963,9 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
             sans font as the rest of the meta row, just a different
             case/tracking treatment, so the source reads as a label
             rather than blending into the timestamp next to it. */}
-        {sourceName && <span className={`font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>}
-        {sourceName && <span>·</span>}
-        <time dateTime={entry.published_at ?? ''}>{timeAgo(entry.published_at)}</time>
+        {sourceName && <span className={`min-w-0 truncate font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>}
+        {sourceName && <span className="shrink-0 whitespace-nowrap">·</span>}
+        <time className="shrink-0 whitespace-nowrap" dateTime={entry.published_at ?? ''}>{timeAgo(entry.published_at)}</time>
       </div>
       {/* Reddit cross-reference footer. Rendered between the meta row
           and the summary block so it reads as "extra metadata about
@@ -975,12 +980,13 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
           press / context-menu paths ignore the footer so a tap-and-
           hold for "copy Reddit link" still works as expected. */}
       {entry.reddit_thread_url && (
-        <div className="mt-1.5 flex items-center gap-3">
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
           <a
             href={safeExternalUrl(entry.reddit_thread_url)}
             target="_blank"
             rel="noopener noreferrer"
             data-card-interactive
+            data-one-line
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
@@ -993,7 +999,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               // app-prompt-free variant.
               window.open(safeExternalUrl(entry.reddit_thread_url!), '_blank', 'noopener,noreferrer')
             }}
-            className="inline-flex items-center gap-1 text-ios-caption text-accent active:opacity-60"
+            className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"
           >
             <span aria-hidden="true">💬</span>
             <span>Discussed on Reddit</span>
@@ -1012,7 +1018,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               e.stopPropagation()
               setRedditSummaryExpanded((v) => !v)
             }}
-            className="inline-flex items-center gap-1 text-ios-caption text-accent active:opacity-60"
+            className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"
           >
             <span aria-hidden="true">📝</span>
             <span>{redditSummaryExpanded ? 'Hide summary' : 'Summarize comments'}</span>
@@ -1049,19 +1055,20 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
           cards, which is a lot of surface area for what the browser
           already does for free on an audio-file link. */}
       {entry.audio_url && (
-        <div className="mt-1.5 flex items-center gap-3">
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
           <a
             href={safeExternalUrl(entry.audio_url)}
             target="_blank"
             rel="noopener noreferrer"
             data-card-interactive
+            data-one-line
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
               recordImmediate({ entry_id: entry.id, type: 'click' })
               window.open(safeExternalUrl(entry.audio_url!), '_blank', 'noopener,noreferrer')
             }}
-            className="inline-flex items-center gap-1 text-ios-caption text-accent active:opacity-60"
+            className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"
           >
             <span aria-hidden="true">🎧</span>
             <span>Listen</span>
@@ -1083,7 +1090,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 e.stopPropagation()
                 setPodcastSummaryExpanded((v) => !v)
               }}
-              className="inline-flex items-center gap-1 text-ios-caption text-accent active:opacity-60"
+              className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"
             >
               <span aria-hidden="true">📝</span>
               <span>{podcastSummaryExpanded ? 'Hide summary' : 'Summarize episode'}</span>
@@ -1119,7 +1126,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
           Reddit/podcast affordances above, so there's no button that
           predictably does nothing when tapped. */}
       {entry.story_cluster_id != null && (
-        <div className="mt-1.5 flex items-center gap-3">
+        <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-2">
           <button
             type="button"
             data-card-interactive
@@ -1128,7 +1135,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               e.stopPropagation()
               setRelatedExpanded((v) => !v)
             }}
-            className="inline-flex items-center gap-1 text-ios-caption text-accent active:opacity-60"
+            className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"
           >
             <span aria-hidden="true">🔗</span>
             <span>{relatedExpanded ? 'Hide related coverage' : 'Related coverage'}</span>
@@ -1171,7 +1178,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                     <span className="text-[11px] text-label-tertiary truncate">{a.source_name}</span>
                     {a.framing_tone && a.framing_tone !== 'neutral' && (
                       <span
-                        className={`shrink-0 text-[9px] uppercase tracking-wide border rounded-full px-1 ${RELATED_TONE_STYLES[a.framing_tone] ?? ''}`}
+                        className={`shrink-0 text-[11px] uppercase tracking-wide border rounded-full px-1 ${RELATED_TONE_STYLES[a.framing_tone] ?? ''}`}
                       >
                         {a.framing_tone}
                       </span>
@@ -1732,6 +1739,8 @@ function Thumbnail({ path, title, url, entryId }: { path: string; title: string;
       aria-label={`open ${title} in new tab`}
       title={title}
       className="shrink-0 w-28 sm:w-40 aspect-video rounded-ios overflow-hidden bg-bg-elevated cursor-zoom-in
+                 [@container(max-width:379px)]:w-[72px] [@container(max-width:379px)]:aspect-square
+                 [@container(max-width:299px)]:w-full [@container(max-width:299px)]:aspect-video
                  ring-1 ring-white/10 shadow-md
                  focus:outline-none focus:ring-2 focus:ring-accent/60"
     >

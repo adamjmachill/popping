@@ -16,6 +16,7 @@
 // noise down.
 
 import { useEffect, useState } from 'react'
+import { useVisualViewport } from '../lib/visualViewport'
 
 type ToastAction = {
   label: string
@@ -69,6 +70,8 @@ export function toast(
 
 export function ToastHost() {
   const [current, setCurrent] = useState<ToastEvent | null>(null)
+  // Lift the toast above the iOS keyboard while one is open.
+  const { kbInset } = useVisualViewport()
 
   useEffect(() => {
     const onEvent: Listener = (e) => {
@@ -82,15 +85,15 @@ export function ToastHost() {
 
   // Auto-dismiss. Cleanup ensures rapid back-to-back
   // toasts reset the timer rather than firing on the
-  // stale one. The timer is 5s when an action is
-  // present (the user needs time to read the message
-  // + decide whether to invoke the action), 1.5s
-  // otherwise (the prior behavior).
+  // stale one. 5s when there is an action to decide on
+  // or an error to read, 3s otherwise: on a phone the
+  // eye often reaches the bottom of the screen after
+  // 1.5s, which is when the old timer closed it.
   useEffect(() => {
     if (!current) return
     const id = setTimeout(
       () => setCurrent(null),
-      current.action ? 5000 : 1500,
+      current.action || current.kind === 'error' ? 5000 : 3000,
     )
     return () => clearTimeout(id)
   }, [current])
@@ -114,12 +117,14 @@ export function ToastHost() {
       // (when present) is clickable.
       role="status"
       aria-live="polite"
-      className="fixed inset-x-0 bottom-[calc(1.5rem+env(safe-area-inset-bottom))] z-50 flex justify-center pointer-events-none"
+      // z-[60]: above the Settings sheet (z-50) regardless of DOM order.
+      className="fixed inset-x-0 z-[60] flex justify-center pointer-events-none"
+      style={{ bottom: `calc(1.5rem + env(safe-area-inset-bottom) + ${kbInset}px)` }}
     >
       <div
         className={`pointer-events-auto flex items-center gap-3 rounded-ios border px-4 py-2 text-ios-body shadow-glow-md max-w-[min(90vw,420px)] ${color}`}
       >
-        <span className="flex-1 min-w-0 truncate">{current.message}</span>
+        <span className="flex-1 min-w-0 line-clamp-3 break-words">{current.message}</span>
         {current.action && (
           <button
             type="button"

@@ -223,6 +223,7 @@ function PresetChips({
   if (presets.length === 0) return null
   return (
     <div
+      data-hscroll
       className="flex gap-1.5 overflow-x-auto px-4 sm:px-6 py-2 border-b border-hairline bg-bg-app"
       role="toolbar"
       aria-label="saved filter presets"
@@ -1759,16 +1760,20 @@ export function App() {
         ae instanceof HTMLSelectElement ||
         (ae && (ae as HTMLElement).isContentEditable)
       ) {
-        if (ae instanceof HTMLInputElement && ae.type === 'search' && e.key === 'Escape') {
+        if (ae instanceof HTMLInputElement && ae.id === 'app-search' && e.key === 'Escape') {
           ae.blur()
           setSearchInput('')
+          setSearchOpen(false)
         }
         return
       }
 
       if (e.key === '/' && columns.length > 0) {
         e.preventDefault()
-        document.getElementById('app-search')?.focus()
+        // Search is collapsed to an icon until opened; open it, then
+        // focus the field once it has mounted.
+        setSearchOpen(true)
+        requestAnimationFrame(() => document.getElementById('app-search')?.focus())
         return
       }
 
@@ -2176,16 +2181,12 @@ export function App() {
       // Matches the post-React splash's inline ``#000000`` so the
       // transition is one continuous black surface. Mirrors the
       // same fix as the splash (see comment block above) but on the
-      // destination side. ``minHeight: '100dvh'`` is the dynamic-
-      // viewport fallback for iOS Safari, where ``100vh`` is the
-      // *layout* viewport (height *including* the area hidden by
-      // the address bar / bottom toolbar) and overshoots — the
-      // dashboard scrolls past where the user expects the bottom
-      // to be. ``100dvh`` is the small-viewport height that
-      // adjusts as the bars collapse, matching what the user sees.
-      // ``100vh`` is kept alongside as the fallback for browsers
-      // that don't understand ``dvh`` (older Android WebView).
-      style={{ backgroundColor: '#000000', minHeight: '100dvh' }}
+      // destination side. No min-height here: html, body and #root
+      // are already height:100% (styles.css), and #root adds the
+      // bottom safe-area padding. A 100dvh min-height on top of that
+      // gave the home-screen app a 34px scroll range, so the whole
+      // UI, header included, could be dragged up and down.
+      style={{ backgroundColor: '#000000' }}
       // ``isolate`` makes this div its own stacking context. Without
       // it, this div's own inline black background — an in-flow,
       // non-positioned box — paints *after* Wallpaper's negative
@@ -2218,22 +2219,29 @@ export function App() {
             on mobile the trailing controls are stripped (the icons
             only would crowd the small viewport). */}
         <div className="flex items-end justify-between px-4 pt-3 pb-2 sm:pt-4 sm:pb-3">
-          <h1 className="text-ios-large-title text-label-primary truncate">
+          <h1 className={`text-ios-large-title text-label-primary truncate ${searchOpen ? 'hidden sm:block' : ''}`}>
             Popping
           </h1>
-          <div className="flex items-center gap-1 sm:gap-2 pb-1">
+          <div className={`flex items-center gap-1 sm:gap-2 pb-1 ${searchOpen ? 'flex-1 min-w-0 justify-end sm:flex-none' : ''}`}>
             {/* Search affordance. Collapsed: a 44×44 button with a
                 magnifying-glass icon. Expanded: full-width input with
                 a leading glass + trailing clear-X. The transition is
                 a plain width swap — no JS animation library; the
                 backdrop-blur above keeps the swap from feeling cheap. */}
             {searchOpen ? (
-              <div className="flex items-center gap-2 bg-bg-elevated rounded-ios px-3 h-11 w-44 sm:w-72 animate-fade-in">
+              <div className="flex items-center gap-2 bg-bg-elevated rounded-ios px-3 h-11 flex-1 min-w-0 sm:flex-none sm:w-72 animate-fade-in">
                 <SearchIcon className="w-4 h-4 text-label-secondary shrink-0" />
                 <input
                   id="app-search"
-                  type="search"
+                  // A text input with search hints, not type="search":
+                  // iOS draws its own clear button inside a search
+                  // field, next to ours.
+                  type="text"
                   inputMode="search"
+                  enterKeyHint="search"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   autoFocus
                   value={searchInput}
                   onChange={(e) => setSearchInput(e.target.value)}
@@ -2242,6 +2250,11 @@ export function App() {
                     // field is empty. Otherwise keep the input open
                     // so a stray tap outside doesn't lose the query.
                     if (!searchInput) setSearchOpen(false)
+                  }}
+                  onKeyDown={(e) => {
+                    // Enter dismisses the iOS keyboard and keeps the
+                    // query (results are live, there is nothing to submit).
+                    if (e.key === 'Enter') e.currentTarget.blur()
                   }}
                   placeholder="search"
                   className="flex-1 min-w-0 bg-transparent text-ios-body text-label-primary placeholder:text-label-tertiary focus:outline-none"
@@ -2255,7 +2268,7 @@ export function App() {
                       setSearchOpen(false)
                     }}
                     aria-label="clear search"
-                    className="shrink-0 text-label-secondary active:text-label-primary"
+                    className="w-11 h-11 -mr-3 flex items-center justify-center shrink-0 text-label-secondary active:text-label-primary"
                   >
                     <ClearIcon className="w-4 h-4" />
                   </button>
@@ -2286,6 +2299,7 @@ export function App() {
                 shouldn't have to make). On ``sm+`` the icon is
                 hidden because the text Refresh button lives on the
                 sub-row below. */}
+            {!searchOpen && (
             <button
               type="button"
               onClick={() => void refresh()}
@@ -2295,6 +2309,7 @@ export function App() {
             >
               <RefreshIcon className={`w-5 h-5 ${refreshing ? 'animate-spin' : ''}`} />
             </button>
+            )}
 
 {/* Settings gear. Opens the Settings overlay (a
             full-page sheet with tabs for feeds / LLM /
@@ -2366,7 +2381,7 @@ export function App() {
       </header>
 
       {activeSources.size > 0 && (
-        <div className="px-4 py-2 border-b border-hairline bg-bg-surface flex items-center gap-2 text-ios-caption overflow-x-auto whitespace-nowrap">
+        <div data-hscroll className="px-4 py-2 border-b border-hairline bg-bg-surface flex items-center gap-2 text-ios-caption overflow-x-auto whitespace-nowrap">
           <span className="text-label-secondary shrink-0">filtering by:</span>
           {Array.from(activeSources).map((src) => (
             // ``animate-fade-in`` fires on every mount (the animation
@@ -2398,7 +2413,7 @@ export function App() {
         <div
           role="alert"
           aria-live="assertive"
-          className="sticky top-0 z-15 px-4 py-2 bg-red-500/15 border-b border-red-500/40 text-ios-caption text-red-200 flex items-center justify-between gap-2"
+          className="sticky top-0 z-10 px-4 py-2 bg-red-500/15 border-b border-red-500/40 text-ios-caption text-red-200 flex items-center justify-between gap-2"
         >
           <span className="break-words">{error}</span>
           <button
@@ -2434,7 +2449,7 @@ export function App() {
       />
 
       {showSearchView ? (
-        <main className="flex-1 overflow-y-auto p-3 sm:p-4">
+        <main className="flex-1 overflow-y-auto overscroll-contain p-3 sm:p-4">
           <SearchResults
             query={searchQuery}
             entries={searchResults.filter((e) => !hiddenSet.has(e.id))}
@@ -2487,7 +2502,7 @@ export function App() {
           // response lands. Only shown pre-first-load: once any
           // entries exist, ``columns.length`` is never 0 again, so a
           // later in-flight refresh never re-triggers this.
-          <div className="flex-1 overflow-y-auto">
+          <div className="flex-1 overflow-y-auto overscroll-contain">
             <SkeletonGrid />
           </div>
         ) : (
@@ -2668,6 +2683,7 @@ export function App() {
             <div
               role="tablist"
               aria-label="dashboard sections"
+              data-hscroll
               className="shrink-0 flex gap-1.5 overflow-x-auto pb-2 -mx-1 px-1"
             >
               <button
@@ -2706,7 +2722,7 @@ export function App() {
                     {categoryLabel(c.name)}
                     {!!newCount && (
                       <span
-                        className={`rounded-full px-1.5 text-[10px] leading-4 font-semibold ${
+                        className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
                           i === mobileCol ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
                         }`}
                       >
@@ -2718,7 +2734,7 @@ export function App() {
               })}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto">
+            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
               {mobileCol === -1 ? (
                 <BriefCard
                   brief={brief}

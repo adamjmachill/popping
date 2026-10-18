@@ -204,28 +204,28 @@ export function Settings({
         className="absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)] rounded-t-ios-lg bg-bg-app shadow-2xl flex flex-col
                    md:inset-y-0 md:right-0 md:left-auto md:top-0 md:bottom-auto md:h-full md:w-[480px] md:rounded-none"
       >
-        {/* Header — same shape as Drawer but with the tab strip
-            underneath the title row instead of inside the body. The
-            "Done" button is on the left, title on the right
-            (matches the Drawer's right-anchored panel). */}
-        <div className="flex items-center justify-between px-4 pt-3 pb-3 md:pt-5 md:pb-4 border-b border-hairline shrink-0">
+        {/* Header — iOS sheet layout: title on the leading edge, Done
+            on the trailing edge. The title gives way (truncates) before
+            Done ever shrinks. The selected tab pill already says which
+            tab is open, so the title is always just "Settings". */}
+        <div className="flex items-center justify-between gap-3 px-4 pt-3 pb-3 md:pt-5 md:pb-4 border-b border-hairline shrink-0">
+          <h2 className="min-w-0 flex-1 truncate text-2xl md:text-ios-large-title font-bold text-label-primary tracking-tight">
+            Settings
+          </h2>
           <button
             onClick={onClose}
             aria-label="close settings"
-            className="min-h-[32px] min-w-[32px] flex items-center justify-center rounded-ios text-accent active:bg-bg-elevated"
+            className="shrink-0 min-h-[44px] min-w-[44px] px-2 flex items-center justify-center rounded-ios text-ios-body font-semibold text-accent active:bg-bg-elevated"
           >
-            <span className="text-ios-body font-normal">Done</span>
+            Done
           </button>
-          <h2 className="text-2xl md:text-ios-large-title font-bold text-label-primary tracking-tight">
-            {tab === 'feeds' ? 'Settings' : `Settings → ${TAB_META[tab].label}`}
-          </h2>
         </div>
         {/* Tab strip: a scrolling row of labelled pills, the same
             shape as the dashboard's category chips. Eight icon-only
             cells didn't fit a phone with their labels, and icons
             alone left the reader guessing. ``role="tablist"`` so
             screen readers announce it as a tab group. */}
-        <div className="flex gap-1.5 overflow-x-auto px-4 mt-3 pb-1" role="tablist">
+        <div data-hscroll className="flex gap-1.5 overflow-x-auto px-4 mt-3 pb-1" role="tablist">
           {(['feeds', 'llm', 'notifications', 'history', 'hidden', 'starred', 'voted', 'reset'] as SettingsTab[]).map((t) => {
             const active = t === tab
             return (
@@ -245,7 +245,7 @@ export function Settings({
                   // simpler and keeps the API minimal.
                   window.dispatchEvent(new Event('popstate'))
                 }}
-                className={`shrink-0 min-h-[36px] flex items-center gap-1.5 rounded-full px-3 text-ios-caption font-medium whitespace-nowrap transition ${
+                className={`shrink-0 min-h-[44px] flex items-center gap-1.5 rounded-full px-3 text-ios-caption font-medium whitespace-nowrap transition ${
                   active
                     ? 'bg-accent text-white'
                     : 'bg-bg-surface text-label-secondary active:bg-bg-elevated'
@@ -260,9 +260,9 @@ export function Settings({
         {/* Body. ``min-h-0`` lets the section actually scroll when
             the content overflows the viewport. Same pattern as the
             Drawer. */}
-        <div className="flex-1 min-h-0 overflow-y-auto bg-bg-app pb-[calc(2rem+env(safe-area-inset-bottom))]">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain bg-bg-app pb-[calc(2rem+env(safe-area-inset-bottom))]">
           {tab === 'feeds' && (
-            <div className="pt-4">
+            <div className="pt-4 px-4">
               <FeedManager
                 sources={sources}
                 onRefresh={onRefreshSources}
