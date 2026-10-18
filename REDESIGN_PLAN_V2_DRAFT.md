@@ -266,7 +266,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 - The label stays inside the existing ternary at :1645-1653 with no `}` in it and keeps the 'Page URL' branch and `htmlFor="fm-url"` (slice15 test_url_label_uses_generic_scrape_specific_text). The fm-url `placeholder={…}` ternary (:1660-1670) stays the first `placeholder={` in FeedManager.tsx with the generic_scrape value `'https://example.com'`.
 - `friendlyTestError('invalid_url', raw)` returns the mapped plain message (section 6 table) or `raw` for resolver messages, without the "Invalid URL —" prefix.
 
-**AutoFeedBlock** (FeedManager.tsx:1150-1294) classifies the paste before calling anything:
+**AutoFeedBlock** (FeedManager.tsx:1150-1294; it now receives `sources` from AddCustomTab) classifies the paste before calling anything:
 - YouTube host, bare UC id or `@handle`: `api.autoAddSource(url, resolveDefault('video'))`.
 - `r/x` or reddit.com/r/…: new prop `onPrefill('reddit', url)`. AddCustomTab sets the type and URL and scrolls the form into view.
 - podcasts.apple.com: `onPrefill('podcast', url)`.
@@ -307,7 +307,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 15. Route tests (DB):
     - POST /api/sources/test, `type=youtube_channel`, mocked consent page: `ok False`, `error_kind 'invalid_url'`, error contains "channel ID";
     - POST /api/sources with a bare id (with `fake_dns`): 200, stored url is the feed URL; the same POST again: 409 containing "already follow";
-    - POST /api/sources/auto with `https://www.youtube.com/@somehandle` and `app.routes.sources.resolve_channel_feed_url` monkeypatched: a row with type youtube_channel, name `somehandle_yt`, refresh 21600, `kind == "youtube_channel"`; a second identical call returns the same id and creates no `somehandle_yt_2`;
+    - POST /api/sources/auto with `https://www.youtube.com/@somehandle`, `app.routes.sources.resolve_channel_feed_url` monkeypatched and `fake_dns` on (`_validate_url(feed_url)` runs `check_url_safe` on www.youtube.com): a row with type youtube_channel, name `somehandle_yt`, refresh 21600, `kind == "youtube_channel"`; a second identical call returns the same id and creates no `somehandle_yt_2`;
     - /auto with a playlist link: name `playlist_<id6>_yt`;
     - POST /api/sources/test with `custom_headers={"Cookie": "x"}`: `error_kind 'invalid_headers'`;
     - POST /api/sources/test for an SSRF-denied URL: error equals "That address isn't reachable from Popping.".
@@ -350,7 +350,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 
 **Card thumbnail** (R4) uses arbitrary container-query utilities on the elements, not `@layer components` rules (Tailwind 3.4 emits components before utilities, so `.w-28` and `.aspect-video` would win at equal specificity):
 - article (Card.tsx:890): add `max-md:[container-type:inline-size]`;
-- title row (:905): `items-center` becomes `md:items-center items-start`, plus `[@container(max-width:299px)]:flex-col`;
+- title row (:905): `items-center` becomes `items-start md:items-center`, plus `[@container(max-width:299px)]:flex-col`;
 - thumbnail wrapper (:946, today an unclassed `shrink-0` div): add `[@container(max-width:299px)]:w-full [@container(max-width:299px)]:self-stretch` (without it a `width:100%` child of a shrink-to-fit parent measured 20px);
 - Thumbnail (:1734): add `[@container(max-width:379px)]:w-[72px] [@container(max-width:379px)]:aspect-square [@container(max-width:299px)]:w-full [@container(max-width:299px)]:aspect-video`.
 - iOS 15 and older keep today's look. md and up are unaffected.
@@ -379,7 +379,7 @@ Check the YouTube app's wording ("more about this channel", "Share channel") on 
 - :122 `truncate` becomes `line-clamp-3 break-words`;
 - :93 durations: info 3000 ms, error 5000 ms, with an action 5000 ms;
 - :117 `z-50` becomes `z-[60]`, so the toast sits above Settings regardless of DOM order;
-- the bottom offset follows the keyboard: inline `style={{ bottom: `calc(1.5rem + env(safe-area-inset-bottom) + ${kbInset}px)` }}` from `useVisualViewport()` (new frontend/src/lib/visualViewport.ts).
+- the bottom offset follows the keyboard: inline `` style={{ bottom: `calc(1.5rem + env(safe-area-inset-bottom) + ${kbInset}px)` }} `` from `useVisualViewport()` (new frontend/src/lib/visualViewport.ts).
 
 **lib/visualViewport.ts** (new): `useVisualViewport(): { height, offsetTop, kbInset, keyboardOpen }`, rAF-throttled on visualViewport `resize` and `scroll`. `kbInset = max(0, round(documentElement.clientHeight - vv.height - vv.offsetTop))`; `keyboardOpen = clientHeight - vv.height > 120`. Without visualViewport it returns zeros. Also `useMediaQuery(query): boolean` (used in PR10).
 
@@ -660,14 +660,14 @@ Desktop (md and up) keeps the 480px right-hand panel and the sub-row. Only the g
 | components/feeds/HeadersEditor.tsx (new) | Section 8 (`local` mode in PR4, `autosave` mode in PR6). | 4, 6 |
 | components/feeds/SaveStatus.tsx (new) | `SaveStatus({ state })` presentational; `useSaveState(id, field)` hook; `FieldError`. | 6 |
 | components/feeds/FeedEditor.tsx (new) | The editor, mounted under an open row. | 6 |
-| components/FeedManager.tsx | Keeps MyFeedsTab, the slimmed SourceRow, RecommendedTab ("Suggested"), AutoFeedBlock and AddCustomTab with every literal the guard tests pin. Loses (PR6) the old edit form (:439-682), the JSON parser, `saveEdit`, the re-seed effect, the "edit", "every X", "fetch", "save" and "cancel" links, the 4 s timer and `editingInterval`. **Rule: any new attribute in this file uses a string-literal `placeholder="…"`**, never `placeholder={…}`, because slice15 :212-230 reads the first `placeholder={`. | 4-6 |
+| components/FeedManager.tsx | Keeps MyFeedsTab, the slimmed SourceRow, RecommendedTab ("Suggested"), AutoFeedBlock and AddCustomTab with every literal the guard tests pin. Loses (PR6) the old edit form (:439-682), the JSON parser, `saveEdit`, the re-seed effect, the "edit", "every X", "fetch", "save" and "cancel" links, the 4 s timer, `editingRowId` and `editingInterval`. **Rule: any new attribute in this file uses a string-literal `placeholder="…"`**, never `placeholder={…}`, because slice15 :212-230 reads the first `placeholder={`. | 4-6 |
 | scripts/unit/*.test.ts (new) | `node --test` with type stripping; outside `src`, so tsc never sees `node:test`. Imports use explicit extensions (`../../src/lib/categories.ts`). Lib modules use erasable TypeScript only (no `enum`, `namespace` or parameter properties); tsconfig.json is off-limits, so this is a review rule. | 3 |
 
 ### SourceRow (slimmed, PR6)
 
 - A header button `min-h-[44px] aria-expanded` holding the icon, the name (`min-w-0 truncate`), the category chip, the vote badge and the chevron.
 - A caption line, always shown, `flex flex-wrap text-ios-caption`: "updated 4m ago · every 1 hour" plus the chips "paused", "stopped after 6 failed checks" or "⚠ 3" (PR2 already moved them there).
-- `<li id={`feed-${id}`}>` (PR5).
+- `` <li id={`feed-${id}`}> `` (PR5).
 - MyFeedsTab owns one `openRowId` (PR5). While a row is open, MyFeedsTab keeps the id order captured when it opened (new ids appended), so a poll after a rename or recategorise (server `ORDER BY category, name`, routes/sources.py:397) cannot move the row being edited.
 
 ### FeedEditor, top to bottom
@@ -681,7 +681,7 @@ Desktop (md and up) keeps the 480px right-hand panel and the sub-row. Only the g
    - If `/^\[blocked\]/.test(e) || /\b40[123]\b/.test(e)`, the type takes headers (item 6) and no User-Agent is set: a **Use a browser identity** button that commits the preset (section 8).
 2. **Name.** `type="text" autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="done"`. Hint "Shows as “<sourceLabel(draft)>”." Read-only for built-ins, with "Built-in feed: its name and address are fixed."
 3. **Address.** Label "Subreddit" for reddit rows. `type="url" inputMode="url"`, same attributes. Read-only for built-ins. While the draft differs from the saved value: "Its icon refreshes on the next check." If the server returns a different URL (reddit canonical form, YouTube or Apple resolution), the draft takes it and the hint reads "Saved as the channel's feed link" (YouTube) or "Saved as <url>".
-4. **Category:** `<CategoryPicker inputId={`fe-category-${source.id}`} value={pending ?? source.category} sources={sources} onChange={(v) => commitField(id, 'category', v, 'category')} />`.
+4. **Category:** `` <CategoryPicker inputId={`fe-category-${source.id}`} value={pending ?? source.category} sources={sources} onChange={(v) => commitField(id, 'category', v, 'category')} /> ``.
 5. **Check for new items:**
    - Built-ins: read-only text "Checked every <refreshLabel(v)> (built-in feed)". The scheduler ignores the column for registered names (update_source returns at scheduler.py:2440-2442; built-in jobs use `plugin_cls.refresh_interval_seconds`, :1802, :500, :565), so a select would show "Saved ✓" for a no-op.
    - Others: `<select className="select-ios pl-3 pr-8 …">` over `REFRESH_PRESETS`. If the stored value is not a preset, put `<option value={v}>every {refreshLabel(v)}</option>` first.
@@ -946,7 +946,7 @@ lib/categories.ts:
 - Normalise names and values: “ ” become ", ‘ ’ become ', en and em dashes become -, … becomes "...", then trim. Then `canonicalName(n)`: `user-agent` → `User-Agent`, `accept` → `Accept`, `accept-language` → `Accept-Language` (`CANONICAL_HEADER_NAMES`), so the row shows what will be stored.
 - **Both empty:** the row is dropped silently (the backend accepts blank keys today, routes/sources.py:324-334).
 - **Only one filled:** "Fill in both to save this header." (see the commit rule below).
-- **Name not matching `^[!#$%&'*+.^_`|~0-9A-Za-z-]+$`:** "Header names use letters, numbers and dashes."
+- **Name not matching `` ^[!#$%&'*+.^_`|~0-9A-Za-z-]+$ ``:** "Header names use letters, numbers and dashes."
 - **Name longer than `HEADER_NAME_MAX = 100`:** "Header names can be 100 characters at most."
 - **Name in `HEADER_DENYLIST`** (exactly the backend's `_HEADER_DENYLIST_ALL` after PR1: cookie, authorization, host, x-forwarded-for, x-forwarded-host, x-forwarded-proto, x-real-ip, x-original-url, x-rewrite-url, content-length, transfer-encoding, connection, keep-alive, te, trailer, upgrade, expect, proxy-authorization, proxy-connection; compared lower-cased): "Popping can't send a <Name> header."
 - **Duplicate name** ignoring case: "Already added."
@@ -972,7 +972,7 @@ lib/categories.ts:
 
 **Backend (PR1, `_validate_custom_headers`, routes/sources.py:306-354)**, in this order per key:
 1. type check (:324-329);
-2. `_HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+")` with `fullmatch`; failure: `header name {k!r} is not a valid HTTP header name`;
+2. `` _HEADER_NAME_RE = re.compile(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+") `` with `fullmatch`; failure: `header name {k!r} is not a valid HTTP header name`;
 3. `len(k) > _HEADER_NAME_MAX` (100): `header name {k!r} is longer than 100 characters`;
 4. canonicalise `user-agent`, `accept`, `accept-language` to `User-Agent`, `Accept`, `Accept-Language` (`_CANONICAL_HEADER_NAMES`);
 5. a lower-case form already seen: `header {k!r} is listed twice`;
@@ -997,7 +997,7 @@ lib/categories.ts:
 2. **Save current view** (Drawer.tsx:366-376, existing title). Inline from PR9 (below); `window.prompt` until then.
 3. **Jump to column** (Drawer.tsx:393-409). `jumpToCategory` (App.tsx:2022-2030) stays a `useCallback` (slice21) and also: clears search when `showSearchView` (App.tsx:2436) is active; calls `setMobileCol(idx)`; scrolls the selected phone tab into view inside the strip (`[role=tablist] [aria-selected=true]`, `scrollIntoView({ inline: 'nearest', block: 'nearest' })`); on desktop scrolls `(el?.firstElementChild as HTMLElement | null)?.scrollIntoView(…)`, because the ref is a `display: contents` div (App.tsx:2598).
 4. **Sources** (Drawer.tsx:454-479):
-   - Each row becomes `<div className="flex items-center border-b border-hairline last:border-b-0">` holding the existing `<label className="flex flex-1 min-w-0 items-center gap-3 pl-4 min-h-[44px] …">` (its own `border-b`/`last:border-b-0` at :459 move to the wrapper, or every row loses its divider) and a sibling `<button type="button" aria-label={`edit ${sourceLabel(s.name)}`} className="w-11 h-11 shrink-0 flex items-center justify-center text-label-tertiary active:bg-bg-elevated" onClick={() => { onEditSource?.(s.id); onClose() }}><ChevronRight /></button>`. A sibling, not a child, so `toggleSourceAndMaybeClose` (App.tsx:2013-2017) never fires.
+   - Each row becomes `<div className="flex items-center border-b border-hairline last:border-b-0">` holding the existing `<label className="flex flex-1 min-w-0 items-center gap-3 pl-4 min-h-[44px] …">` (its own `border-b`/`last:border-b-0` at :459 move to the wrapper, or every row loses its divider) and a sibling `` <button type="button" aria-label={`edit ${sourceLabel(s.name)}`} className="w-11 h-11 shrink-0 flex items-center justify-center text-label-tertiary active:bg-bg-elevated" onClick={() => { onEditSource?.(s.id); onClose() }}><ChevronRight /></button> ``. A sibling, not a child, so `toggleSourceAndMaybeClose` (App.tsx:2013-2017) never fires.
    - The category text (:476-478) becomes `hidden md:inline` and uses `categoryLabel(s.category)`; on phones the drawer is 88vw (Drawer.tsx:287), and with the › the name would otherwise get about 67px at 320.
    - New prop `onEditSource?: (id: number) => void`; App passes `(id) => openSettings('feeds', id)`.
    - The checkbox `aria-label` (:468) and the footnote (:415) use `sourceLabel`.
@@ -1020,13 +1020,13 @@ lib/categories.ts:
 - **`openSettings(tab = 'feeds', sourceId?: number)`** in `useCallback` with empty deps: set `view`, `tab` and `source` (or delete `source`). If the current URL already has `view=settings`, `replaceState(window.history.state ?? { popping: 'settings' }, '', url)` (re-entry from a toast must not stack entries); otherwise `pushState({ popping: 'settings' }, '', url)`. Then set the states.
 - **`closeSettings`** in `useCallback`: first `setSettingsOpen(false)` and `setSettingsSourceId(null)` synchronously (`history.back()` is asynchronous; the sheet must close at once). Then: if `window.history.state?.popping === 'settings'`, `window.history.back()` (popstate runs `sync`, which agrees); otherwise delete `view`, `tab` and `source` and `replaceState(null, '', url)`. Done, Esc and the backdrop add no history entry, and one Back after Done does not reopen Settings.
 - **Settings tab buttons** (Settings.tsx:236-247): `u.searchParams.delete('source')` and `window.history.replaceState(window.history.state, '', u.toString())`, keeping the flag (today `null` at :241). Keep the synthetic popstate.
-- **FeedManager focus:** lift SourceRow's local `open` (FeedManager.tsx:384) into MyFeedsTab as `openRowId`, passing `isOpen`/`onToggle`. A `useEffect` keyed on `focusSourceId` plus a nonce from App (so re-focusing the same id while mounted works) forces the tab to 'mine', sets `openRowId` and, until PR6 deletes it, `editingRowId` (:215) so › lands in the old edit form in 2 taps; then on the next frame `document.getElementById(`feed-${id}`)?.scrollIntoView({ block: 'start' })`. Put the li id on :321. When the user collapses or changes the open row, remove `source` the same way (replaceState with the current state).
+- **FeedManager focus:** lift SourceRow's local `open` (FeedManager.tsx:384) into MyFeedsTab as `openRowId`, passing `isOpen`/`onToggle`. A `useEffect` keyed on `focusSourceId` plus a nonce from App (so re-focusing the same id while mounted works) forces the tab to 'mine', sets `openRowId` and, until PR6 deletes it, `editingRowId` (:215) so › lands in the old edit form in 2 taps; then on the next frame `` document.getElementById(`feed-${id}`)?.scrollIntoView({ block: 'start' }) ``. Put the li id on :321. When the user collapses or changes the open row, remove `source` the same way (replaceState with the current state).
 - **One tab list:** `export const SETTINGS_TABS = ['feeds','llm','notifications','history','hidden','starred','voted','reset'] as const` and `export type SettingsTab = typeof SETTINGS_TABS[number]` in lib/settingsTabs.ts. Settings.tsx uses it for the strip (:229) and keeps `export type { SettingsTab }` so Drawer.tsx:34 still compiles; App's allow-list (App.tsx:409-418) becomes `(SETTINGS_TABS as readonly string[]).includes(t)`.
 - **Panel animation:** `motion-safe:animate-sheet-up md:animate-none` (the keyframe exists at tailwind.config.js:97-100, unused).
 - **Stacking:** header z-20 < Drawer z-30/40 < Settings z-50 < Toast z-[60]. Esc capture listeners are unchanged except that Settings' calls `handleClose`.
 - Severity: the Back fix is low priority. The home-screen app (manifest `display: standalone`, index.html:15) has no Back gesture; it shows in a Safari tab and on desktop. Flow FG is the real gate.
 
-**Inline Save current view (PR9):** tapping the row does `flushSync(() => setEditing(true))` then focuses a 17px input in the same tap (keyboard up), with a 44px **Save** disabled while the field is empty. Return or Save calls `onSavePreset(name)`. App's `onSavePreset` becomes `(name: string) => { savePreset(name); toast(`Saved view “${name.trim() || 'Untitled preset'}”`, 'info') }`; delete the `window.prompt` block at App.tsx:2812-2832. Preset rename (App.tsx:302-318) becomes the same inline field on the chip, prefilled with `preset.name`, doing nothing for an unchanged or empty value (as :307-310 does today).
+**Inline Save current view (PR9):** tapping the row does `flushSync(() => setEditing(true))` then focuses a 17px input in the same tap (keyboard up), with a 44px **Save** disabled while the field is empty. Return or Save calls `onSavePreset(name)`. App's `onSavePreset` becomes `` (name: string) => { savePreset(name); toast(`Saved view “${name.trim() || 'Untitled preset'}”`, 'info') } ``; delete the `window.prompt` block at App.tsx:2812-2832. Preset rename (App.tsx:302-318) becomes the same inline field on the chip, prefilled with `preset.name`, doing nothing for an unchanged or empty value (as :307-310 does today).
 
 ## 10. iPhone sweep checklist
 
@@ -1181,6 +1181,8 @@ Every PR:
 | 9 | Inline dialogs, strict guard, delete the 16px rule, low-priority extras | 6, 7, 10 | 7, 8 |
 | 10 | Side safe areas; the phone renders only the phone layout | 6 | 9 |
 
+Owner requirements: 1 fewer steps to edit a feed; 2 category picker; 3 saves on its own; 4 headers without JSON; 5 one top-bar button; 6 iPhone problems fixed by default; 7 basic ease of use; 8 nothing exposes the VPS; 9 YouTube links add; 10 no text overflow, fixed at the root.
+
 PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships right after the backend fix; the Add form does not depend on the Menu work.
 
 ### PR1. Backend: YouTube, header rules, category strip, safety
@@ -1267,7 +1269,6 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
 - **Change:** section 9 in order: the gear and stale comments; the title; the Menu rows, ›, labels, Clear, grabber, inert and focus return, swipe, dead prop; `jumpToCategory`; filter chip labels; the focus parameter and `openSettings(tab, id)` with re-entry; `closeSettings`; tab `replaceState`; `SETTINGS_TABS`; FeedManager `openRowId`, focus effect, li ids; `,` shortcut; Hamburger ARIA. Update the audit selectors.
 - **Flows:**
   - FG: open from the Menu, Done, wait for the settings dialog to detach, then `page.goBack()` → Settings stays closed; `page.url()` has the app's origin and no `view`, `tab` or `source`; `history.length` grows by at most 1 per open/close cycle.
-  - FG2: open from the Menu, call `openSettings` again while open (through the `,` key on a desktop-sized context or a test hook), then one Done closes it and `goBack()` keeps it closed.
   - FT: Menu › on the_verge → Settings on Feeds with that row expanded and in view; then › on another feed while Settings stays mounted (via the URL) focuses it.
   - FU: Jump to column on a phone context → the selected tab changes and is inside the strip's visible area.
 - **Acceptance:**
@@ -1300,6 +1301,7 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
   - FN: `page.clock.install({ time: F.NOW })` before goto, then `page.clock.runFor(65_000)` → no "refreshed" toast.
   - FO: the legacy-header fixture → the row error shows on open; editing another header sends nothing until that row is fixed or removed.
   - FV: tap a card's source name → the editor for that feed; `elementFromPoint` at the headline's bottom edge is not the source button.
+  - FG2 (re-entry): open Settings from the Menu, Auto-add a feed, tap the toast's **Edit** (this calls `openSettings` while Settings is open) → that feed's editor opens; one Done closes Settings; `page.goBack()` keeps it closed.
   - FW: Delete a feed while a delayed stale poll is pending → the row and its stories disappear and no "Other" column appears.
 - **Acceptance:** flows pass at 390; unit tests pass; smoke green at 390 and 320 with the editor states; `pytest -m no_db` passes (slice15, sitemap, slice19, slice21, slice30, the guard test); `grep -n 'datalist\|JSON.parse\|custom headers (JSON)' frontend/src/components/FeedManager.tsx frontend/src/components/feeds` is empty; lint 0 errors with FeedManager.tsx in scope; build passes.
 - **Verification:** section 13 recipe; section 2 checks; CI; owner screenshots of the editor (custom, built-in, blocked, New-category mode, an error).
@@ -1344,6 +1346,16 @@ PR4 lands before PR5 so YouTube adding (the owner's most acute problem) ships ri
 - **Depends on:** PR9.
 
 ### Open decisions and risks
+
+**Non-goals** (larger regression surfaces, or not asked for):
+- A push-navigation sheet, deleting the Drawer, a NavStack, swipe-down to close, pull-to-refresh, or regrouping Settings into fewer tabs.
+- iOS Larger Text and Dynamic Type for web text (`-apple-system-body`, rem tokens): a home-screen web app does not scale px text; the 312 and 320 runs cover Page Zoom.
+- Encrypting or masking header values (they stay plain text, with a warning).
+- A service worker or offline mode, a router, Vitest or Jest, any frontend dependency, or package.json changes.
+- Two-device edit conflicts: last write wins per field; there is no version column (models.py:40-99).
+- Deleting `api.deletePreference` (api.ts:818-826) and the legacy Card `onHide` path.
+- An OIDC sign-in flow from the home-screen app (LoginPage.tsx:52); local sign-in works.
+- Desktop-only copy: "(local bypass)" (UserBadge.tsx:37), the raw health status (App.tsx:2344) and the star tooltip's "(s)" (Card.tsx:1392). None is visible on the iPhone.
 
 **Open decisions** (each would mean materially different work; the default is in brackets):
 1. **YouTube API key [no].** Only if, after PR1 is live, @handle lookups still fail from the VPS and pasting the channel ID is not acceptable. It adds www.googleapis.com as an outbound host and needs a Google Cloud key from the owner. Two ways: config.py and .env.example (both off-limits today), or the existing runtime-settings store, exposed only as `youtube_api_key_set` (the pattern at routes/settings.py:74-87), which avoids config.py. Either way the key travels in an `X-Goog-Api-Key` header, never the URL, because httpx logs request URLs at INFO (main.py:71-74).
