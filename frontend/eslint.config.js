@@ -24,7 +24,7 @@ import tseslint from 'typescript-eslint'
 // The list grows PR by PR until it covers all of src/ (REDESIGN_PLAN.md,
 // section 4, "Lint bans"). Core rules only, no extra dependency.
 const MOBILE_SCOPE = [
-  'src/components/{Card,Toast,BriefCard,FramingWatch,SourceIcon,SearchResults,Drawer,Hamburger,FeedManager,Column,ShortcutsSheet,LoginPage}.tsx',
+  'src/components/{Card,Toast,BriefCard,FramingWatch,SourceIcon,SearchResults,Drawer,Hamburger,FeedManager,Column,ShortcutsSheet,LoginPage,Settings}.tsx',
   'src/lib/**',
   'src/components/feeds/**',
 ]

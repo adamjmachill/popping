@@ -98,6 +98,43 @@ const flow = (name, fields) => ({
 // PR5 flows run from the dashboard.
 const dashFlow = (name, fields) => flow(name, { url: '/', ...fields })
 
+// --- PR8: the AI tab --------------------------------------------------------
+
+// Opens Settings › AI with the server's AI settings as `opts` describe
+// (provider: null = Default; anthropic: whether its key is saved here;
+// configured: what /api/llm/status says). PUTs are recorded in
+// page._puts and change the settings the way the server would.
+const aiFlow = (name, opts, fields) =>
+  flow(name, {
+    url: '/?view=settings&tab=llm',
+    before: async ({ page }) => {
+      const state = { ...F.SETTINGS }
+      if ('provider' in opts) Object.assign(state, { llm_provider: opts.provider, llm_model_brief: null, llm_model_scoring: null })
+      if ('anthropic' in opts) state.anthropic_api_key_set = opts.anthropic
+      const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+      await page.route(
+        (u) => new URL(u).pathname === '/api/settings',
+        (route) => (route.request().method() === 'GET' ? route.fulfill(json(state)) : route.fallback()),
+      )
+      if ('configured' in opts) {
+        await page.route(
+          (u) => new URL(u).pathname === '/api/llm/status',
+          (route) => route.fulfill(json({ configured: opts.configured, backend: null, model: null })),
+        )
+      }
+      page._puts = await record(page, 'PUT', '/api/settings/llm', (body) => {
+        if ('provider' in body) state.llm_provider = body.provider || null
+        if ('model_brief' in body) state.llm_model_brief = body.model_brief || null
+        if ('model_scoring' in body) state.llm_model_scoring = body.model_scoring || null
+        for (const id of ['anthropic', 'openai', 'groq', 'ollama_cloud']) {
+          if (`${id}_api_key` in body) state[`${id}_api_key_set`] = !!body[`${id}_api_key`]
+        }
+        return state
+      })
+    },
+    ...fields,
+  })
+
 // --- PR6: the feed editor ---------------------------------------------------
 
 const MOBILE_MAIN = 'main.md\\:hidden'
@@ -880,7 +917,7 @@ module.exports = [
     },
   }),
   // Switching apps mid-edit (the field still focused) saves what was typed.
-  editorFlow('flow-fx-app-switch-saves', 6, {
+  editorFlow('flow-save-app-switch', 6, {
     before: async ({ page }) => {
       page._patches = await record(page, 'PATCH', '/api/sources/6')
     },
@@ -893,14 +930,14 @@ module.exports = [
         Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => 'hidden' })
         document.dispatchEvent(new Event('visibilitychange'))
       })
-      if (!(await waitFor(() => page._patches.length === 1, 2000))) return fail('FX', `switching apps sent ${page._patches.length} PATCH(es), expected 1`)
-      if (page._patches[0].url !== typed) fail('FX', `PATCH body is ${JSON.stringify(page._patches[0])}`)
+      if (!(await waitFor(() => page._patches.length === 1, 2000))) return fail('SAVE-SWITCH', `switching apps sent ${page._patches.length} PATCH(es), expected 1`)
+      if (page._patches[0].url !== typed) fail('SAVE-SWITCH', `PATCH body is ${JSON.stringify(page._patches[0])}`)
     },
   }),
 
   // Back (Safari tab, desktop) closes Settings without a blur; the typed
   // address is saved anyway.
-  dashFlow('flow-fx2-back-saves', {
+  dashFlow('flow-save-back', {
     before: async ({ page }) => {
       page._patches = await record(page, 'PATCH', '/api/sources/6')
     },
@@ -910,8 +947,87 @@ module.exports = [
       await field(page, 6, 'Address').fill(typed)
       await page.goBack()
       await page.locator(SETTINGS).waitFor({ state: 'detached', timeout: 3000 })
-      if (!(await waitFor(() => page._patches.length === 1, 2000))) return fail('FX2', `Back sent ${page._patches.length} PATCH(es), expected 1`)
-      if (page._patches[0].url !== typed) fail('FX2', `PATCH body is ${JSON.stringify(page._patches[0])}`)
+      if (!(await waitFor(() => page._patches.length === 1, 2000))) return fail('SAVE-BACK', `Back sent ${page._patches.length} PATCH(es), expected 1`)
+      if (page._patches[0].url !== typed) fail('SAVE-BACK', `PATCH body is ${JSON.stringify(page._patches[0])}`)
+    },
+  }),
+  // --- PR8: the AI tab saves on its own ------------------------------------
+
+  // Switching provider is one PUT that also clears both models.
+  aiFlow('flow-fx-ai-provider', { provider: null }, {
+    run: async ({ page, fail }) => {
+      await page.locator('#ai-provider').waitFor({ state: 'visible' })
+      await page.locator('#ai-provider').selectOption('ollama')
+      if (!(await waitFor(() => page._puts.length >= 1))) return fail('FX', 'no PUT after picking Ollama (local)')
+      await sleep(400)
+      if (page._puts.length !== 1) fail('FX', `expected 1 PUT, saw ${page._puts.length}`)
+      const body = JSON.stringify(page._puts[0])
+      if (body !== '{"provider":"ollama","model_brief":"","model_scoring":""}') fail('FX', `PUT body is ${body}`)
+    },
+  }),
+
+  // A provider whose key isn't saved here asks for it, and the key is
+  // one more PUT with only that key.
+  aiFlow('flow-fx2-ai-provider-needs-key', { provider: null, anthropic: false, configured: false }, {
+    run: async ({ page, fail }) => {
+      await page.locator('#ai-provider').waitFor({ state: 'visible' })
+      await page.locator('#ai-provider').selectOption('anthropic')
+      if (!(await waitFor(() => page._puts.length >= 1))) return fail('FX2', 'no PUT after picking Anthropic')
+      const first = JSON.stringify(page._puts[0])
+      if (first !== '{"provider":"anthropic","model_brief":"","model_scoring":""}') fail('FX2', `provider PUT body is ${first}`)
+      const settings = page.locator(SETTINGS)
+      if (!(await settings.getByText("If your Anthropic key isn't in the server's settings file, paste it here.").isVisible())) {
+        fail('FX2', 'no key field hint for Anthropic')
+      }
+      if (!(await waitFor(() => settings.getByText('Popping has no Anthropic key yet. Paste one above.').isVisible(), 3000))) {
+        fail('FX2', 'no "Popping has no Anthropic key yet" line')
+      }
+      const key = page.locator('#ai-key-anthropic')
+      await key.fill('sk-ant-test-not-real')
+      await key.blur()
+      if (!(await waitFor(() => page._puts.length >= 2))) return fail('FX2', 'no PUT after leaving the key field')
+      await sleep(400)
+      if (page._puts.length !== 2) fail('FX2', `expected 2 PUTs, saw ${page._puts.length}`)
+      const keys = Object.keys(page._puts[1])
+      if (JSON.stringify(keys) !== '["anthropic_api_key"]') fail('FX2', `key PUT has fields ${JSON.stringify(keys)}`)
+    },
+  }),
+
+  // A key saves on leave: an empty field sends nothing; a typed one sends
+  // exactly that key, then the field empties and says "Key saved".
+  aiFlow('flow-fy-ai-key-on-leave', {}, {
+    run: async ({ page, fail }) => {
+      const key = page.locator('#ai-key-groq')
+      await key.waitFor({ state: 'visible' })
+      await key.focus()
+      await key.blur()
+      await sleep(300)
+      if (page._puts.length) return fail('FY', `an empty key field sent ${page._puts.length} PUT(s)`)
+      await key.fill('gsk-test-not-real')
+      await key.blur()
+      if (!(await waitFor(() => page._puts.length >= 1))) return fail('FY', 'no PUT after leaving a typed key')
+      await sleep(300)
+      if (page._puts.length !== 1) fail('FY', `expected 1 PUT, saw ${page._puts.length}`)
+      const keys = Object.keys(page._puts[0])
+      if (JSON.stringify(keys) !== '["groq_api_key"]') fail('FY', `PUT has fields ${JSON.stringify(keys)}`)
+      if ((await key.inputValue()) !== '') fail('FY', 'the key stays in the field after saving')
+      if (!(await waitFor(() => page.locator(SETTINGS).getByText('Key saved').isVisible(), 3000))) fail('FY', 'no "Key saved"')
+    },
+  }),
+
+  // Reset asks inline, never with a browser dialog.
+  flow('flow-fz-reset-inline', {
+    url: '/?view=settings&tab=reset',
+    run: async ({ page, fail }) => {
+      let dialogs = 0
+      page.on('dialog', () => dialogs++)
+      await page.locator(SETTINGS).getByRole('button', { name: 'Clear local state', exact: true }).click()
+      const keep = page.locator(SETTINGS).getByRole('button', { name: 'Keep', exact: true })
+      if (!(await keep.isVisible())) return fail('FZ', 'no inline confirm after Clear local state')
+      if (!(await page.locator(SETTINGS).getByRole('button', { name: 'Clear', exact: true }).isVisible())) fail('FZ', 'the confirm has no Clear')
+      await keep.click()
+      if (await keep.count()) fail('FZ', 'Keep did not close the confirm')
+      if (dialogs) fail('FZ', `a browser dialog opened ${dialogs} time(s)`)
     },
   }),
 ]

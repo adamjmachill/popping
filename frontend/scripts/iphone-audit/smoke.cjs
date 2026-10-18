@@ -48,6 +48,7 @@ const RULES = {
   C7: { title: 'tap targets: >= 43.5px tall (and wide when there is no text)', warn: true },
   C8: { title: 'runtime: no page errors, console errors, unmocked requests or dialogs' },
   C9: { title: 'CSP: no "Refused to" console messages under the production policy' },
+  C10: { title: 'no Save: Settings has no button named "Save" (every field saves on its own)' },
   C11: { title: 'one line: button, tab, time, [data-one-line] and nowrap link text on one line' },
   C12: { title: 'gutter: text and controls at least 8px from the screen edges' },
   C13: { title: 'measure: headline >= 55% of the card, no text block > 8 lines and < 160px wide' },
@@ -56,7 +57,7 @@ const RULES = {
   C16: { title: 'title fits: the header h1 is not cut off' },
 }
 // Rules every state runs in the page. Per-state additions go in `extra`.
-const PAGE_RULES = ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C11', 'C12', 'C13', 'C14', 'C15']
+const PAGE_RULES = ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C10', 'C11', 'C12', 'C13', 'C14', 'C15']
 // Rules that change the page (CSSOM or inline style) and restore it; they run
 // after the screenshot.
 const MUTATING_RULES = ['C2b', 'C6']
@@ -770,6 +771,15 @@ function pageChecks(cfg) {
   if (on.has('C15')) {
     for (const el of els) {
       if (el.matches('input[type="search" i]')) fail('C15', el, 'input[type=search]: its native clear button and search styling are invisible to the other checks; use type="text" inputMode="search"')
+    }
+  }
+
+  // C10 no Save: Settings fields save on their own (PR6, PR8).
+  if (on.has('C10')) {
+    const dialog = document.querySelector('[role="dialog"][aria-label="settings"]')
+    for (const b of dialog ? dialog.querySelectorAll('button') : []) {
+      const name = (b.getAttribute('aria-label') || b.textContent || '').trim()
+      if (/^save$/i.test(name) && b.getClientRects().length) fail('C10', b, 'a Save button in Settings; fields save on their own')
     }
   }
 

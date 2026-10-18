@@ -550,18 +550,17 @@ async function main() {
     await page.locator('[role="dialog"][aria-label="settings"] [role="tablist"] button[role="tab"]:has-text("AI")').click()
     await page.waitForSelector('text=Brief tone')
     await sleep(300)
-    await state('07-llm', 'Settings → AI tab (status card collapsed)')
-    await page.locator('[role="dialog"][aria-label="settings"] button:has-text("Edit")').first().click()
-    await page.waitForSelector('[role="dialog"][aria-label="settings"] select')
-    await sleep(400)
+    await page.waitForSelector('#ai-provider')
+    await sleep(300)
+    await state('07-llm', 'Settings → AI tab (provider, models and keys; each saves on its own)')
     const pw = page.locator('[role="dialog"][aria-label="settings"] input[type="password"]').first()
     await pw.fill('sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghijklmnop')
     await sleep(200)
-    await state('07b-llm-picker', 'Settings → AI tab with the model picker opened (provider/model selects, API-key password inputs, one key typed)')
+    await state('07b-llm-picker', 'Settings → AI tab with one API key typed (it saves when the field is left)')
 
     // ---- (8) notifications ----
     await page.locator('[role="dialog"][aria-label="settings"] [role="tablist"] button[role="tab"]:has-text("Notifications")').click()
-    await page.waitForSelector('text=Not configured')
+    await page.waitForSelector('text=Push notifications are off')
     await sleep(250)
     await state('08-notifications', 'Settings → Notifications tab')
 
