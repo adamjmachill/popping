@@ -61,7 +61,7 @@ export function FramingWatch() {
   if (clusters.length === 0) return null
 
   return (
-    <section className="hidden md:block px-4 pt-4 pb-3 border-b border-hairline">
+    <section className="hidden md:block pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
       <header className="flex items-center justify-between mb-2">
         <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
           Framing Watch

@@ -271,7 +271,10 @@ export function Settings({
         // The desktop panel is wider than the Drawer (480px) because
         // the LLM tab needs room for the provider/model pickers and
         // the Feeds tab's add-custom form has a wide textarea.
+        // Side insets keep the sheet's content clear of the notch in
+        // landscape; they are 0 in portrait.
         className="absolute inset-x-0 bottom-0 top-[calc(env(safe-area-inset-top)+0.75rem)] rounded-t-ios-lg bg-bg-app shadow-2xl flex flex-col
+                   pl-[env(safe-area-inset-left)] pr-[env(safe-area-inset-right)]
                    motion-safe:animate-sheet-up md:animate-none
                    md:inset-y-0 md:right-0 md:left-auto md:top-0 md:bottom-auto md:h-full md:w-[480px] md:rounded-none"
       >

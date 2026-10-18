@@ -148,6 +148,10 @@ const STATES = [
       const want = ['open search', 'refresh', 'open menu']
       if (JSON.stringify(labels) !== JSON.stringify(want)) fail('HEADER', `header buttons are ${JSON.stringify(labels)}, expected ${JSON.stringify(want)}`)
       if (await page.locator('[aria-label="open settings"]').count()) fail('HEADER', 'the old settings gear is still in the page')
+      // PR10: a phone renders only the phone layout, one Column, not the
+      // hidden desktop grid of every column.
+      const columns = await page.locator('main section').count()
+      if (columns !== 1) fail('PHONE', `${columns} Column sections under <main>, expected 1 (the phone's)`)
     },
   },
   {
