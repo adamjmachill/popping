@@ -81,10 +81,10 @@ The override is auto-loaded by `docker compose up` and only adds `build:` + bind
 ```bash
 # In .env:
 POPPING_IMAGE_TAG=sha-<full 40-char commit sha>    # exact commit (immutable)
-# or
-POPPING_IMAGE_TAG=pr-3           # test a PR
 POPPING_PULL_POLICY=never        # don't auto-update a pinned tag
 ```
+
+Only pushes to `main` publish images. PR builds are validation-only and never reach GHCR, so there is no `pr-<num>` tag to pin; to try a PR, check out its branch and use the local-build override above.
 
 ## Architecture
 
