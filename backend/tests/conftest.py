@@ -224,6 +224,16 @@ def make_vector():
 
 
 @pytest.fixture
+def offline_ingest(monkeypatch):
+    """Run ``scheduler._ingest`` with no embedder, no job rescheduling
+    and no network asset passes; yields the URLs that reached the embed
+    step. See ``ingest_harness.install_offline_ingest``."""
+    from ingest_harness import install_offline_ingest
+
+    return install_offline_ingest(monkeypatch)
+
+
+@pytest.fixture
 def fake_dns(monkeypatch):
     """Answer DNS for the hosts the YouTube and source-route tests use,
     so the real ``check_url_safe`` and ``ssrf_event_hook`` run without

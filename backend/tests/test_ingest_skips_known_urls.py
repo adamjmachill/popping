@@ -1,5 +1,9 @@
 """Ingest must not embed items whose URL is already stored, and must not
-hold a DB connection while the plugin fetches."""
+hold a DB connection while the plugin fetches.
+
+Item dates are relative to now: the ingest rules skip stories dated
+before the feed's first fetch window, so a fixed date would fall
+behind it as the calendar moves on."""
 
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ from app import scheduler
 from app.models import Entry
 from app.sources.base import SourcePlugin
 
-_NOW = dt.datetime(2026, 10, 1, tzinfo=dt.timezone.utc)
+_NOW = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=1)
 
 
 class _FakePlugin(SourcePlugin):
@@ -48,7 +52,8 @@ def _item(n: int) -> dict:
 async def test_second_poll_does_not_re_embed_known_items(db_session, embed_calls):
     _FakePlugin.items = [_item(1), _item(2)]
     first = await scheduler._ingest(_FakePlugin)
-    assert first["inserted"] == 2 and embed_calls == [
+    assert first["inserted"] == 2 and first["skipped"] == 0
+    assert embed_calls == [
         "https://example.test/1",
         "https://example.test/2",
     ]
@@ -59,11 +64,33 @@ async def test_second_poll_does_not_re_embed_known_items(db_session, embed_calls
     assert embed_calls == ["https://example.test/3"]
     assert second["inserted"] == 1
     assert second["duplicates"] == 3
+    assert second["skipped"] == 0
 
     total = await db_session.scalar(
         select(func.count()).select_from(Entry).where(Entry.url.like("https://example.test/%"))
     )
     assert total == 3
+
+
+@pytest.mark.asyncio
+async def test_old_backlog_is_skipped_not_embedded(db_session, embed_calls):
+    """A story dated well before the feed's first fetch is skipped by the
+    ingest rules before the embed step, and counted as skipped."""
+    _FakePlugin.items = [_item(1)]
+    await scheduler._ingest(_FakePlugin)
+    embed_calls.clear()
+
+    old = {
+        "title": "Old",
+        "url": "https://example.test/old",
+        "published_at": _NOW - dt.timedelta(days=40),
+    }
+    _FakePlugin.items = [_item(1), old]
+    summary = await scheduler._ingest(_FakePlugin)
+    assert embed_calls == []
+    assert summary["inserted"] == 0
+    assert summary["duplicates"] == 1
+    assert summary["skipped"] == 1
 
 
 @pytest.mark.asyncio

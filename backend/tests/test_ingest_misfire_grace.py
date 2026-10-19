@@ -74,6 +74,13 @@ async def built_scheduler(monkeypatch):
 
     monkeypatch.setattr(scheduler, "_register_dynamic_source_jobs", _fake_walk)
 
+    async def _no_category_move():
+        # The startup category move writes to the DB; these tests don't
+        # use one.
+        return None
+
+    monkeypatch.setattr(scheduler, "_move_builtin_categories", _no_category_move)
+
     built = await scheduler.start_scheduler()
     try:
         yield built

@@ -7,7 +7,10 @@ phase 2 needs to scale fetches across workers, swap in `RedisJobStore`
 
 The scheduler owns:
     - One repeating job per registered source plugin
-    - Upsert into the entries table (by url — natural primary key for feeds)
+    - Upsert into the entries table (by url — natural primary key for feeds),
+      after the ingest rules (``app.ingest_rules``) pick which new items a
+      poll stores: a first fetch keeps the newest few plus the last
+      couple of days, never a feed's whole back catalogue
     - Embedding the entry text at ingest (phase 2)
     - Composite scoring at ingest (phase 2)
     - Periodic rescore of recently-fetched entries so recency decay and
@@ -43,13 +46,13 @@ import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
-from sqlalchemy import bindparam, delete, func, select, text
+from sqlalchemy import bindparam, delete, exists, func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import assets, framing
+from app import assets, framing, ingest_rules, runtime_settings
 from app.brief import BriefGenerator
 from app.config import settings
 from app.db import SessionLocal
@@ -143,6 +146,39 @@ async def _upsert_source(session: AsyncSession, plugin_cls: Any) -> Source | Non
     await session.commit()
     await session.refresh(row)
     return row
+
+
+# Built-ins whose class category changed after installs already had
+# their row: name → (old category, new category). ``_upsert_source``
+# returns an existing row unchanged, so the new class category alone
+# never reaches it. ``_move_builtin_categories`` moves each row once,
+# only while it is still in the old category (a category the user
+# picked stays), and records the move under this key prefix so a
+# later choice of the old category is never undone.
+_BUILTIN_CATEGORY_MOVES: dict[str, tuple[str, str]] = {
+    "wikipedia_on_this_day": ("news", "on_this_day"),
+}
+_BUILTIN_CATEGORY_MOVED_KEY_PREFIX = "builtin_category_moved:"
+
+
+async def _move_builtin_categories() -> None:
+    async with SessionLocal() as session:
+        for name, (old, new) in _BUILTIN_CATEGORY_MOVES.items():
+            key = f"{_BUILTIN_CATEGORY_MOVED_KEY_PREFIX}{name}"
+            if await session.get(AppSetting, key) is not None:
+                continue
+            row = await session.scalar(select(Source).where(Source.name == name))
+            if row is not None and row.category == old:
+                row.category = new
+                logger.info("scheduler: moved built-in %s from %s to %s", name, old, new)
+            # Recorded even with no row: a row created later gets the
+            # class's new category from ``_upsert_source``.
+            await session.execute(
+                pg_insert(AppSetting)
+                .values(key=key, value=dt.datetime.now(dt.timezone.utc).isoformat())
+                .on_conflict_do_nothing(index_elements=["key"])
+            )
+        await session.commit()
 
 
 async def _load_profile(session: AsyncSession) -> UserProfile | None:
@@ -288,6 +324,50 @@ def _reschedule_ingest_job(plugin_cls: Any, interval_seconds: float) -> None:
         logger.debug("scheduler: could not reschedule %s", job_id, exc_info=True)
 
 
+async def _ingest_tunables() -> ingest_rules.IngestTunables:
+    """The ``ingest.*`` knobs from runtime settings, parsed and range
+    checked (see ``ingest_rules.parse_tunables``). There is no env
+    fallback, so an unset key reads as None and gets its default."""
+    raw = await runtime_settings.get_many(list(ingest_rules.TUNABLE_KEYS))
+    return ingest_rules.parse_tunables(raw)
+
+
+async def _is_first_fetch(
+    session: AsyncSession,
+    source: Source,
+    now: dt.datetime,
+    rules: ingest_rules.IngestTunables,
+) -> bool:
+    """Whether this poll gets the first-fetch rules.
+
+    True when the feed has never had a successful poll, when it has
+    stored nothing since its baseline (``created_at``: when it was
+    added, when its first fetch landed, or when its address last
+    changed), or when its last success is more than
+    ``resume_gap_hours`` ago (a pause, an auto-disable followed by a
+    resume, a long failure streak). ``last_fetch_at`` alone is not
+    enough: a poll that returns nothing still counts as a success and
+    sets it, before the feed has ever brought a story.
+    """
+    last = source.last_fetch_at
+    if last is None:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=dt.timezone.utc)
+    if now - last > dt.timedelta(hours=rules.resume_gap_hours):
+        return True
+    # One EXISTS, answered from the entries.source_id index.
+    has_rows = await session.scalar(
+        select(
+            exists().where(
+                Entry.source_id == source.id,
+                Entry.fetched_at >= source.created_at,
+            )
+        )
+    )
+    return not has_rows
+
+
 def _should_retry_favicon(last_fetch_at: dt.datetime | None) -> bool:
     if last_fetch_at is None:
         return True
@@ -305,7 +385,14 @@ async def _ingest(plugin_cls: Any) -> dict:
     Catches all exceptions per-source so one broken source can't take
     the scheduler down.
     """
-    summary = {"source": plugin_cls.name, "fetched": 0, "inserted": 0, "duplicates": 0, "error": None}
+    summary = {
+        "source": plugin_cls.name,
+        "fetched": 0,
+        "inserted": 0,
+        "duplicates": 0,
+        "skipped": 0,
+        "error": None,
+    }
     # A class-driven plugin arrives as a class — instantiate a fresh one
     # per run so plugin-local state doesn't leak between ingests. A
     # dynamic plugin arrives as an already-constructed
@@ -351,6 +438,11 @@ async def _ingest(plugin_cls: Any) -> dict:
         # only to persist the result.
         source_id: int | None = None
         source_url: str | None = None
+        # What the plugin is about to fetch: the feed's URL, sitemap
+        # URL and link pattern. If any of them changes while the fetch
+        # is in flight, the batch came from the old address and is
+        # discarded (see the commit session below).
+        fetch_target: tuple[str | None, ...] = ()
         needs_favicon = False
         async with SessionLocal() as session:
             source = await _upsert_source(session, plugin_cls)
@@ -362,6 +454,7 @@ async def _ingest(plugin_cls: Any) -> dict:
                 return summary
             source_id = source.id
             source_url = source.url
+            fetch_target = (source.url, source.sitemap_url, source.link_pattern)
             needs_favicon = (
                 source.favicon_url is None
                 and _should_retry_favicon(source.last_fetch_at)
@@ -404,12 +497,34 @@ async def _ingest(plugin_cls: Any) -> dict:
         # long starves the connection pool.
         raw_items = await plugin.fetch()
         summary["fetched"] = len(raw_items)
+        rules = await _ingest_tunables()
 
         async with SessionLocal() as session:
-            source = await session.get(Source, source_id)
+            # Loaded first: it commits when it has to create the
+            # profile row, which would end the transaction (and drop the
+            # lock) taken below.
+            profile = await _load_profile(session)
+            # Lock the feed's row for the rest of this transaction
+            # (FOR NO KEY UPDATE: the entry inserts' foreign-key locks
+            # don't conflict with it). ``update_source`` takes the same
+            # lock, so an address change either lands before this
+            # point, and the check below discards the batch, or waits
+            # until this commit and then resets the first-fetch state
+            # after it.
+            source = await session.get(
+                Source,
+                source_id,
+                with_for_update={"key_share": True},
+                populate_existing=True,
+            )
             if source is None:
                 return summary
-            profile = await _load_profile(session)
+            if (source.url, source.sitemap_url, source.link_pattern) != fetch_target:
+                logger.info(
+                    "ingest: %s changed address during the fetch — discarding %d item(s)",
+                    plugin_cls.name, len(raw_items),
+                )
+                return summary
             normalized: list[dict] = []
             for raw in raw_items:
                 try:
@@ -425,12 +540,36 @@ async def _ingest(plugin_cls: Any) -> dict:
                 known = set(
                     (await session.scalars(select(Entry.url).where(Entry.url.in_(urls)))).all()
                 )
-            for norm in normalized:
-                if norm.get("url") in known:
-                    summary["duplicates"] += 1
-                    continue
-                if norm.get("url"):
-                    known.add(norm["url"])
+            # The ingest rules (``app.ingest_rules``): a first fetch
+            # keeps the newest few plus the last couple of days, later
+            # polls skip old and undated backlog, and one poll stores at
+            # most ``max_per_poll`` new items.
+            now = dt.datetime.now(dt.timezone.utc)
+            first_fetch = await _is_first_fetch(session, source, now, rules)
+            kept, skipped = ingest_rules.select_items_for_ingest(
+                normalized,
+                known=known,
+                first_fetch=first_fetch,
+                baseline_at=source.created_at,
+                now=now,
+                keep_first=rules.first_fetch_keep,
+                backfill_h=rules.backfill_hours,
+                max_age_d=rules.max_age_days,
+                per_poll=rules.max_per_poll,
+                max_undated=rules.max_undated_per_poll,
+            )
+            summary["skipped"] = sum(skipped.values())
+            # Known URLs and repeats within this listing.
+            summary["duplicates"] = len(normalized) - len(kept) - summary["skipped"]
+            if skipped:
+                logger.info(
+                    "ingest: %s skipped %d item(s)%s: %s",
+                    plugin_cls.name,
+                    summary["skipped"],
+                    " (first fetch)" if first_fetch else "",
+                    ", ".join(f"{reason}={n}" for reason, n in sorted(skipped.items())),
+                )
+            for norm in kept:
                 # Lift image_url out of meta (the default normalize()
                 # buckets it there) so it can land in its own column.
                 # A missing image is the common case for non-RSS sources
@@ -498,6 +637,15 @@ async def _ingest(plugin_cls: Any) -> dict:
                         og_image_jobs.append((inserted_id, norm["url"]))
                 else:
                     summary["duplicates"] += 1
+            if first_fetch and summary["inserted"] > 0:
+                # The first fetch landed: it becomes the feed's
+                # baseline. ``now()`` is this transaction's start time,
+                # the same value the rows just inserted got as
+                # ``fetched_at``, so ``_is_first_fetch`` sees them from
+                # the next poll on. An empty first fetch leaves the
+                # baseline alone, so a feed that was blocked for days
+                # still gets a first fetch when it finally works.
+                source.created_at = func.now()
             was_backed_off = (source.error_count or 0) > 0
             source.last_fetch_at = dt.datetime.now(dt.timezone.utc)
             source.last_error = None
@@ -1813,6 +1961,12 @@ async def start_scheduler(notifier: Optional[Notifier] = None) -> AsyncIOSchedul
     # ``coalesce`` folds several missed runs into one; jobs that pass
     # their own ``coalesce`` keep it.
     _scheduler = AsyncIOScheduler(timezone="UTC", job_defaults=_JOB_DEFAULTS)
+    # Before the startup ingest ticks below, so the first ingest after
+    # an upgrade already scores with the new category.
+    try:
+        await _move_builtin_categories()
+    except Exception:
+        logger.exception("scheduler: built-in category move failed — will retry on next start")
     plugins = list_sources()
     logger.info("scheduler: discovered %d source plugin(s): %s", len(plugins), ", ".join(plugins))
 
@@ -2342,7 +2496,18 @@ async def update_source(
     """
     from app import assets as assets_mod
 
-    row = await session.get(Source, source_id)
+    # Same row lock ``_ingest`` takes in its commit session, so an
+    # address change and an in-flight poll of the old address never
+    # interleave (see the first-fetch reset below). ``populate_existing``
+    # re-reads the committed row: the PATCH route loaded it earlier in
+    # this session, and the change checks below must not compare
+    # against that older read.
+    row = await session.get(
+        Source,
+        source_id,
+        with_for_update={"key_share": True},
+        populate_existing=True,
+    )
     if row is None:
         return None
     refresh_changed = (
@@ -2439,6 +2604,16 @@ async def update_source(
         # page_links" so an empty-string body also counts as a
         # clear here.
         row.link_pattern = link_pattern
+    if url_changed or sitemap_url_changed or link_pattern_changed:
+        # Each of the three re-points the feed, so it starts again
+        # from a first fetch: newest few plus the last couple of days,
+        # not the new address's whole back catalogue (see
+        # ``_is_first_fetch``). ``clock_timestamp()``, not ``now()``:
+        # this transaction may have started before an in-flight poll
+        # of the old address committed (the lock above waits for it),
+        # and the new baseline has to come after that poll's rows.
+        row.last_fetch_at = None
+        row.created_at = func.clock_timestamp()
     await session.commit()
     if url_changed and old_favicon_path:
         # Post-commit filesystem cleanup. Only reached on a

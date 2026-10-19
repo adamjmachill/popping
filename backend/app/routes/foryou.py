@@ -35,6 +35,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.deps import current_user
+from app.brief import _HISTORICAL_SOURCE_SLUGS
 from app.config import settings
 from app.db import get_session
 from app.models import Entry, Source
@@ -104,6 +105,9 @@ async def foryou(
             Source.source_weight.label("source_weight"),
         )
         .join(Source, Entry.source_id == Source.id)
+        # On this day stays in its own tab: its stories are history,
+        # not today's news, the same reason the brief leaves them out.
+        .where(Source.name.notin_(_HISTORICAL_SOURCE_SLUGS))
         .order_by(Entry.composite_score.desc(), Entry.published_at.desc().nullslast())
         .limit(over_fetch)
     )
