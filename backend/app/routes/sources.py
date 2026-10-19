@@ -55,7 +55,7 @@ from app.schemas import (
 from app.sources import list_sources as registered_plugin_names
 from app.sources.reddit import normalize_subreddit
 from app.url_safety import check_url_safe
-from app import scheduler
+from app import reddit_client, scheduler
 
 router = APIRouter(tags=["sources"])
 
@@ -1150,8 +1150,42 @@ async def _test_source_impl(
             from app.sources.generic_scrape import probe as probe_generic_scrape
             items = await probe_generic_scrape(url)
         else:  # "reddit"
-            from app.sources.reddit import fetch_subreddit
-            items = await fetch_subreddit(url, headers=headers)
+            # Same client the scheduled ingest uses
+            # (``DynamicRedditPlugin.fetch``). It takes the subreddit
+            # name, not the canonical URL ``_validate_reddit_url``
+            # built, and custom_headers don't apply: Reddit fetches go
+            # through ``reddit_client``'s own shared clients.
+            if reddit_client.is_disabled():
+                return SourceTestResult(
+                    resolved_url=resolved_url,
+                    ok=False,
+                    error_kind="unsupported_type",
+                    error="Reddit isn't available on this server.",
+                )
+            sub = normalize_subreddit(url)
+            try:
+                items = await reddit_client.fetch_subreddit(sub, limit=25)
+            except reddit_client.RedditFetchThrottled as exc:
+                # Caught here, before the generic ``except Exception``
+                # below would call a 429 a parse error.
+                return SourceTestResult(
+                    resolved_url=resolved_url,
+                    ok=False,
+                    status_code=exc.status,
+                    error_kind="network_error",
+                    error=f"Reddit is busy (HTTP {exc.status}). Try again in a minute.",
+                )
+            if not items:
+                # ``fetch_subreddit`` turns HTTP errors (403 for a
+                # private or banned sub, 404) and unparseable bodies
+                # into ``[]``, so an empty listing is the only signal
+                # it gives for all of them.
+                return SourceTestResult(
+                    resolved_url=resolved_url,
+                    ok=False,
+                    error_kind="not_found",
+                    error=f"r/{sub} returned no posts.",
+                )
     except httpx.TimeoutException as exc:
         return SourceTestResult(
             resolved_url=resolved_url,

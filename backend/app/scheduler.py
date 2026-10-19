@@ -72,6 +72,17 @@ logger = logging.getLogger("popping.scheduler")
 
 _scheduler: AsyncIOScheduler | None = None
 
+# Scheduler-wide job defaults (see ``start_scheduler``). 120 s of
+# misfire grace lets a run that starts late still run. With
+# ``coalesce`` and every job's ``max_instances=1``, a grace longer
+# than a job's interval (feeds can poll every 60 s) still never stacks
+# runs: the missed fire times collapse into the one late run.
+_JOB_DEFAULTS: dict[str, Any] = {"misfire_grace_time": 120, "coalesce": True}
+
+# ``brief:daily`` fires once a day, so it can afford to run up to an
+# hour late rather than miss the day entirely.
+_BRIEF_DAILY_MISFIRE_GRACE_SECONDS = 3600
+
 # Sentinel for ``update_source``'s ``custom_headers`` parameter:
 # ``None`` is a meaningful value ("set the column to NULL / clear the
 # override") so we need a separate marker for "field absent from the
@@ -1792,7 +1803,16 @@ async def start_scheduler(notifier: Optional[Notifier] = None) -> AsyncIOSchedul
     # can fire notifications without going through request_state.
     _brief_generator = BriefGenerator(notifier)
 
-    _scheduler = AsyncIOScheduler(timezone="UTC")
+    # Job defaults apply to every job this scheduler ever holds,
+    # including the dynamic per-row ingest jobs added later by
+    # ``add_source``/``update_source``. No ``add_job`` call sets its
+    # own grace, so without ``misfire_grace_time`` here every job
+    # kept APScheduler's 1 s default: a run that started more than a
+    # second late (event loop busy serving the API, or a long ingest
+    # still finishing) was silently skipped until the next interval.
+    # ``coalesce`` folds several missed runs into one; jobs that pass
+    # their own ``coalesce`` keep it.
+    _scheduler = AsyncIOScheduler(timezone="UTC", job_defaults=_JOB_DEFAULTS)
     plugins = list_sources()
     logger.info("scheduler: discovered %d source plugin(s): %s", len(plugins), ", ".join(plugins))
 
@@ -1887,7 +1907,11 @@ async def start_scheduler(notifier: Optional[Notifier] = None) -> AsyncIOSchedul
     # Phase 4: scheduled daily Brief at BRIEF_SCHEDULE_HOUR UTC. Set
     # to -1 to disable (manual only). Fires once on startup too if the
     # scheduled hour matches — keeps the dashboard non-empty after a
-    # restart mid-day.
+    # restart mid-day. A once-a-day job gets a much longer grace than
+    # the default: a run held up by a busy loop should still send that
+    # day's brief, not skip to tomorrow. (The job store is in memory,
+    # so a restart that lands after the hour still waits for the next
+    # day; the grace covers only lateness within one process.)
     if settings.brief_schedule_hour >= 0:
         _scheduler.add_job(
             _daily_brief,
@@ -1897,6 +1921,7 @@ async def start_scheduler(notifier: Optional[Notifier] = None) -> AsyncIOSchedul
             replace_existing=True,
             max_instances=1,
             coalesce=True,
+            misfire_grace_time=_BRIEF_DAILY_MISFIRE_GRACE_SECONDS,
         )
 
     # Phase 4: periodic convergence check + alert Brief. Runs every
