@@ -140,7 +140,19 @@ async def _extract_one(url: str, custom_headers: dict | None = None) -> dict | N
     try:
         import trafilatura
 
-        doc = trafilatura.bare_extraction(html, url=url, with_metadata=True, favor_recall=True)
+        # Parsing a page is CPU-bound and synchronous, and a poll
+        # extracts up to ``_MAX_NEW_PER_POLL`` pages. Run on the event
+        # loop, it stalled every API request and scheduler job for the
+        # length of each parse. Run it in asyncio's default thread
+        # pool instead, the same way ``feed_autodiscovery`` runs
+        # ``determine_feed``.
+        doc = await asyncio.to_thread(
+            trafilatura.bare_extraction,
+            html,
+            url=url,
+            with_metadata=True,
+            favor_recall=True,
+        )
     except Exception:  # noqa: BLE001 - a single page's extraction failing shouldn't sink the whole poll
         logger.debug("generic_scrape: %s: extraction raised", url)
         return None
