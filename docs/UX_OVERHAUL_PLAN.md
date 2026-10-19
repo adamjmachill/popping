@@ -204,22 +204,39 @@ D19. **Deferred** (each needs your yes later):
 - the vocabulary guard test.
 
 
-## The PRs (provisional split; the revised spec finalises it)
+## The PRs (from the re-verified spec in the appendix)
 
 | PR | What you'll notice on the phone | Migration |
 |---|---|---|
-| PR0 | #25 merged (feed names). It's your other session's PR; I don't touch or merge it | 0030 |
-| PR1 | Opening marks read; your tab stays put; Sort works; Mark all read in ⋯; Earlier folded; Reset keeps saves; Brief says it needs AI; History works; subreddit Test works; vote/save signal fixes | no |
-| PR2 | Devices stay in sync; pull to refresh checks the tab's feeds; fewer toasts | no |
-| PR3 | Seen = used up: scroll past it and it's done; "You're all caught up"; tab number = unseen; batch loading | no |
-| PR4 | Tabs hold the last 2 days; new feeds bring 10 stories, not a backlog; Saved lists every save; On This Day tamed | no |
-| PR5 | Reddit-style cards: ▲ ▼ Save Share ⋯; Hide; hide a feed's stories | no |
-| PR6 | Your tab order and hidden tabs | no |
-| PR7 | Saved views become your own tabs | no |
-| PR8 | Every feed shows whether it's pulling, with one-tap fixes | 0031 |
-| PR9 | Website feeds pull articles only | no |
-| PR10 | One Add field with a real preview and a confirmed first check | no |
-| PR11 | Menu of tasks; Settings in 4 tabs; same words everywhere | no |
+| PR1 | Saving never jumps tabs; a new phone opens on For You; Newest / Best works; tap the current tab to scroll to the top; Reset keeps saves; Brief says when it needs AI | no |
+| PR2 | Saves, hides and reads made on one device never undo another's | no |
+| PR3 | Open or scroll past a story and it's used up; each tab ends in "You're all caught up", then "Earlier (N)"; badges count new stories; long tabs load as you scroll | no |
+| PR4 | Tabs show the last 2 days; a new feed adds 10 stories, not its backlog; On this day gets its own tab; Saved shows every save; paused feeds leave the tabs | no |
+| PR5 | Cards look like Reddit posts: ▲ ▼ Save Share ⋯; swipe left hides; hide every story from one feed | no |
+| PR6 | Pull down to refresh: "Checking 6 feeds…", then "3 new"; a slimmer header | no |
+| PR7 | Your tab order and hidden tabs; Saved and For You always there; every tab's ⋯ is one sheet | no |
+| PR8 | Saved views become your own tabs, with their feeds listed under the header | no |
+| PR9 | Every feed shows whether it's pulling, and each problem has one fix | 0031 |
+| PR10 | Website feeds pull articles, not About, tag or shop pages | no |
+| PR11 | One Add field with a real preview, and the first check's result | no |
+| PR12 | A Menu of tasks and Settings in 4 tabs | no |
+| PR13 | Deferred items, each needing a fresh yes (D19) | maybe |
+
+**Calls the spec makes (each can be vetoed):**
+- **C1:** After 10+ minutes away, tabs re-sort (new stories first) and scroll to the top. Under
+  10 minutes nothing moves, so you return to the same spot after reading an article.
+- **C2:** On desktop a story is used up only when opened or via Mark all, because several columns
+  scroll at once there.
+- **C3:** Tapping the current tab while already at the top refreshes it, like Reddit's Home tab.
+- **C4:** The tab's ⋯ has a Refresh row, so there's a non-gesture way to refresh (VoiceOver,
+  Switch Control).
+- **C5:** Settings → Downvoted and "Hide all downvoted" are removed, since ▼ no longer means hide.
+- **C6:** On desktop, `a` / `z` upvote and downvote (the Reddit Enhancement Suite keys).
+- **C7:** The built-in feeds stay. Until you add a feed of your own, For You starts with an
+  "Add your first feed" row.
+- **C8:** Under a caught-up tab's marker, one row opens the next tab that has new stories
+  ("News · 12"). When every tab is at 0 the row is absent, so the end of the last tab is the end
+  of the app.
 
 ## How I'll work
 
@@ -227,10 +244,8 @@ D19. **Deferred** (each needs your yes later):
   - Commit this plan as `docs/UX_OVERHAUL_PLAN.md` on branch `claude/ux-overhaul-plan` and open it
     as a draft PR.
   - Scan the text for personal details first (names, emails, hosts, IPs) and leave them out.
-  - Before PR1: revise the appendix to D1–D19 and re-verify it against the code (paused to save
-    tokens).
-- **Before PR1:** check that #25 is merged. If it's still open, I branch from its head and rebase
-  once it merges. I never push to #25 or merge it.
+  - Done: the appendix is revised to D1–D19 and re-verified against main 4be8766.
+- **Before PR1:** #25 is merged, so main 4be8766 is the base.
 - **Each PR:**
   - Branch from up-to-date main, and stack the next PR while CI runs.
   - Implement the spec.
@@ -272,958 +287,1163 @@ D19. **Deferred** (each needs your yes later):
 
 ---
 
-# Appendix: implementation spec, first verified draft
+# Appendix: implementation spec (re-verified, Reddit-replacement revision)
 
-> **Read this first.** This spec was verified against the code *before* your note about Reddit and
-> the real end. Where it conflicts with decisions D1–D19 above, **the decisions win**:
-> - Reddit-style ▲ ▼ Save Share ⋯ instead of Save / Read / Not interested.
-> - Seen-on-scroll and "You're all caught up" instead of a Read button.
-> - No tip card, help sheet, "Show older" row or per-feed floor.
-> - Pull to refresh.
->
-> **First job when work resumes:** revise this appendix to match D1–D19 and re-verify it against the
-> code before PR1 starts. The revision was paused to save tokens. Line anchors are against main a79c6ee
-> plus PR #25, which has since merged.
+> Written for D1–D19 and re-checked against main 4be8766 (which includes #25) by an architect, an
+> adversarial reviewer and a final revision pass. The decisions above still win if anything here
+> conflicts with them.
 
-**Base:** `main` at a79c6ee with PR #25 (`origin/claude/feed-display-names`, 355c596) merged.
+**Base:** `origin/main` 4be8766, which includes #25 (display names, migration 0030). Its `frontend/` and `backend/` trees are byte-identical to #25's branch (355c596). All line numbers below are `main` line numbers, and every anchor was re-checked against 4be8766.
 
-**Line numbers:** for every file #25 changes, line numbers come from #25's version. Read those with `git show origin/claude/feed-display-names:<path>`. The files are:
-- `App.tsx`, `Card.tsx`, `BriefCard.tsx`, `FeedManager.tsx`, `FeedEditor.tsx`
-- `api.ts`, `labels.ts`, `feedRules.ts`, `sourceSaves.ts`, `flows.cjs`
-- `routes/sources.py`, `models.py`, `schemas.py`
-
-All other files use `main` line numbers; #25 does not touch them.
+**Product principle:** Popping replaces Reddit. You bring your own sources, the UI works like Reddit, and there is a real end. The spec uses familiar conventions instead of explanations. When you have seen everything new, the app tells you so and there is nothing more to scroll.
 
 ## Summary
 
 | PR | What you'll notice on the phone | Size | Migration | Depends on |
 |---|---|---|---|---|
-| PR0 | Feeds keep the name you type (#25) | M | yes (0030) | none |
-| PR1 | Opening a story marks it read. Your tab stays put. Sort works. "Mark all read" button. Read (N) folded. Reset keeps your saves. Brief says when it needs AI | M | no | PR0 |
-| PR2 | One unread number per tab. Refresh checks the tab's feeds now. Stars and reads sync between devices. Fewer toasts. Long tabs open fast | M | no | PR1 |
-| PR3 | Tabs show the last 2 days. A new feed brings 10 stories, not its backlog. "On this day" gets its own small tab. Saved shows every save | L | no | PR2 |
-| PR4 | Card face: ☆ Save, ✓ Read, ⋯. Not interested; Hide stories from \<feed\>. First-run tip and "How Popping works" | M | no | PR1, PR2 |
-| PR5 | Your tab order and hidden tabs ("Edit" pill). Saved and For You always present | M | no | PR1, PR2, PR3 |
-| PR6 | Saved views become your own tabs, with their feeds listed under the header | L | no | PR3, PR4, PR5 |
-| PR7 | Every feed shows whether it is pulling, and each problem has a one-tap fix | L | yes (0031) | PR0, PR2, PR3, PR5, PR6 |
-| PR8 | Website feeds pull articles, not About, tag or shop pages | L | no | PR7 |
-| PR9 | One add field with a real preview. The first check's result is shown | L | no | PR5, PR7, PR8 |
-| PR10 | A menu of tasks. Settings in 4 tabs. The same words everywhere | M | no | PR4, PR6, PR7, PR9 |
-| PR11 | Deferred items, each needing a fresh owner yes (D17) | varies | maybe | as needed |
+| PR0 | Feeds keep the name you type (#25, merged) | M | 0030 (merged) | none |
+| PR1 | Saving never moves you to another tab. A new phone opens on For You. Newest / Best works. Tapping the current tab scrolls to the top. Reset keeps saves. Brief says when it needs AI | M | no | PR0 |
+| PR2 | Saves, hides and reads made on one device never undo another's | M | no | PR1 |
+| PR3 | Opening a story or scrolling past it uses it up. Each tab shows new stories, then "You're all caught up", then "Earlier (N)". Badges count new stories. Long tabs load as you scroll | L | no | PR1, PR2 |
+| PR4 | Tabs show the last 2 days. A new feed adds 10 stories, not its backlog. On this day gets its own tab. Saved shows every save. Paused feeds leave the tabs | L | no | PR2, PR3 |
+| PR5 | Cards look like Reddit posts: feed, time, title, then ▲ ▼ Save Share ⋯. Swipe left hides. You can hide every story from one feed | M | no | PR2, PR3 |
+| PR6 | Pull down to refresh: "Checking 6 feeds…", then "3 new" at the top. A slimmer header | M | no | PR1, PR3 |
+| PR7 | Your tab order and hidden tabs. Saved and For You are always there. Every tab's ⋯ is one sheet | M | no | PR1, PR3, PR4, PR5, PR6 |
+| PR8 | Saved views become your own tabs, with their feeds listed under the header | L | no | PR4, PR5, PR6, PR7 |
+| PR9 | Every feed shows whether it is pulling, and each problem has one fix | L | 0031 | PR0, PR4, PR6, PR7, PR8 |
+| PR10 | Website feeds pull articles, not About, tag or shop pages | L | no | PR9 |
+| PR11 | One add field with a real preview, and the first check's result | L | no | PR7, PR9, PR10 |
+| PR12 | A Menu of tasks and Settings in 4 tabs | M | no | PR5, PR8, PR9, PR11 |
+| PR13 | Deferred items, each needing a fresh yes (D19) | varies | maybe | as needed |
 
-**Ordering changes from the critique, and why:**
-1. D10 (Refresh queues feeds) moves to PR2. It needs no migration.
-2. "Brief needs an AI provider" and the Reset data-loss fix move to PR1. Both are small and fix real harm.
-3. The tip and "How Popping works" go in PR4, next to the card change they explain.
-4. PR5 depends on PR3: Saved can only be "always present" once it loads every save by id.
-5. The automatic browser identity runs in preview and add only (PR9), so 0031 has no `fetch_mode` column (owner call O1).
-6. Custom tabs use a new `custom_tabs` key. The critique's `pr_order` kept them in `filter_presets`; this deviation is owner call O3.
-7. The `per_source_cap` in PR3 is the critique's "fixed per-source cap, no UI".
-8. Column keys start in PR1, for tab selection only. Preference suffixes move to keys in PR6.
-9. Check now uses the scheduled job through `modify_job`.
-10. PR7 also depends on PR6, because FeedStatus appears in the tab sheet. `api.source(id)` lands in PR7.
-11. The Wikipedia On This Day fix goes in PR3. The error-to-action table and PATCH `type` go in PR7. "Find its feed" goes in PR9.
+**Order changes from the previous spec, and why:**
+1. **Delta sync ships alone, before seen-on-scroll (PR2).** While you scroll, seen marks arrive about once a second. Today's whole-list PUTs, and App's whole-list setters built from refs mirrored in effects, would drop them or undo them.
+2. **The read model is one PR (PR3).** Seen-on-scroll, open-marks-seen, the marker, Earlier, badges and auto-append all share one partition. ✓, swipe-right, `m`, the context-menu "Mark as read", the header tap and the chip all go in the same PR, so there is never a second way to mark something read.
+3. **The window (PR4) follows PR3,** so badges and Earlier count inside the window from the start.
+4. **The card (PR5) follows PR3.** By then ✓ is gone, so PR5 is only the Reddit layout, Hide, mute, Share and toast merging.
+5. **Pull-to-refresh pairs with Check now (PR6),** because it needs PR3's snapshot reset.
+6. **PR7 turns the tab ⋯ into a bottom sheet.** It matches the card's ⋯ (PR5) and sits within thumb reach.
 
-**Owner calls (this spec uses the defaults):**
-- **O1, feeds that later become blocked.**
-  - Default: a one-tap "Read as Safari" with Undo on the Needs-attention row (PR7, no migration).
-  - Alternative: an automatic fallback on scheduled fetches. That adds `fetch_mode` to 0031 and moves the adaptive fetch into PR7.
-- **O2, Wikipedia On This Day.**
-  - Default: 5 "selected" items a day, in its own tab (PR3).
-  - Alternative: keep it in News, at 5 a day.
-- **O3, custom tabs.** Default: a new `custom_tabs` key, leaving `filter_presets` untouched so a rollback keeps the old views.
+**Calls this spec makes (the owner can veto each):**
+- **C1, returning to the app.** After 10 minutes or more away, each tab re-sorts (new stories first) and scrolls to the top. Time away is measured with `Date.now`, because timers stop while iOS suspends the page. Under 10 minutes nothing moves, so you can read an article and come back to the same place.
+- **C2, desktop is open-only.** On desktop a story is used up when you open it or use Mark all. Several columns scroll together there, so scrolling past one doesn't mean you read it.
+- **C3, tab tap refreshes.** Tapping the current tab while already at the top refreshes it, as Reddit's Home tab does.
+- **C4, a Refresh row in the tab ⋯.** It is the path for VoiceOver and Switch Control once the phone header loses Refresh.
+- **C5, the Downvoted list is removed.** Settings → Downvoted and "Hide all downvoted" go, because ▼ no longer means hide.
+- **C6, desktop vote keys.** Desktop gets `a` / `z` for ▲ / ▼ (the Reddit Enhancement Suite keys).
+- **C7, built-in feeds.** The built-ins (BBC News, HN, NVD, CISA KEV, GitHub releases, RFD, On this day) stay in the tabs. Until you add a feed of your own, For You starts with a 44px "Add your first feed" row. The alternative is for a new install to start with the built-ins in `muted_sources`.
+- **C8, the next tab.** Under a caught-up tab's marker, one 44px row names the next tab that has new stories ("News · 12") and opens it. When every tab is at 0 the row is absent, so the end of the last tab is the end of the app.
 
 ## Target tap counts
 
 | Task | Today | After (PR) |
 |---|---|---|
-| Read a story so it counts as read | 2 (open, ✓) | 1 (open) (PR1) |
-| Clear a tab | 1 unlabelled header tap | 1 labelled "Mark all read" (PR1) |
-| Not interested | 1 (👁 or ▼; they differ) | 1 swipe, or 2 (⋯ → Not interested) (PR4) |
-| More like this | 1 (▲) | 2 (⋯ → More like this) (PR4) |
-| Hide every story from one feed | not possible | 2 (⋯ → Hide stories from X) (PR4) |
-| Move a tab one place earlier | not possible | 3 (Edit, ↑, Done) (PR5) |
-| Hide a tab | not possible | 3 (Edit, switch, Done) (PR5) |
-| Make a tab of 3 feeds | 7 + typing + scrolling | 6 + typing (Edit, New tab, 3 ticks, Done) (PR6) |
-| Add a feed to a custom tab | 5 | 3 (Edit on the "From" line, tick, Done) (PR6) |
-| See which feeds a custom tab holds | not shown | 0 ("From: A, B, C" line) (PR6) |
-| Check a tab's feeds now | not possible | 1 (Refresh) (PR2) |
-| Is a feed pulling? | ~5 + a filter | 2 (≡, Settings: a pill on every row) (PR7) |
-| Fix a feed a site now blocks | ~6 (≡, Settings, row, Advanced, browser identity, Check now) | 3 (≡, Settings, Read as Safari) (PR7) |
-| Point a web-page feed at its real feed | not possible (delete and re-add) | 3 (≡, Settings, Find its feed) (PR9) |
-| Find one feed | scroll an unsorted list | 3 (≡, Settings, type) (PR7) |
-| Add a feed and know it pulls | 6, plus ~4 to verify | 5 (≡, Add feed, paste, Preview, Add); result shown (PR9) |
-| Show a tab's older stories | 3 (24 h at most) | 1 ("Show older") (PR3) |
-| Restore a hidden story | 4 | 1 (Undo) or 3 (≡, Activity, Restore) (PR10) |
-| Learn the card actions | not possible | 0 (tip) or 2 (≡, How Popping works) (PR4) |
+| Use up a story | 2 (open, ✓) | 1 (open) or 0 (scroll past) (PR3) |
+| Know you've seen everything new | not possible | 0: "You're all caught up" (PR3) |
+| Go to the next tab with new stories | scroll the tab strip, check badges | 1 (C8) (PR3) |
+| Clear a tab | 1 unlabelled header tap | 0 (scroll to the end) or 2 (⋯, Mark all as read) (PR3) |
+| Upvote / downvote | 1 | 1 (PR5) |
+| Hide a story | 1 (eye button; ▼ does something else) | 1 swipe, or 2 (⋯, Hide) (PR5) |
+| Save | 1 | 1 (PR5) |
+| Share a story | 3+ (system long-press menu) | 1 (Share) (PR5) |
+| Hide every story from one feed | not possible | 2 (⋯, Hide stories from X) (PR5) |
+| Check a tab's feeds now | not possible | 1 pull (PR6) |
+| See a tab's older stories | 3 (24 h at most) | 3 (⋯, 7 days, close) (PR4) |
+| Move a tab one place earlier | not possible | 3 (Edit, ↑, Done) (PR7) |
+| Hide a tab | not possible | 3 (Edit, switch, Done) (PR7) |
+| Make a tab of 3 feeds | 7 + typing + scrolling | 6 + typing (PR8) |
+| Add a feed to a custom tab | 5 | 3 (Edit on the "From" line, tick, Done) (PR8) |
+| See which feeds a custom tab holds | not shown | 0 (PR8) |
+| Is a feed pulling? | ~5 + a filter | 2 (≡, Settings: a pill on every row) (PR9) |
+| Fix a feed a site now blocks | ~6 | 3 (≡, Settings, Read as Safari) (PR9) |
+| Find one feed | scroll an unsorted list | 3 (≡, Settings, type) (PR9) |
+| Point a web-page feed at its real feed | delete and re-add | 3 (PR11) |
+| Add a feed and know it pulls | 6, plus ~4 to verify | 5, with the result shown (PR11) |
+| Restore a hidden story | 4 | 1 (Undo) or 3 (≡, Activity, Restore) (PR12) |
 
-**Rules for every PR:**
-- **Frozen infrastructure.** No new ports, containers, daemons, workers or service workers. Never edit Docker/compose, nginx, `package.json`/lockfile, `config.py`, `main.py` or `url_safety.py`.
-- **New routes** go on existing routers:
-  - Sources routes use `dependencies=_write_deps`.
-  - Preferences routes follow that router's `current_user` + `resolve_user_id` pattern.
-  - OIDC gating is applied per router (`main.py:290-304`), so `test_oidc_route_gating.py` covers new routes.
-- **Tunables:**
-  - Read them with `runtime_settings.get_many([...])`, once per call site. Parse to int and clamp, copying `brief._resolve_window_hours` (`brief.py:321-339`).
-  - Keys that are not in `_SETTINGS_FIELDS` fall through to the default, so `config.py` is never touched.
-  - A missing key is not cached, so each call costs one query (`runtime_settings.py:214-241`).
-  - A changed row takes up to 1 h to apply (cache TTL 3600 s, `:52`) unless it is written through `runtime_settings.set`. Document this in `ARCHITECTURE.md`.
-- **Pure libraries** in `frontend/src/lib/*.ts` stay import-free, so `node --experimental-strip-types --test` can load them.
-- **Flows:**
-  - `flows.cjs` gets `tap(page, locator)` and `taps(page, max, id)`.
-  - Any flow that taps a headline stubs `window.open`.
-  - Flows that use Share stub `navigator.share`.
-  - Each PR names the existing flows and smoke states it rewrites, so CI (`.github/workflows/build.yml`) is green at every PR.
-- **Smoke:**
-  - New sheets join `C12_ROOTS` (`smoke.cjs:68`).
-  - Rows added to a column (tip, Show more, Show older, From) are never `<section>`: the `dashboard` state asserts one `main section` (`smoke.cjs:153`).
-- **Sheets:**
-  - `role="dialog"`, `aria-modal`, and the focus trap and inert pattern from `Drawer.tsx:122-242`.
-  - Bottom `env(safe-area-inset-bottom)` padding and 44px rows.
-  - Inputs are 17px `type="text"` with an `inputMode` (C15). URL fields add `autoCapitalize="none" autoCorrect="off"`.
-- **Documentation:** each PR updates a root `UX_OVERHAUL.md` (changes, decisions, tap counts). It also updates `ARCHITECTURE.md` for new process-local state, and `frontend/scripts/iphone-audit/README.md` for new flows and states.
-- **Screenshots:** `node scripts/iphone-audit/smoke.cjs <base> --out <dir> --only <state>`. After each deploy, the owner checks on the iPhone home-screen app.
+## Rules for every PR
+
+**Frozen infrastructure**
+- No new ports, containers, daemons, background processes, workers or service workers. Never edit Docker/compose, nginx, `package.json`/lockfile, `config.py`, `main.py` or `url_safety.py`.
+- IntersectionObserver and touch listeners run on the main thread, with no library.
+
+**Routes and tunables**
+- New routes go on existing routers. Sources routes use `_write_deps`. Preferences routes use `current_user` + `resolve_user_id`.
+- OIDC gating is per router (`main.py:290-304`).
+- Tunables are read with `runtime_settings.get_many`, then parsed and clamped as in `brief._resolve_window_hours` (`brief.py:321-339`). A missing key falls through to the default and is not cached (`runtime_settings.py:214-241`). A changed row can take up to 1 h to apply (`:52`).
+
+**Libraries**
+- Pure libraries in `frontend/src/lib/*.ts` stay import-free for `node --experimental-strip-types --test` (build.yml:127). The new ones are `sorting`, `columns`, `prefSync`, `seen`, `feedOrder`, `pull` and `window`. Two existing ones are extended: `categories` and `settingsTabs`.
+- Unit tests live in `frontend/scripts/unit/`.
+- React glue lives in `lib/use*.ts`.
+
+**Timers, not clocks**
+- Smoke freezes `Date.now` with `context.clock.setFixedTime` but keeps timers running (`smoke.cjs:934`). Dwell and pull timing therefore use `setTimeout` and event deltas. The one exception is C1's time away, which is tested with `page.clock.setFixedTime(F.NOW + 11 min)` while the page is hidden.
+
+**Flows**
+- PR1 adds `tap(page, locator)` and `taps(page, max, id)` to `flows.cjs`. Neither exists today.
+- Stub `window.open`, `navigator.share` and the clipboard.
+- Gestures use CDP `Input.dispatchTouchEvent` on Chromium. They return early when `page.context().browser().browserType().name() !== 'chromium'`, because the WebKit run is report-only (`build.yml:146-148`).
+- Desktop flows use `widths: [1280]` and `wait: 'main.grid article[data-card-id]'`. Without that, `runState` waits for a phone card inside the hidden `main.md:hidden` (`smoke.cjs:87, 987`). PR3 adds `1280: {width: 1280, height: 800, deviceScaleFactor: 1}` to `WIDTHS`, but not to `DEFAULT_WIDTHS`.
+- Each PR names the flows and states it rewrites.
+
+**Smoke**
+- New sheets join `C12_ROOTS` (`smoke.cjs:68`).
+- Rows added inside a Column are never `<section>`, because `dashboard` asserts exactly one `main section` (`smoke.cjs:153`).
+- Nothing keeps `[role="status"]` mounted while idle. Smoke waits up to 8 s for none before every state (`smoke.cjs:990`), and C7 measures buttons inside it (`:667`).
+- From PR2, `capture.cjs` keeps an in-memory preference store. Today's mock echoes `body.value` for every method (`capture.cjs:182-186`), so a PATCH would get `null` back.
+
+**Sheets**
+- `role="dialog"`, `aria-modal`, and the focus trap and inert pattern from `Drawer.tsx:122-242`.
+- Safe-area bottom padding and 44px rows.
+- Inputs are 17px `type="text"` with an `inputMode`. URL fields also get `autoCapitalize="none" autoCorrect="off"`.
+
+**Copy**
+- Use stories, feeds, tabs and Saved.
+- No sentence that explains a convention.
+- An error is one short sentence and one fix.
+
+**Docs and screenshots**
+- Update `UX_OVERHAUL.md`, `ARCHITECTURE.md` (new process-local state) and `scripts/iphone-audit/README.md` (new flows and states).
+- Take screenshots with `smoke.cjs --only <state>`. The owner checks the iPhone home-screen app after each deploy.
 
 ---
 
-## PR0: Merge #25 (display names, migration 0030)
+## PR0: Merge #25 (merged)
 
-**What you'll notice:** feeds show the name you typed.
+**Already on `main`:**
+- `labels.ts` `sourceLabel` / `rememberDisplayNames`, and `useSourceLabels.ts`.
+- `feedRules.ts` `uniqueSlug` / `cleanDisplayName`.
+- The FeedEditor Name field.
+- The flow `flow-fl-rename-keeps-filter-and-view`.
+- Migration `0030_source_display_name.py`.
 
-**Changes:** merge #25 as it is. Later PRs build on:
-- `labels.ts` `sourceLabel` / `rememberDisplayNames`, and `useSourceLabels.ts`
-- `feedRules.ts` `uniqueSlug` / `cleanDisplayName`
-- `sourceSaves.ts` `Field 'display_name'`
-- the FeedEditor Name field
-- flow `flow-fl-rename-keeps-filter-and-view`
-
-**Migration:** `0030_source_display_name.py` (down_revision 0029). It adds a nullable column, so Postgres changes metadata only.
-
-**Verification:** `alembic heads` shows exactly `0030`; CI is green.
-
-**Risk:** low. Rollback is `alembic downgrade 0029`; the names people typed are lost.
+**Rollback:** `alembic downgrade 0029`. The names people typed are lost.
 
 ---
 
-## PR1: Reading, sorting and tabs behave
+## PR1: Tabs and sorting behave
 
 **What you'll notice:**
-- Tapping a headline marks the story read; the card stays where it was, dimmed.
-- Starring never moves you to another tab, and a new phone opens on For You.
-- Newest | Best really reorders the tab.
-- A visible "Mark all read" button; read stories fold into "Read (N)".
-- Reset keeps saved stories, hidden stories and saved views.
-- Brief says "needs an AI provider" when none is set up.
+- Saving never moves you to another tab, and a new phone opens on For You.
+- Newest | Best really reorders a tab.
+- Tapping the current tab scrolls it to the top.
+- Reset keeps saved and hidden stories and saved views.
+- Brief shows "Brief needs an AI provider · Set up" when no provider is set.
 
-**Complaints:** "multi tapping", "upvote, downvote, star, read … all confusing", "Nothing is quick".
+**Complaints:** "multi tapping", "Nothing is quick".
 
 ### Changes
 
 **`lib/columns.ts` (new):**
-- Keys `meta:brief`, `meta:saved`, `meta:foryou`, `meta:search`, `meta:filter` (removed in PR6) and `cat:<name>`, plus `colKey` / `parseColKey`.
-- `resolveTab(tabs: {key, count}[], wanted, lastIndex) → {index, key}`:
+- Keys: `meta:brief`, `meta:saved`, `meta:foryou`, `meta:search`, `meta:filter` (removed in PR8) and `cat:<name>`, plus `colKey` / `parseColKey`.
+- `resolveTab(tabs, wanted, lastIndex)`:
   - If the wanted key exists, use it.
-  - If it is missing, show the neighbour at `lastIndex` but keep the stored key, so the tab returns when its column does.
-  - If nothing is stored, pick the first tab that is not Brief and not empty, preferring For You. A fresh device then never lands on an empty Saved tab or on Brief. smoke.cjs waits for a phone card in every state (`:75`, `:87`).
+  - If it is missing, show the neighbour at `lastIndex` but keep the stored key.
+  - If nothing is stored, pick the first tab that is not Brief and not empty, preferring For You.
 
 **`lib/sorting.ts` (new):**
 - `entryTime = published_at ?? fetched_at`.
 - `byNewest`: dated before undated, then by id.
 - `byBest`: `composite_score` descending, then `byNewest`.
-- `normalizeSort`: `top`, `oldest` and unknown values become `newest`.
+- `normalizeSort`: `top`, `oldest` and unknown values become `newest`. Today `top` has no visible effect, because both sections re-sort newest-first (App.tsx:1196-1197).
 
-**`storage.ts`:** add `mobileTab`. The old `mobileColLast` is read once to migrate, then removed.
+**`storage.ts`:** add `mobileTab`. `mobileColLast` is read once, to migrate.
 
 **`App.tsx`:**
-- Columns gain a `key` (977-992, 1028-1042).
-- Replace `mobileCol` (557), `loadMobileCol` (147-157), `followTabRef` (561, 1547-1550, 2231-2234), `mobileColRef` and the clamp effect (1533-1564) with `mobileTab`.
-  - It is written only by `selectTab(key)` (a `useCallback`) and by `jumpToCategory`.
-  - Nothing resolves while `prefs.loading`.
-  - A stored index migrates to `columns[i].key`; −1 becomes `meta:brief`.
-- Tapping the active tab scrolls it to the top. The phone column becomes `<Column key={tabKey}>` (3088).
-- `markReadOnOpen(col, id)` calls `markEntryRead` and adds the id to `stickyRead`. Single ✓ and swipe-right add to it too.
-  - `stickyRead` clears on tab change and on manual refresh.
-  - On desktop it also clears when the app returns after 5 minutes or more hidden.
-- `toggleEntryRead` drops its Undo toast.
-- `sectionsByColumn` (1162-1201) becomes a stable partition: unread or sticky goes to `new`. Delete `fresh.sort` / `past.sort`.
-- The `columns` memo (1049-1078) sorts once with `normalizeSort`. For You defaults to `best`. **Saved is never sorted**, so its save order holds in PR3. The age filter uses `entryTime`; `minScore` is ignored.
-- History sections default to collapsed (2434-2449).
-- Wire `onOpenEntry` into the phone Column, the desktop grid, the desktop For You cards and `<SearchResults>`.
-- Keyboard `b` records `bookmark` only when it stars.
-- **`resetLocalState` (1328, keys 1357-1359):**
+- Columns gain `key` (977-992, 1028-1042).
+- `mobileTab` replaces `mobileCol` (557), `loadMobileCol` (147-157), `followTabRef` (561, 1546-1552, 2233-2235) and the clamp effect (1553-1564).
+  - Only `selectTab(key)` (a `useCallback`) and `jumpToCategory` write it.
+  - Nothing resolves until `prefs.loading` is false **and** the first refresh has produced columns (`columns.length > 0`). Otherwise a stored index would migrate against an empty list and overwrite the saved tab.
+  - A stored index migrates to `columns[i].key`, and −1 becomes `meta:brief`.
+- The phone Column becomes `<Column key={tabKey} scrollerRef={phoneScrollerRef}>` (3088).
+  - Pass a ref object, not an arrow. slice19's `<Column\b[^>]*>` regex (`test_frontend_slice19_empty_column_source_status.py:136`) stops at the first `>`, so an arrow before `sourcesByName=` fails it.
+  - Column marks its list (Column.tsx:493) `data-scroller`. That list is the phone's real scroller. The App wrapper at 3077 only scrolls the Brief tab, because the Column `<section>` is `h-full`.
+  - Tapping the active tab scrolls the list to the top (instantly under reduced motion).
+- The `columns` memo (1049-1073) sorts once with `normalizeSort`.
+  - For You defaults to Best. Saved is never sorted.
+  - `minScore` is ignored. The age filter is unchanged until PR4.
+- In `sectionsByColumn` (1162-1201), delete `fresh.sort` / `past.sort` (1196-1197).
+- Keyboard `b` (2040-2067) records `bookmark` only when it saves.
+- **`resetLocalState` (1328-1393, keys 1356-1361):**
   - Stop deleting `starred_entries`, `hidden_entries` and `filter_presets`.
-  - Delete only `read_entries`, `last_viewed`, `column_prefs` and `column_sections` rows, plus `history_group_by`.
-  - Update the copy at `Settings.tsx:489-498`.
+  - Delete the `read_entries`, `last_viewed`, `column_prefs` and `column_sections` rows, plus `history_group_by`.
+  - Update the copy at `Settings.tsx:486-498`.
+- The App `<header>` (2568) gets `data-app-header`.
 
-**`preferences.tsx`:**
-- `ColumnPrefsValue.sort` (97) gains `'best'`.
-- Pending writes also flush with keepalive on `visibilitychange: hidden` (today only `pagehide` / `beforeunload`, 555-586). In the home-screen app, opening a story usually fires only `visibilitychange`.
+**`preferences.tsx`:** `ColumnPrefsValue.sort` (97) gains `'best'`.
 
 **`Column.tsx`:**
-- The header (316) stays a `<header>`, but `role`, `tabIndex`, the handlers (279-303) and `title` go.
-- A 44px "Mark all read" button (`aria-label="mark all read in <label>"`) sits before ⋯ and is repeated as the first popover row.
-- Sort becomes a Newest | Best segmented control; the Minimum score slider goes.
-- "Fresh" becomes "Unread" and "History" becomes "Read (N)".
-- `ColumnSection` gets `onOpenEntry` and `stickyRead`.
+- Sort becomes a 44px Newest | Best segmented control.
+- The Minimum score slider (434-461) goes.
 
-**`Card.tsx`:**
-- Thumbnail is its own component (1738): pass `onActivate` in as a prop.
-- `commitMarkRead` sends dwell in seconds (cap 300).
-- ☆ (~1430) and the menu's Save (~784) record `bookmark` only when the story was not starred.
+**`Card.tsx`:** ☆ (1416-1439) and the menu's Save (778-788) record `bookmark` only when the story was not already saved.
 
-**`BriefCard.tsx`:** calls `api.llmStatus()` once. When no provider is set up:
-- Every Generate button (540, 588, ~649) and the header Brief button (`App.tsx` 2690) become a 44px "Brief needs an AI provider · Set up", which calls `onOpenSettings('llm')`.
-- `Settings.tsx:411` already disables its button; it gains the same hint line.
-
-**`smoke.cjs`:** the App header gets `data-app-header`. The `dashboard` check (145-149) reads `header[data-app-header] button`, because a Column title row is also a `<header>`.
+**`BriefCard.tsx`:**
+- Gains an `onOpenSettings` prop (Props 19-40, signature 327), wired at both sites (App.tsx:2759, 3079).
+- Calls `api.llmStatus()` once.
+- With no provider, all four generate buttons (537, 587, 649, 725) and the header Brief button (App.tsx:2690-2697) become a 44px "Brief needs an AI provider · Set up" that calls `onOpenSettings('llm')`.
+- `Settings.tsx:405-412` already sits on the AI tab and disables itself, so it is unchanged.
 
 ### Backend
-- **`interactions.py:272-273`:** delete `type_list.append("dwell")`, which empties History today.
-  - With no `types`, the default excludes both `dwell` and `view`, so the on-mount `view` events (`Card.tsx` 499-506) do not flood History.
-  - An explicit `types` value is honoured.
-- **`sources.py:1152-1154`:** the Reddit Test branch uses `reddit_client.fetch_subreddit(…, limit=25)`.
-  - Reddit disabled → `unsupported_type`; throttled → `network_error`; empty listing → `not_found`.
+- **`interactions.py:272-273`:** delete `type_list.append("dwell")`, which empties History today. With no `types`, the default excludes `dwell` and `view`. PR3 makes views frequent.
+- **`sources.py:1152-1154`:** the Reddit Test uses `reddit_client.fetch_subreddit(…, limit=25)`.
+  - Reddit disabled → `unsupported_type`.
+  - Throttled → `network_error`.
+  - Empty listing → `not_found`.
+
+### Tests
+- **Unit:** `sorting.test.ts` and `columns.test.ts`. The columns test covers the neighbour fallback, index migration, no migration before the first refresh, and a fresh device skipping an empty Saved and Brief.
+- **pytest:** `test_interactions_history_types.py` (db) and `test_source_test_reddit.py` (no_db). slice19 keeps its literal and its `<Column` regex.
+- **Flows:**
+  - Stub `window.open` in all of them.
+  - `flow-tab-stays-on-star` (News, because the fixtures have no tech tab).
+  - `flow-sort-best`, `flow-tap-tab-scrolls-top`, `flow-brief-needs-ai` (all four buttons and the header Brief), and `flow-reset-keeps-saves` (no DELETE of starred, hidden or presets).
+  - FM stays green.
+- **Smoke:**
+  - `dashboard` reads `header[data-app-header] button` (smoke.cjs:145-149). Today the check passes only because For You hides its ⋯ (Column.tsx:385), and PR3 shows that ⋯.
+  - `column-popover`, plus a new `brief-needs-ai` state.
+
+### Risks and rollback
+- An old bundle reads `best` as oldest-first until the PWA reloads.
+- Revert is safe. The old build opens tab 0.
+
+---
+
+## PR2: Preferences sync by change, not by overwrite
+
+**What you'll notice:**
+- Something saved on the laptop shows as saved on the phone within a minute.
+- Two devices never undo each other's reads, saves or hides.
+- Leaving the app right after acting loses nothing.
+
+**Why first:** PR3 writes a seen mark about once a second. Today each write PUTs the whole list (`preferences.tsx:524-550`). App builds those lists from refs that are mirrored in effects (App.tsx:765-781), so two calls in one tick pass stale lists. A second device, or a suspended page, overwrites the result.
+
+### Backend (routes/preferences.py)
+
+**`PATCH /api/preferences/{key}`:**
+- **Allowed keys:** set keys only: `starred_entries`, `hidden_entries`, `read_entries:*` and `voted_entries`. `muted_sources` joins in PR5. Other keys return 400.
+- **Body:** `{add?: int[], remove?: int[]}`, or `{set?: {"<id>": "up" | "down" | null}}` for votes.
+- **One transaction:**
+  1. `INSERT … ON CONFLICT DO NOTHING`
+  2. `SELECT … FOR UPDATE`
+  3. apply the change
+  4. trim the oldest down to the cap
+  5. write `value` with `updated_at = func.now()`
+  6. return `UserPreferenceOut`
+- **Caps:** `read_entries:*` 1000, hidden 1000, starred 1000, voted 2000. They are pinned against `preferences.tsx`: `MAX_READ_PER_KEY` is new, and `MAX_HIDDEN`, `MAX_STARRED` and `MAX_VOTED` are at 792-797. The server trim is a backstop, because clients prune first (PR3).
+
+**`GET /api/preferences?since=<iso>`** (additive, 155) returns only rows with `updated_at > since`. Without `since` it returns every row, as today.
+
+### Frontend
+
+**`lib/prefSync.ts` (pure):**
+- `isSetKey`, `diffIds`, `foldDelta`, `applyIdDelta` and `applyVoteDelta`.
+- `mergeIncoming(prev, server, pending)` reuses references for unchanged keys, so a resync doesn't re-render every Column (`Column.tsx:890-915`).
+- `pruneIds(ids, keep, cap)` drops ids absent from `keep` first, then the oldest.
+
+**`preferences.tsx`:**
+- **New calls:** `addIds(key, ids)`, `removeIds(key, ids)` and `setVotes({[id]: 'up' | 'down' | null})`. Each uses a functional `setState` and queues its delta directly, so two calls in one tick both land.
+- **The whole-list setters for set keys go.** These handlers move to the new calls: `hideEntry`, `restoreHiddenEntry`, `toggleHideEntry`, `toggleStarEntry`, `markEntryRead`, `unmarkEntryRead`, `markColumnRead`, `setEntryVote`, `onHideAllDownvoted`, and every Undo.
+- **Caps leave App:** the App-side slices go (App.tsx:185, 1728, 1769, 1809, 1847, 2161, 3238), and so does `setReadEntries`'s 200 slice (598-602).
+- **Flush:** set keys go out as PATCH in a 1 s batch, and other keys as PUT in a 250 ms batch. Today `scheduleSync` (542-550) is a single fixed batch, not a debounce. Responses are adopted through `mergeIncoming`.
+- **Leaving:** `visibilitychange: hidden` joins `pagehide` / `beforeunload` (555-586) and sends the same requests with `keepalive`. In the home-screen app, opening a story fires only `visibilitychange`.
+- **`resync()`:**
+  - Each visible poll sends `GET ?since=` with the newest `updated_at` held. Resume sends a full GET, which is also how deletions arrive. Only one runs at a time.
+  - Queued deltas and in-flight ones (sent but not yet acknowledged) are re-applied on top.
+  - A GET sent before a key's latest PATCH was acknowledged is ignored for that key. This uses request sequence numbers, not clocks, and mirrors `sourceChangesRef` for feeds (App.tsx:1263-1276).
+- Old bundles keep using PUT, which is still accepted.
+
+**`api.ts`:** add `patchPreference`, and `preferences(since?)`.
+
+**`App.tsx`:** `refresh()` and the visibility handler call `prefs.resync()`.
+
+**`capture.cjs`:** a preference store that handles GET (with `since`), PUT, PATCH (applying deltas) and DELETE.
+
+### Tests
+- **Unit:** `prefSync.test.ts` covers:
+  - two adds in one tick
+  - add then remove
+  - two devices
+  - an in-flight delta surviving a stale GET
+  - reference identity
+  - caps, votes and prune order
+- **pytest:** `test_preferences_delta.py` (db) covers:
+  - two concurrent PATCHes both landing
+  - the cap holding
+  - non-set keys returning 400
+  - anonymous users
+  - suffixed `read_entries` keys
+  - `since`
+- **Flows:**
+  - `flow-prefs-resync`: a GET answered with the old set while a PATCH is in flight leaves the story hidden.
+  - `flow-visibility-flush`: a save, then hidden, then a keepalive PATCH within the 1 s batch.
+  - FL's `filter_presets` PUT (`flows.cjs:742`) stays a PUT.
+
+### Risks
+- A cached old bundle can still overwrite with a PUT until it reloads.
+- Revert is safe, because the route and parameter are additive.
+
+---
+
+## PR3: Seen means used up; a real end
+
+**What you'll notice:**
+- Opening a story or scrolling past it on the phone uses it up. Nothing moves or dims while you read.
+- Each tab shows new stories, then "You're all caught up", then "Earlier (N)" folded. A row under the marker opens the next tab that has new stories (C8).
+- Badges count new stories (99+). The "+N new" chip and ✓ are gone.
+- Long tabs load 30 at a time as you scroll.
+- ⋯ → Mark all as read.
+- On desktop the page scrolls as one, and opening a story uses it up (C2).
+
+**Complaints:** "the fresh vs not … confusing", "upvote, downvote, star, read … all confusing", "multi tapping".
+
+### Read model
+- **Seen** is the union of all `read_entries:*` rows (`globalReadIds`, App.tsx:1085-1091).
+- **Where marks go:** each mark is stored under the story's category (`read_entries:<category>`), wherever it happened. Old per-column rows still count.
+- **Writes:** `markSeen(ids)` collects ids for about 300 ms, then makes one `addIds` call per key. That is one render per batch, not one per card. A key over 1000 is pruned with `pruneIds`, which keeps every fetched id (entries, For You, Saved and wider-tab rows).
+- **Events:**
+  - Scroll-seen records `view` (`recordBatched`) at that moment.
+  - Delete the on-mount view (Card.tsx:499-506) and `mountTime` (387-390).
+  - Opening records `click`, as today.
+  - No `dwell` is sent.
+
+### Snapshot: `lib/feedOrder.ts` (pure)
+`partitionTab({entries, seen, sort, snapshot, hold}) → {unseen, earlier, snapshot}`:
+- **New snapshot:** unseen holds what isn't seen, in the tab's sort. Earlier holds what is seen, in the same sort.
+- **Ids in the snapshot keep their group and place,** even once they are seen.
+- **New arrivals** append to the end of unseen. They are held back while the marker is above the viewport, because Safari has no scroll anchoring.
+- **A story that a poll drops** stays, drawn from the cached Entry, until the next snapshot.
+- **Leave at once:** hidden stories, muted feeds (PR5) and deleted feeds.
+- **Unchanged ids return the previous arrays.**
+- **Resets:** switching tabs (both tabs), Refresh / `r`, Mark all as read, a Sort or window change on that tab, a feed edit on a custom tab (PR8), and returning after 10 min or more hidden (C1, which also scrolls to the top). Polls never reset it.
+
+### Seen tracking (phone only)
+**`lib/seen.ts` (pure, timers injected):**
+- **Qualifying:** a card qualifies after it has been at least half visible for 1 s straight (`intersectionRect.height ≥ 0.5 × min(card, root)`), so tall cards count.
+- **Seen:** a qualified card is seen when it leaves through the top (`!isIntersecting && boundingClientRect.bottom ≤ rootBounds.top`).
+  - The exit counts only when `target.isConnected`, `boundingClientRect.height > 0` and `rootBounds.height > 0`. A detached or `display:none` target reports all-zero rects, which would otherwise pass.
+  - Leaving through the bottom does not count.
+- **End rule:** once the marker has been half visible for 1 s, every qualified card on screen is seen. So is any card that qualifies while the marker stays visible.
+- **Pauses:** a dwell timer that fires while `document.hidden` is true, or while an `[aria-modal="true"]` sheet is open, restarts instead of qualifying the card.
+
+**`lib/useSeenObserver.ts`:**
+- **Runs only while `!isDesktop`.** The phone `<main>` stays mounted, hidden by CSS, at md and up (App.tsx:3000). Turning a large iPhone to landscape would otherwise zero every rect.
+- **One IntersectionObserver per root,** with thresholds 0, 0.1 … 1. The root is the Column list (`data-scroller`).
+- **Root changes:** the observer disconnects and clears its timers.
+- **Registration:** Column registers unseen cards from `setCardRef` (226-232), so Card's memo is untouched. Early registrations are queued.
+
+**Open only (no scroll tracking):** Saved, Brief, search results, and all of desktop (C2).
+
+**Opening:** these call `onOpenEntry`:
+- the headline (Card.tsx:931-938)
+- the Thumbnail (1738-1757, now given `onActivate`)
+- the Reddit-thread link (1019-1034)
+- Listen (1094-1103)
+
+### Column.tsx
+- **Header:** the label, ⋯, and "N new" on md+. Delete `role`, `tabIndex`, the handlers and `title` (279-325), the chip (338-371) and "X of Y" (372-377).
+- **List:**
+  - The first 30 unseen cards, then a `[data-more]` sentinel that adds 30 more. The sentinel is observed with the scroller as root and a 600px bottom `rootMargin`, because a margin on the viewport root doesn't reach past the list's clipped edge.
+  - Once all unseen cards have rendered, a `[data-caught-up]` row follows.
+    - It shows ✓ "You're all caught up" only when the tab's unseen count is 0. A card flung past never qualifies, so it can still be unseen.
+    - C8's next-tab row comes next, then a folded 44px `button[data-earlier][aria-expanded]` "Earlier (N)".
+    - None of these rows carry `role="status"`.
+  - Earlier renders dimmed cards, 30 at a time.
+  - Saved has no marker. An empty tab keeps `EmptyColumnMessage`.
+- **Keyboard:**
+  - The render limit includes `selectedId`'s position at render time.
+  - ↑/↓ walks unseen, then Earlier, opening it when reached.
+  - The card exists before App scrolls to it (2118-2122).
+- **⋯:** now shows on For You too (385). Its first row is "Mark all as read" (44px, disabled at 0).
+
+### Card.tsx
+- Remove:
+  - ✓ (1381-1411)
+  - swipe-right (reveal 864-873, `commitMarkRead` 546-555, clamp 654)
+  - the unread ring (838-842)
+  - the context-menu "Mark as read" (727-735)
+  - the `onMarkRead` prop
+- `unread` becomes `dimmed`.
+
+### App.tsx
+- **Delete:**
+  - `newCountByColumn` (1108-1125) and `unreadIdsByColumn` (1137-1147)
+  - `seenEntryIdsRef` / `hiddenAtRef` and their uses (828-830, 1244-1260, 1445, 1678-1682, 2163-2167)
+  - `HIDDEN_RESET_MS` (78) and `MAX_SEEN_ENTRY_IDS` / `capSetFIFO` (187-203)
+  - `toggleEntryRead` (1737-1757), the `m` key (2022-2032), and the `onMarkRead` wiring for search results (2790) and the desktop For You row (2896)
+  - `lastViewed` writes (2144). Reset still deletes old rows.
+  - section collapse (2411-2449)
+- **Badge** (3062-3070): the unseen count, `99+`, `aria-label="<tab>, N new"`. None on Saved or Brief.
+- **`markColumnRead`** (2131-2187) becomes Mark all. It resets the snapshot and shows "Marked N as read · Undo".
+- **Manual Refresh toast:** "N new" or "Nothing new", worked out from the ids held before the request (replaces 1284-1287).
+- **Desktop scroller:**
+  - Wrap BriefCard, the For You row, FramingWatch and the grid (2757-2990) in one `flex-1 min-h-0 overflow-y-auto` div marked `data-scroller`. The grid drops its own `flex-1 overflow-y-auto` (2937).
+  - Today the grid is a flex-1 scroll container whose automatic minimum height is 0. A For You row taller than the window squeezes the grid down to its 32px padding, and the document scrolls instead (2558, 2848).
+- **ShortcutsSheet:** drop the `m` row.
 
 ### Tests
 - **Unit:**
-  - `sorting.test.ts`.
-  - `columns.test.ts`: neighbour fallback, index migration, and a fresh device skipping empty Saved and Brief and preferring For You.
-- **pytest:**
-  - `test_interactions_history_types.py` (db): with no types, click, bookmark and never rows come back, with no view or dwell; `types=view` returns views.
-  - `test_source_test_reddit.py` (no_db).
-  - slice21: add `stickyRead` to the comparator props.
-  - slice19: keep the literal "no entries in this column yet".
-- **Flows** (stub `window.open`):
-  - `flow-open-marks-read`.
-  - `flow-tab-stays-on-star`: uses **News**, because the fixtures have no tech tab.
-  - `flow-sort-best`.
-  - `flow-mark-all-read-button`.
-  - `flow-brief-needs-ai`: every Generate button.
-  - `flow-reset-keeps-saves`: no DELETE of starred, hidden or presets.
-  - `flow-visibility-flush`: mark read, fire hidden, and a keepalive PUT goes out within the 250 ms debounce.
-  - FM stays green.
-- **Smoke:** `column-popover`, `brief-needs-ai`, and the 320px header (C11, C14).
-
-### Risks and rollback
-- Dwell sent in seconds shifts For You slightly; this is the unit fix the critique sanctioned.
-- An old bundle reads `best` as oldest-first (`App.tsx` 1058-1064) until the PWA reloads.
-- Revert is safe; the old build opens tab 0.
-
----
-
-## PR2: One number per tab; Refresh checks feeds; devices stay in sync
-
-**What you'll notice:**
-- Each tab shows its unread count (99+); "+N new" is gone.
-- Refresh says "Checking 6 feeds in News", then "News: 3 new stories".
-- Stars and reads made on the laptop appear on the phone.
-- A 100-story tab opens with 30 cards and a "Show 70 more" row.
-- Two quick hides give one "2 hidden · Undo".
-
-**Complaints:** "the fresh vs not … confusing", "try to refresh … to see if it … pulls", "Nothing is quick".
-
-### Changes
-
-**`App.tsx`:**
-- Delete:
-  - `newCountByColumn` (1108-1125)
-  - `seenEntryIdsRef` / `hiddenAtRef` (828-830, 1260, 1445, 1678-1681, 2163-2166, deps at 2187)
-  - `HIDDEN_RESET_MS` (78)
-  - `MAX_SEEN_ENTRY_IDS` / `capSetFIFO` (187-210)
-  - the seen-set block (1244-1260)
-- **Stop writing `lastViewed`.** Its only reader was the chip. Existing rows stay, and Reset still deletes them; documented.
-- **Badge** (3044-3064): the unread count, shown as `99+` above 99, with `aria-label="<tab>, N unread"`. Saved has no badge. Column `newCount` becomes `unreadCount`.
-- `manualRefresh` snapshots ids before refreshing. The `'refreshed'`, `'Entry unhidden.'` and `'Column restored.'` toasts are removed.
-- **`checkTabNow()` (D10):**
-  - Takes the active feeds of the current `cat:` tab (and `view:` tabs from PR6), stalest first, at most 20, and calls `api.checkNow(ids)`.
-  - Toast: "Checking N feeds in \<tab\>. New stories appear here within a minute."
-  - A silent `refresh()` at +25 s and +70 s (timers cleared on tab change), then "\<tab\>: N new stories" or "nothing new".
-  - Meta tabs queue nothing and explain why.
-  - On desktop, Refresh and `r` queue the 20 stalest feeds across the visible columns.
-- Empty-state copy (2836).
-- `refresh()` and the visibility handler call `prefs.resync()`.
-
-**`Column.tsx`:**
-- Delete the chip (343-370) and `onRefresh`.
-- Header text: "N unread", or "All caught up · Show N read".
-- `ColumnSection` renders 30 cards, then a 44px `[data-show-more]` row (+30 per tap). Keyboard ↑/↓ past the last rendered card expands the list first.
-
-**Delta sync (replaces read-merge-write):**
-- **Backend `PATCH /api/preferences/{key}`**:
-  - Allowed only for set keys (`starred_entries`, `hidden_entries`, `read_entries:*`, `voted_entries`; `muted_sources` joins in PR4). Any other key returns 400.
-  - Body: `{add?: int[], remove?: int[]}`, or `{set?: {id: 1 | -1 | null}}` for votes.
-  - One transaction: `INSERT … ON CONFLICT DO NOTHING`, `SELECT … FOR UPDATE`, apply, trim the oldest down to the cap (200 / 1000 / 1000 / 2000, pinned against `preferences.tsx:792-797`), write, return the value.
-- **`lib/prefSync.ts` (pure):** `isSetKey`, `foldDelta`, `applyIdDelta`, `applyVoteDelta`, and `mergeIncoming(prev, server, pending)`. `mergeIncoming` reuses the previous reference for every key that is structurally unchanged, so a resync does not re-render every Column (`_columnPropsEqual`, `Column.tsx:890-915`).
-- **`preferences.tsx`:**
-  - Setters record a delta. The flush sends PATCH for set keys and PUT for the rest, and the returned value is adopted through `mergeIncoming`.
-  - The hidden and `pagehide` flushes send the same PATCH with keepalive.
-  - `resync()` GETs `/api/preferences` on resume and on each poll, one request at a time.
-- Old clients keep using PUT.
-
-**`api.ts`:** `patchPreference`, `checkNow(ids, force?)`.
-
-**`Toast.tsx`:**
-- `group` / `count` options; events in the same group merge, and Undo replays the stored callbacks in reverse (at most 20).
-- The ▲ and ▼ thank-you toasts go (`Card.tsx` 797, 808, 1294, 1321).
-- Hides use group `hide`.
-
-### Backend
-- **`scheduler.queue_check(ids, force=False)`:**
-  - Job id is `ingest:<name>` or `_dynamic_job_id`.
-  - Calls `modify_job(next_run_time=now + i*3 s)` for at most 20 feeds.
-  - Cooldown: `refresh.cooldown_seconds` (default 600; `force` uses 60), kept in `_last_queued` and listed in `ARCHITECTURE.md`.
-  - Inactive feeds and feeds with no job are reported as `paused`.
-- **`misfire_grace_time=120` on ingest jobs** (1800-1810, 2127-2150). APScheduler 3.11.3 defaults to 1 s, and trafilatura blocks the loop (`generic_scrape.py:136-141`). A queued run that wakes more than 1 s late was silently skipped, and so were some regular polls.
-- **`POST /api/sources/check-now`** (`_write_deps`): `{source_ids: 1..50, force}` → `{queued, cooling_down, paused, queued_ids}`.
-
-### Tests
-- **Unit:** `prefSync.test.ts` covers two devices, reference identity for unchanged keys, caps and votes.
-- **pytest:**
-  - `test_check_now_queue.py`.
-  - `test_ingest_misfire_grace.py`: checks the job attribute, and runs a started `AsyncIOScheduler` whose loop is blocked 2 s; the job must still run.
-  - `test_preferences_delta.py` (db): two concurrent PATCHes both land; the cap holds; non-set keys return 400; an anonymous user works.
-  - slice21: replace `newCount` with `unreadCount`.
+  - `seen.test.ts`: zero rects, a detached target, a hidden page, an open sheet, a root change, and the end rule.
+  - `feedOrder.test.ts`: sort and window resets.
+- **pytest `test_slice21_column_memo.py`:**
+  - Props drop `newCount`, `totalCount` and `sectionsCollapsed`, and add `unseenCount`.
+  - HANDLERS drop `setColumnSection` and `sectionsCollapsedFor`.
+  - Delete `test_sections_collapsed_uses_memo_cache`.
 - **Flows:**
-  - `flow-badge-unread`, `flow-refresh-checks-tab`, `flow-prefs-resync`, `flow-toast-merge`, `flow-show-more`.
-  - FN: retarget the regex at `:818` to the new Refresh toasts.
-  - `capture.cjs`: mock check-now and the preference PATCH.
-- **Smoke:** `dashboard` with a long tab and `show-more`.
+  - `flow-scroll-marks-seen`: 1.2 s pauses. The PATCH adds exactly the ids that left the top, the badge drops, and the card order is unchanged. A 300 ms fling marks nothing.
+  - `flow-open-marks-seen`.
+  - `flow-caught-up` (a 3-story tab):
+    - A flung card keeps the ✓ text away.
+    - Once all 3 are seen, the marker shows on return, and Earlier (3) is first and folded.
+  - `flow-next-tab` (C8).
+  - `flow-mark-all-read`.
+  - `flow-auto-append`: a route returns 70 stories, and the list grows to 30, then 60, then 70 plus the marker.
+  - `flow-view-on-seen` and `flow-new-arrival-appends`.
+  - `flow-return-after-10-min` (C1).
+  - `flow-landscape-no-marks`: the viewport crosses 768px and no PATCH is sent.
+  - `flow-desktop-layout` (1280): with 25 For You cards the grid is taller than 300px. Mark all works.
+  - `flow-sort-best` stays green, because Sort resets the snapshot.
+  - FN's regex (818) becomes `/^(\d+ new|Nothing new)$/`. FM stays green.
+- **Smoke:** `caught-up` and `earlier-open` (390/320).
 
-**Risks:** revert is safe; both endpoints are additive.
+### Risks
+- How seen-on-scroll feels needs the owner's hand on the device (`SEEN_DWELL_MS`).
+- Revert restores ✓, and the marks stay valid.
 
 ---
 
-## PR3: Smaller tabs (time window, first-fetch cap, On This Day)
+## PR4: Smaller tabs (window, first-fetch cap, On this day)
 
 **What you'll notice:**
-- News shows the last 2 days, so its badge is about 20.
-- A new podcast adds its newest 10 episodes, even if it first works days after you added it.
-- Slow feeds still show their latest 3 stories, under "Older".
-- "Show older stories" at the end of each tab.
-- Saved holds every save; paused feeds leave the tabs.
-- On This Day posts 5 items a day in its own tab.
+- A tab shows stories that arrived in the last 2 days. ⋯ → Show stories from offers 1 day, 2 days, 7 days or All.
+- A new feed adds its newest 10 stories once, even if it first works days after you added it.
+- On this day has its own tab, with 5 stories a day.
+- Saved holds every save. Paused feeds leave the tabs.
 
 **Complaints:** "Most tabs have over a hundred things when I add a feed and I have no idea why".
 
 ### Backend
 
 **`app/ingest_rules.py` (new, pure):** `select_items_for_ingest(items, *, first_fetch, baseline_at, now, keep_first=10, backfill_h=48, max_age_d=30, per_poll=50) → (kept, counts)`.
-- First fetch: the newest 10 (undated stories after dated ones) plus everything from the last 2 days.
-- Later polls: drop items dated before `baseline_at − 2 d` or before `now − 30 d`.
-- Every poll: at most 50, newest first.
-
-**Tunables** (read with `get_many`): `ingest.first_fetch_keep`, `ingest.backfill_hours`, `ingest.max_age_days`, `ingest.max_per_poll`.
+- First fetch: the newest 10 (undated after dated), plus the last 2 days.
+- Later polls drop items dated before `baseline_at − 2 d` or before `now − 30 d`.
+- Every poll keeps at most 50, newest first.
+- Tunables: `ingest.first_fetch_keep`, `ingest.backfill_hours`, `ingest.max_age_days`, `ingest.max_per_poll`.
 
 **`scheduler._ingest`:**
-- Call the rule after the normalize loop (405-411) and before the known-URL query (412-420), so skipped items cost no embedding.
-- `summary["skipped"]` and `IngestResult.skipped: int = 0`.
-- **When a fetch succeeds while `last_fetch_at` is still NULL, set `created_at = now`.** The watermark then starts at the first success, so a feed that was blocked for days does not flood the tab once it works.
-
-**`update_source`, `if url_changed:` (2380):** set `last_fetch_at = None`. The next success resets `created_at`. Document `created_at` in `models.py` as "first successful read of this address"; nothing else reads it.
+- The rule runs after the normalize loop (403-407) and before the known-URL query (411-416).
+- Counts go to `summary["skipped"]`. Add `IngestResult.skipped: int = 0`.
+- A success while `last_fetch_at` is NULL sets `created_at = now`, so a feed that was blocked for days doesn't flood the tab.
+- In `update_source`, under `if url_changed:` (2380), set `last_fetch_at = None`.
 
 **`GET /api/entries`:**
-- New parameters: `max_age_hours` (1..8760), `per_source_floor` (0..10), `per_source_cap` (1..200), `active_only`.
-- Floor and cap require `max_age_hours` (422 otherwise). `active_only` works on its own.
-- With a window set, an inner select bounded by `fetched_at ≥ now − 90 d` computes `src_rn` per source and keeps:
-  `((fetched_at ≥ cutoff AND (published_at IS NULL OR published_at ≥ cutoff)) OR src_rn ≤ floor) AND src_rn ≤ cap`
-- **The window, `active_only` and the hidden exclusion go inside the `ranked` subquery** on the per-category path, because entries.py 407-417 builds a fresh `select` that drops earlier `.where`s. On the flat path they go on `stmt`.
-- Requests without `q` always exclude the caller's `hidden_entries`. Old clients already filter hidden stories themselves, so all they see is the per-category slots refilling.
+- `max_age_hours` (1..8760) filters `fetched_at ≥ now − h`, using slice25's index.
+- `per_source_cap` (1..200) needs `max_age_hours`, or the request gets 422.
+  - It is a `row_number()` per source ordered by `fetched_at desc`.
+  - It is computed and filtered in an inner subquery before the per-category `row_number`, so a category still gets its full 100.
+- With `max_age_hours`, the per-category `row_number` orders by `fetched_at desc` instead of `composite_score` (entries.py:404-409), so a new low-score story isn't cut.
+- `active_only`.
+- **Placement:** on the per-category path these go inside `ranked` (412-416), because 418 builds a fresh `select` that drops earlier `.where`s. On the flat path they go on `stmt`.
+- Without `q`, the caller's `hidden_entries` are excluded.
 
-**`GET /api/foryou`:** the same opt-in window, plus the hidden exclusion.
-
-**`brief.py` 386 and 451:** add a guard on `published_at`.
-
-**Wikipedia On This Day (O2):**
-- Keep only `selected` items, at most 5 a day; category `on_this_day`.
-- `_upsert_source` returns existing rows unchanged (`scheduler.py:110-135`). So `start_scheduler` moves the existing row once, only if it is still in `news`, behind the app_settings marker `builtin_category_moved:wikipedia_on_this_day`.
-
-**VPS:** run `EXPLAIN (ANALYZE, BUFFERS)` of both window paths, read-only, before merging; the target is under 150 ms.
+**Other backend:**
+- `GET /api/foryou` gets the same window and hidden-story exclusion.
+- `brief.py:386` and `:451` add `published_at IS NULL OR published_at ≥ since`, so a new feed's backfill doesn't reach today's brief.
+- **On this day (D17):**
+  - `selected` items only, at most 5 a day, in category `on_this_day`.
+  - `_upsert_source` returns existing rows unchanged (`scheduler.py:110-135`). So `start_scheduler` moves the existing row once, only if it is still in `news`, behind `builtin_category_moved:wikipedia_on_this_day`.
+- **VPS:** run a read-only `EXPLAIN (ANALYZE, BUFFERS)` on both paths. The target is under 150 ms.
 
 ### Frontend
-- **`lib/window.ts`:** `WINDOW_DEFAULT = '2d'`, `effectiveWindow`, `inWindow`. Legacy `maxAgeHours` maps to `'1d'`.
-- **`ColumnPrefs.window`** (and `ColumnPrefsValue`). "Show stories from" replaces "Hide if older than".
-- **`refresh()`:** `entries({perCategoryLimit: 100, maxAgeHours: 48, perSourceFloor: 3, perSourceCap: 25, activeOnly: true})` and `forYou({limit: 50, maxAgeHours: 48})`.
-- Tabs set wider than 2 days fetch their own rows into `extraByTab`; only the visible tab refetches.
-- **"Show older stories"** (44px) steps that tab to 7 days, then All.
-- **Badge:** counts only unread stories that are `inWindow(entryTime)`. The floor's older stories render after an "Older" divider and are not counted; they are never filtered out on the client.
-- **Saved** loads missing ids with `api.entriesByIds` (`api.ts` 549), newest save first. This replaces `visibleStarred` (946-962) and must ship in the same PR as the window.
-- **Undo of a hide** re-inserts the cached Entry, because the server now excludes hidden ids.
-- **Card** shows "On this day" instead of a time for `HISTORICAL_SOURCES`, pinned against `brief._HISTORICAL_SOURCE_SLUGS`.
+- **`lib/window.ts`:** `'1d' | '2d' | '7d' | 'all'`, default `'2d'`, plus `inWindow(fetched_at)`. A legacy `maxAgeHours` maps to `'1d'`.
+- **`ColumnPrefs.window`:** the ⋯ row "Show stories from" (a 4-way segmented control) replaces "Hide if older than" (Column.tsx:462-482).
+- **`refresh()`** (1222-1231) calls `entries({perCategoryLimit: 100, maxAgeHours: 48, perSourceCap: 25, activeOnly: true})` and `forYou({limit: 50, maxAgeHours: 48})`.
+- **The desktop For You row** shows its top 6. Its stories also appear in their category columns.
+- **Wider tabs** fetch their own rows into `extraByTab`. Only the visible tab refetches.
+- **Counts:** the badge, unseen and Earlier all count within the tab's effective window. Wider tabs that aren't selected count from the 2-day data.
+- **Saved:**
+  - Uses `api.entriesByIds` (api.ts:549; 200 per call, chunked), and only for ids not already held. Newest save first.
+  - It replaces `visibleStarred` (946-958) in the same PR.
+- **Undo of a hide** re-inserts the cached Entry.
+- **Labels:**
+  - `categoryLabel('on_this_day')` gives "On This Day" (labels.ts:97-101). Add an override so it reads "On this day".
+  - On cards, `HISTORICAL_SOURCES` show "On this day" in place of a time. This is pinned against `brief._HISTORICAL_SOURCE_SLUGS` (brief.py:91).
+- **`capture.cjs`:** `/api/entries` honours `max_age_hours` and `active_only`.
 
 ### Tests
-- **pytest:**
-  - `test_ingest_rules.py`.
-  - `test_ingest_backfill_cap.py`.
-  - `test_first_success_resets_baseline.py`: fails for 3 days, then the first success adds 10 plus the last 2 days, and nothing older follows.
-  - `test_source_url_change_resets_first_fetch.py`.
-  - `test_entries_window.py`: both paths; floor; cap; 422; `active_only`; hidden; no parameters.
-  - `test_foryou_window.py`.
-  - `test_brief_published_guard.py`.
-  - `test_wikipedia_selected.py`.
-  - `test_builtin_category_move.py`: moves once, only from `news`.
-- **Rewrite** `test_ingest_skips_known_urls.py`. Its fixed `_NOW = 2026-10-01` falls behind the watermark, so use relative dates and assert `skipped`.
-- `test_entries_per_category.py` must stay green.
+- **pytest (new):**
+  - `test_ingest_rules.py`, `test_ingest_backfill_cap.py`
+  - `test_first_success_resets_baseline.py`, `test_source_url_change_resets_first_fetch.py`
+  - `test_entries_window.py`: both paths, the cap, the 422, a low-score new story kept, `active_only`, hidden stories, and no parameters
+  - `test_foryou_window.py`, `test_brief_published_guard.py`
+  - `test_wikipedia_selected.py`, `test_builtin_category_move.py`
+- **pytest (rewrite):**
+  - `test_ingest_skips_known_urls.py`: its fixed `_NOW` falls behind the watermark, so use relative dates and assert `skipped`.
+  - `test_entries_per_category.py` stays green, because it passes no window.
 - **Unit:** `window.test.ts`.
-- **Fixtures:** stories 3 and 10 days old, and a paused feed.
-- **Flows:** `flow-window-default`, `flow-show-older`, `flow-saved-by-id`, `flow-paused-hidden`, `flow-badge-in-window`.
-- **Smoke:** `show-older` at 390 and 320.
+- **Fixtures:** stories that arrived 3 and 10 days ago, and a paused feed.
+- **Flows:** `flow-window-default`, `flow-tab-window-7d` (resets the snapshot), `flow-saved-by-id`, `flow-paused-hidden`, `flow-badge-in-window`.
+- **Smoke:** `column-popover` shows the window control at 390/320.
 
-**Risks:**
-- Stories older than 90 days drop out of the floor.
-- HN is capped at 25 per tab.
-- The backend parameters do nothing without the new frontend, so reverting the frontend alone is safe.
+### Risks
+- A story that arrived more than 2 days ago and was never seen drops out of the default view. That is by design, because it is the end.
+- 25 per feed per tab trims a very busy feed.
+- The backend parameters do nothing without the new frontend.
 
 ---
 
-## PR4: Card face, "Not interested" and hiding a feed
+## PR5: The card is a Reddit post
 
 **What you'll notice:**
-- Cards show ☆ Save, ✓ Read and ⋯, plus the summary chevron where there is one.
-- ⋯ opens a sheet: Not interested, More like this, Hide stories from \<feed\>, Edit feed, Copy link, Share, Open in browser.
-- Swipe left means Not interested.
-- A one-time tip, and Menu → "How Popping works".
+- The card shows the feed icon, feed name and time on top, then the title and thumbnail.
+- One bar: ▲ ▼ (orange / blue when on; tap again to undo), Save (a bookmark, filled when saved), Share, the summary chevron, and ⋯.
+- ⋯ offers Hide, Hide stories from \<feed\>, Edit feed, Copy link and Open in browser.
+- Swipe left hides, with Undo. Two quick hides show "2 hidden · Undo".
 
 **Complaints:** "upvote, downvote, star, read … I hardly know what to do", "Nothing is intuitive to a new user".
 
 ### Changes
 
-**`ActionSheet.tsx` (new):** `openActionSheet({title, actions})` plus `<ActionSheetHost/>`.
-- 44px rows, `role="dialog"`, `aria-label="story actions"`.
-- The focus trap and inert pattern from `Drawer.tsx`; closes on an outside tap and on Esc.
+**`ActionSheet.tsx` (new):** `openActionSheet({title, actions})` + `<ActionSheetHost/>`.
+- A bottom sheet with 44px rows and `role="dialog" aria-modal aria-label="story actions"`.
+- It uses Drawer's focus trap and inert pattern, closes on an outside tap or Esc, and has safe-area padding.
 
-**`Card.tsx`:**
-- Remove ▲ / ▼ (1279-1335) and 👁 (1448-1474).
-- Add ⋯ (`aria-label="more actions"`, `data-card-more`, `data-card-interactive`).
-- Footer: [⌄] … [☆ Save] [✓ Read] [⋯], with labels shown at a container width of 340px or more.
-- `buildActions()` replaces the inline list (724-824); desktop right-click shows the same list.
-- **"Open in browser"** keeps `window.open(safeExternalUrl(…))`. Update `test_slice30_safe_external_url.py:150-152` to the new label, and keep Thumbnail's `const open = () => {` literal (`:183-188`).
-- **Share and Copy link** call `navigator.share` / `clipboard` synchronously inside the tap handler, because iOS requires a user gesture. Share appears only when `navigator.share` exists.
-- More like this toggles the vote (`voteInteractionEvents`, 254).
-- **Swipe left** calls `onNotInterested`.
-  - Delete `commitHideToggle`'s `never` (558-564).
-  - Update the touchmove effect's deps and the reveal label.
-  - Without the handler, swipe-left is clamped dead (655).
-- New callback props `onNotInterested` and `onMuteSource`.
+**The `Card.tsx` header line** (at least 44px tall) moves above the title row (924):
+- `SourceIcon` (16px, from the existing `sourceFaviconPath` prop), the feed button (984-997, still labelled `edit feed <name>`), "·", and the time as "5h" (`timeAgo` 216-226 drops "ago").
+- `timeAgo(null)` already returns `''`. Hide the "·" with it.
+
+**The action bar** (replaces 1277-1477): ▲, ▼, Save and Share, then, pushed right with `ml-auto`, the chevron (1354-1375) and ⋯ (`more actions`, `data-card-more`).
+- Each button is 44×44 with no gaps, keeping today's −12px / −8px bleed.
+- The bar is 264px, which fits from a 310px viewport. C7 checks it at 312.
+
+**Votes:**
+- `aria-pressed`, with `text-orange-500` / `text-indigo-400` when on.
+- `voteInteractionEvents` (254) is unchanged.
+- The vote toasts (797, 808, 1293-1295, 1320-1322) go.
+
+**Save:** a bookmark icon labelled "save" / "unsave". It records `bookmark` only when saving.
+
+**Share:**
+- `navigator.share({title, url: entry.url})` is called synchronously in the tap handler, because iOS needs the user gesture.
+  - Only an http(s) `entry.url` is shared.
+  - `safeExternalUrl` is not used here, because it would turn Reddit links into old.reddit.com (api.ts:46-62).
+- `share` is recorded when the promise resolves. An AbortError records nothing.
+- Without `navigator.share`, Share falls back to `copyUrl` (1807), which shows "Link copied".
+
+**Other Card changes:**
+- `buildActions()` feeds both ⋯ and right-click (724-824).
+- Swipe left calls `onHide`. Swipe right is clamped dead (654). The touchmove deps become `[onHide]`.
+- Remove the eye button (1448-1474) and the `hidden` and `onHideToggle` props. Update `_cardPropsEqual` (1501-1514).
 
 **`App.tsx`:**
-- `notInterested(col, id)` records `never` once (D2), then calls `hideEntry` and `markEntryRead`. Toast group `hide`.
-- Keyboard `h` calls it.
-- `muteSource(id)` updates `muted_sources`; `visibleEntries` / `visibleForYou` (886, 911) drop muted feeds.
-- **Wire both callbacks** into the phone and desktop Columns, the desktop For You row and `SearchResults`.
+- `hideStory(id)` records `never` once, then calls `hideEntry`, with toast group `hide`. `h` calls it.
+- Delete `toggleHideEntry` (1791-1831) and `unmarkEntryRead`.
+- `muteSource(id)` changes `muted_sources` through `addIds` / `removeIds`.
+  - `visibleEntries` / `visibleForYou` (886-889, 911-914) drop muted feeds.
+  - The toast reads "\<Feed\> hidden · Undo".
+- The save toasts go (2056-2067, 2803-2818, 2909-2924, 2966-2981, 3116-3131).
+- `a` / `z` vote on the selected card (C6).
+- Wire `onHide` and `onMute` into both Columns, the desktop For You row and `SearchResults`.
 
-**`preferences.tsx`:** `muted_sources` (`number[]`, cap 500), with validation, `setMutedSources`, and a set key for the PR2 delta.
+**`Toast.tsx`:** adds `group` / `count`. Events in the same group merge into one toast. Its Undo replays the stored callbacks in reverse (at most 20) through `removeIds`, so every restore lands.
 
-**`routes/preferences.py`:** allowlist `muted_sources` (107-127, 131-150) and add it to the PATCH set keys with cap 500.
+**Preferences:**
+- `muted_sources` (`number[]`, cap 500), with validation and a setter in `preferences.tsx`.
+- An allowlist entry (`routes/preferences.py:107-127`), and `muted_sources` becomes a PATCH set key.
 
-**`FeedManager.tsx` `SourceRow` (258):** a "Hidden from tabs" tag.
+**Feed screens:**
+- `FeedManager` `SourceRow` (258) shows a "Hidden from tabs" tag.
+- `FeedEditor` gets a "Show stories in tabs" switch beside Pause (540-566) that writes the preference.
 
-**`FeedEditor.tsx`:** a "Show stories in tabs" switch next to Pause (540-566). It writes the preference, not the source row.
-
-**`Settings.tsx`:** the Hidden tab becomes "Not interested" (116).
-
-**`TipCard.tsx`:**
-- A `<div>`, not a `<section>`, above the first card, shown once per device (`STORAGE_KEYS.tipDismissed`).
-- Text: "Tap a headline to read it. ☆ keeps it in Saved. ⋯ has Not interested and more. Swipe right = read, left = not interested."
-
-**`ShortcutsSheet.tsx` becomes "How Popping works":**
-- Touch section first: the card actions, swipes, the badge and Refresh.
-- Keyboard table on md and up, with `b` and `h` added.
-- It is already `role="dialog" aria-modal` (82-84); add a focus trap and safe-area padding.
-- New first-group Menu row (`Drawer.tsx:327`).
-
-**`smoke.cjs`:** add the action sheet and the help sheet to `C12_ROOTS`.
+**`ShortcutsSheet.tsx`:** rows for `b`, `h`, `a` and `z`.
 
 ### Tests
 - **pytest:**
+  - `test_slice30_safe_external_url.py:150-152` expects "Open in browser". Thumbnail's `const open = () => {` stays.
   - `test_preferences_anonymous.py` round-trips `muted_sources`, including PATCH.
-  - slice30 regex updated.
+  - `test_slice21_column_memo.py` drops `hiddenSet`.
 - **Flows:**
-  - `flow-card-sheet`: stubs `navigator.share`; 7 rows of at least 44px.
-  - `flow-not-interested`: 2 taps; one `never`.
-  - `flow-swipe-left-once`: no `thumb_down`.
-  - `flow-swipe-left-search`.
+  - `flow-card-votes`: on, off, no toast, and the card stays.
+  - `flow-card-save`: one `bookmark`; unsave records none.
+  - `flow-card-share`: a stubbed share with `entry.url`, then the clipboard fallback.
+  - `flow-card-sheet`: 5 rows of at least 44px, the focus trap, and Esc.
+  - `flow-hide-undo`: one `never`; two hides merge and a single Undo restores both.
+  - `flow-swipe-left-hide` and `flow-swipe-right-dead` (CDP).
   - `flow-mute-source`.
-  - `flow-tip-once`.
-  - `flow-help-sheet`.
+  - FV (845-865): the feed button sits above the headline and must not reach the headline's top edge.
 - **Smoke:**
-  - The `card-summary` selector stays as it is.
-  - New states `card-action-sheet` (390 / 320), `tip-card` and `help-sheet`; C7, C11 and C12 apply.
+  - `card-action-sheet` (390/320, `C12_ROOTS`).
+  - `dashboard` at 312 runs C7 on the bar.
+  - The `card-summary` selector is unchanged.
 
-**Risks:**
-- The per-feed vote badge now counts only More like this.
-- Revert is safe; the new preference key is simply ignored.
+### Risks
+- Hide no longer marks a story read. Hidden stories leave every tab anyway.
+- Revert is safe, because old builds ignore `muted_sources`.
 
 ---
 
-## PR5: Tab order and hiding
+## PR6: Pull to refresh checks the tab's feeds
 
 **What you'll notice:**
-- An "Edit" pill at the end of the strip opens ↑/↓ and Show switches; changes apply at once.
-- Brief stays first; Saved and For You are always present; new categories go at the end.
-- Desktop follows the same order.
-- Every tab has ⋯.
-- An empty tab says why.
+- Pull down at the top of a tab to see a spinner, then "Checking 6 feeds…", then "3 new" or "Nothing new". New stories arrive at the top.
+- The phone header is one slim row: title, search, Menu. On the phone, the tab's own header row scrolls away with the stories.
+- Tapping the current tab at the top does the same as a pull (C3), and so does ⋯ → Refresh (C4).
+- On desktop, Refresh and `r` check the visible columns.
+
+**Complaints:** "try to refresh … to see if it … pulls".
+
+### Gesture: `lib/pull.ts` (pure) and `lib/usePullToRefresh.ts`
+**Scope:** only the phone Column's scroller. The Brief tab has none, and the tab strip and header sit outside it.
+
+**`touchstart` (passive):** track one finger only when:
+- `scrollTop === 0` exactly (never below 0, which would freeze a bounce mid-animation),
+- the touch is not inside `[data-hscroll]`, and
+- no text selection exists.
+
+**`touchmove` (non-passive, like Card.tsx:618-666):**
+- An upward move ends tracking, and native scrolling takes over.
+- A move with `cancelable === false` also ends tracking, because native scrolling already owns the touch.
+- No `preventDefault` is called until `dy ≥ 3` and `dy > |dx|`. Cancelling a first sample of +1 or 2px of jitter can stop iOS from scrolling for the whole touch.
+- From then on, downward moves call `preventDefault`. That stops iOS's top bounce for this gesture only. The bottom bounce and all other scrolling stay native, and `overscroll-contain` (Column.tsx:493) is unchanged.
+- The lock decision happens once the move passes 12px:
+  - It is a pull when `dy > 0` and the card would not lock horizontal, that is `!(|dx| > |dy| × 1.3)`.
+  - Otherwise the gesture belongs to Card's swipe.
+  - So every diagonal drag is handled by one of the two.
+- `SWIPE_DEAD_ZONE_PX` and `SWIPE_DIRECTION_RATIO` move from Card.tsx (290-291) to `pull.ts`, and Card imports them, so the two locks can't drift apart.
+- A finger held still for 400 ms or more (long-press or link preview) ends tracking.
+
+**Motion:**
+- The content doesn't move before the lock.
+- After the lock, the offset is `min(96, dy × 0.5)`, and the pull arms at 64px. The content wrapper and spinner move with `transform`.
+- Releasing while armed refreshes. Otherwise, and on `touchcancel`, the content snaps back.
+- Under reduced motion the spinner doesn't rotate and the snap is instant.
+
+### `checkTabNow()` (App.tsx)
+1. `refresh()` re-reads the dashboard and resets the tab's snapshot.
+2. It picks feeds, stalest first and at most 20, and calls `api.checkNow(ids)`:
+   - a category tab: its active feeds
+   - For You: the 20 stalest active feeds
+   - Saved: nothing
+3. The status row shows "Checking 6 feeds…".
+   - It is a `div[data-refresh-status]` at the top of the list, mounted with `role="status"` only while it shows text.
+   - Silent refreshes run at +25 s and +70 s. Their timers clear on a tab change.
+   - Then it shows "3 new" (ids new to this tab) or "Nothing new" for 3 s, and unmounts.
+   - If nothing was queued, the result shows after the re-read.
+4. **New stories from a check run:** if the list is still at the top with no touch since the pull, the snapshot is rebuilt so they come first. Otherwise they join the end of unseen like any other arrival (PR3).
+
+**Desktop:** Refresh (2683-2689) and `r` (2092-2098) queue the 20 stalest feeds across the visible columns. The status uses the sub-row's text slot (2677-2681).
+
+**Phone header:**
+- Delete the Refresh button (2655-2665).
+- On phones the title drops from the 34px large title to 17px semibold, in one 44px row.
+- On the phone, Column renders its header (label and ⋯) as the first row of the list, so it scrolls away like Reddit's sort bar. Together these give back about 64px of a 568px screen.
+
+**Empty states:**
+- The first load with no columns shows "No stories yet." (2835-2837).
+- While the user has no feed of their own (`isBuiltIn`, feedRules.ts:44), For You starts with a 44px "Add your first feed" row (C7) that opens `openSettings('feeds')`. PR11 retargets it.
+
+### Backend
+- **`scheduler.queue_check(ids, force=False)`:**
+  - Calls `modify_job(next_run_time=now + i×3 s)` on `ingest:<name>` / `_dynamic_job_id`, for at most 20 feeds.
+  - The cooldown is `refresh.cooldown_seconds` (default 600; `force` uses 60). It is kept in `_last_queued` and documented in `ARCHITECTURE.md`.
+  - Inactive feeds, and feeds with no job, are reported as `paused`.
+- **`misfire_grace_time=120` on ingest jobs** (1800-1810, 2127-2150). APScheduler's default is 1 s, and trafilatura blocks the loop, so late runs were being skipped.
+- **`POST /api/sources/check-now`** (`_write_deps`): `{source_ids: 1..50, force}` → `{queued, cooling_down, paused, queued_ids, queued_at}`. `queued_at` is the server's clock, which PR9 compares against.
+
+### Tests
+- **pytest:**
+  - `test_check_now_queue.py`.
+  - `test_ingest_misfire_grace.py`: checks the attribute, then starts a scheduler whose loop is blocked for 2 s; the job must still run.
+- **Flows** (CDP, returning early on WebKit):
+  - `flow-pull-refresh`: a 180px pull, then one POST with News's feed ids, the GET, and the status texts. A story arriving at +25 s is first in the list. Uses `page.clock.install` and `runFor`.
+  - `flow-pull-short`: an 80px pull does nothing.
+  - `flow-pull-scrolled`: with `scrollTop > 0`, the list scrolls and nothing is posted.
+  - `flow-pull-jitter`: a first move of +2px followed by an upward drag scrolls the list. Nothing is prevented and nothing is posted.
+  - `flow-pull-vs-swipe`: a horizontal drag hides the card, with no POST.
+  - `flow-pull-reduced-motion`, `flow-tab-tap-refresh`, `flow-first-feed-row` (C7), `flow-refresh-desktop` (`widths: [1280]`).
+  - FN rejects the status texts after a quiet poll.
+  - `capture.cjs` mocks check-now.
+- **Smoke:**
+  - The `dashboard` header becomes `['open search', 'open menu']`, and C16 still checks the title.
+  - New states: `refresh-status` and `first-feed-row`.
+
+### Risks
+- The non-passive listener makes iOS wait for JavaScript on every move. It returns at once unless it is tracking, and cards already do the same.
+- CDP touch in Chromium tests the logic, not how it feels on iOS: Chromium has no rubber-band, and the WebKit run is report-only. The PR body carries an on-device checklist:
+  - a pull at the top
+  - a shaky upward scroll starting from the top
+  - a diagonal drag
+  - a long-press on a link
+  - a pull on a short tab
+- Revert restores the header button and the large title.
+
+---
+
+## PR7: Tab order, hiding, and one ⋯ sheet per tab
+
+**What you'll notice:**
+- An "Edit" pill opens ↑/↓ arrows and Show switches. Changes apply at once.
+- Brief stays first, Saved and For You are always present, new categories go at the end, and desktop follows the same order.
+- Every tab's ⋯ opens one sheet: Mark all as read, Refresh, Sort, Show stories from, Edit tabs.
+- An empty tab says why, with one fix.
 
 **Complaints:** "can't organize categories in the order I want", "hunting through shit".
 
 ### Changes
-
-**`lib/categories.ts`:**
-- `orderColumns(available, layout) → {shown, hidden}`: listed keys first, in their order. Unlisted keys follow in the default order (Saved, For You, categories A→Z), minus hidden ones.
-- `moveKey`, `normalizeLayout`.
-
-**`preferences.tsx`:** `category_layout` `{v: 1, order, hidden}` with validation and `setCategoryLayout`. One PUT per change; last write wins.
-
-**`routes/preferences.py`:** allowlist the key.
-
-**`App.tsx`:**
-- Categories come from active sources together with entry categories (891, 904-910); a category with only paused feeds gets no tab (D9).
-- `allSubsColumns` always includes `meta:saved` and `meta:foryou`, with empty hints, and then applies `orderColumns`.
-- The tab chosen on a fresh device still comes from `resolveTab` (PR1), so putting Saved first never opens an empty Saved tab.
-- The desktop grid (~2936-2998) and the Jump list use the same order.
-- **Edit pill:**
-  - 44px, **outside** `role="tablist"` (3012-3017).
-  - Pinned at the trailing edge, outside the scroller, so it is never off-screen.
-- When a tab is selected programmatically (star, jump, new tab), it scrolls into view.
-
-**`Column.tsx`:**
-- ⋯ shows on **every** tab (today it is hidden for For You, `:385`). For You's popover has Sort (Best by default), "Show stories from" and the tab actions.
-- Tab actions: Move earlier, Move later, Hide this tab, Edit tabs….
-- **`EmptyColumnMessage` (820-877)** gains `columnFeeds: Source[]`: "Waiting for first check", "N feeds failing · Open" or "Nothing in the last 2 days · Show older". Keep `sourcesByName` and the slice19 literal.
-- `columnFeeds` is memoized per column and added to `_columnPropsEqual`; slice21 gets the new prop.
-
-**`TabsEditor.tsx` (new):**
-- Built on `GroupedSection` / `GroupedRow`, moved from `Drawer.tsx:520-618` to `components/Grouped.tsx`.
-- ↑ / ↓ buttons (44px, disabled at the ends) and a Show switch; Brief is pinned.
-- Done closes it; there is no Save.
-- `role="dialog"`, a focus trap, safe-area padding, and an entry in `C12_ROOTS`.
-- Opened from the pill, from a Menu row "Edit tabs", and from column ⋯.
-
-**`feeds/CategoryPicker.tsx`:** "Your categories" in tab order.
-
-**`ShortcutsSheet.tsx`:** a paragraph on editing tabs.
+- **`lib/categories.ts` (extend):** add `orderColumns(available, layout) → {shown, hidden}`, `moveKey` and `normalizeLayout` beside the existing exports.
+- **`category_layout`** `{v: 1, order, hidden}` in `preferences.tsx` (one PUT per change), plus its allowlist entry.
+- **`App.tsx`:**
+  - Categories come from active sources together with entries (891-910).
+  - `allSubsColumns` always includes `meta:saved` and `meta:foryou`, then applies `orderColumns`. The tab a fresh device opens still comes from `resolveTab`.
+  - The desktop grid and the Jump list use the same order.
+  - The 44px Edit pill sits outside `role="tablist"` (3013-3018), pinned at the trailing edge.
+  - A tab selected by code scrolls into view.
+  - Delete the `columns.length === 0` branch (2824-2837) except the first-load skeleton, because columns are never empty now.
+- **The tab ⋯ becomes a bottom sheet** (`ActionSheet` with control rows, `aria-label="tab actions"`). The popover (Column.tsx:405-484) and its pointerdown/Esc effects (239-260) go.
+- **`EmptyColumnMessage`** (820-877) gains `columnFeeds` (memoized and added to the comparator). Its messages:
+  - "Waiting for first check"
+  - "2 feeds failing · Open"
+  - "Nothing in 2 days · Show 7 days"
+  - "No stories yet" for meta tabs
+- **`TabsEditor.tsx` (new):**
+  - Built on `GroupedSection` / `GroupedRow`, which move from `Drawer.tsx:520-618` to `components/Grouped.tsx`.
+  - ↑/↓ (44px, disabled at the ends), a Show switch, Brief pinned first, and Done.
+  - A dialog with a focus trap, in `C12_ROOTS`.
+  - Opened from the pill, Menu "Edit tabs" and the tab sheet.
+- **`CategoryPicker`** lists categories in tab order.
 
 ### Tests
-- **Unit:** `categories.test.ts` (new key at the end, hidden, move, empty layout keeps today's order).
-- **pytest:** allowlist test; slice21 `columnFeeds`.
+- **Unit:** extend `categories.test.ts`.
+- **pytest:**
+  - The allowlist.
+  - **Rewrite `test_frontend_slice19_empty_column_source_status.py`.** Its six tests pin Column.tsx and App.tsx details:
+    - `sourcesByName` with `.get(` (:99-118)
+    - `last_error`, `error_count` and `last_fetch_at` (:74-91)
+    - a `.slice(0, N)` (:152-163)
+    - `auto_disabled` (:171-186)
+    - `sourcesByName=` on every `<Column` (:127-144)
+    - the literal at `:84`
+  - The rewrite pins `columnFeeds` and the three new messages instead.
+  - `test_slice21_column_memo.py` adds `columnFeeds`, and drops `sourcesByName` if Column no longer takes it.
 - **Flows:**
-  - `flow-tabs-reorder`: at most 3 taps; one PUT; desktop order checked at 1280px.
-  - `flow-tab-hide`.
-  - `flow-new-category-at-end`.
-  - `flow-saved-always`.
-  - `flow-fresh-device-opens-foryou`.
-  - `flow-foryou-menu`.
+  - `flow-tabs-reorder`: at most 3 taps and one PUT; the desktop order is checked with `widths: [1280]`.
+  - `flow-tab-hide`, `flow-new-category-at-end`, `flow-saved-always`, `flow-fresh-device-opens-foryou`.
+  - `flow-tab-sheet`: an outside tap closes it, and tapping ⋯ again closes it.
   - FM stays green.
-- **Smoke:**
-  - `tabs-editor` at 390 and 320.
-  - `dashboard`: the pill is visible at 312px (C11), and the `data-app-header` scoping holds.
+- **Smoke:** `column-popover` becomes `tab-sheet` (390/320). Add `tabs-editor` (390/320). The pill is visible at 312.
 
-**Risks:** nothing changes until the owner edits the order. Revert drops the order; the key is ignored.
+### Risks
+- Nothing changes until the owner edits the order.
+- Revert drops the order, and the key is then ignored.
 
 ---
 
-## PR6: Saved views become custom tabs
+## PR8: Saved views become custom tabs
 
 **What you'll notice:**
-- Your views are tabs. Under each one's header: "From: BBC News, The Verge, +3 · Edit".
+- Your views are tabs. Each has "From: BBC News, The Verge, +3 · Edit" under its header.
 - Ticking a feed saves at once.
 - The chip rows above the tabs are gone.
 
-**Complaints:** "I don't understand how to modify or save views", "multi tapping".
-
 ### Changes
+**Data (D8):**
+- `custom_tabs` `{v: 1, tabs: [{id, name, sources: number[]}]}` (cap 50).
+- **One-time conversion** from a non-empty `filter_presets`. Names map to ids through `sourcesByName`, and `columnPrefs` are dropped. Ids come from `preset.id`.
+- `filter_presets` is left untouched, for rollback. Allowlist the new key.
 
-**Data (O3):**
-- New global key `custom_tabs` with value `{v: 1, tabs: [{id, name, sources: number[]}]}` (cap 50).
-- **One-time conversion:** when `custom_tabs` is absent and `filter_presets` is not empty, map `activeSources` names to ids through `sourcesByName` and drop `columnPrefs` (D8).
-  - Ids come from `preset.id`, so two devices converting give the same ids.
-  - `filter_presets` stays untouched, so a rollback keeps the old views.
-- Allowlist `custom_tabs`.
-- This departs from the critique's `pr_order`, which kept tabs inside `filter_presets`. Owner to confirm.
-
-**Column keys (D8):**
-- Preference suffixes become keys: `column_prefs:cat:<name>`, `view:<id>`, `meta:*`.
-- Reads use `columnPrefs[key] ?? columnPrefs[legacyName]`; writes go to the key only.
+**Keys:**
+- `column_prefs` suffixes become column keys. Reads use `columnPrefs[key] ?? columnPrefs[legacyName]`.
+- `read_entries` suffixes are unchanged, because reads are a union (PR3).
 
 **`App.tsx`:**
-- Custom tabs join `allSubsColumns` as `view:<id>`, ordered by `category_layout`.
-- **Fetching:** a shown tab (selected on the phone, visible on desktop) fetches `entries({source: names, limit: 200, maxAgeHours, perSourceFloor: 3, activeOnly: true})`, and refetches on each poll while visible.
-- **Badges for tabs not selected** come from the dashboard data, filtered by `source_id`, so they need no extra fetch.
-- An explicit tab ignores `muted_sources`; the tab sheet marks muted feeds.
-- `checkTabNow` queues the feeds of a `view:` tab.
+- Custom tabs join as `view:<id>`, in `category_layout` order.
+- A shown tab fetches `entries({source: names, limit: 200, maxAgeHours, perSourceCap: 25, activeOnly: true})` and refetches on each visible poll.
+- Badges for tabs that aren't selected come from the dashboard data, filtered by `source_id`.
+- A custom tab ignores `muted_sources`, and TabSheet marks muted feeds.
+- Editing a tab's feeds resets its snapshot (PR3).
+- Pull / Refresh queues the tab's feeds.
+- Seen tracking, the marker and Earlier apply unchanged.
 
-**`Column.tsx`:** for `view:` tabs, a 44px `<div>` line "From: … · Edit" opens TabSheet. Seeing the feeds takes 0 taps; editing takes 1.
+**`Column.tsx`:** a 44px `<div>` reading "From: … · Edit" opens TabSheet. On the phone it scrolls with the list.
 
 **`TabSheet.tsx` (new):**
-- A 17px name field.
-- A search field (`type="text" inputMode="search"`).
-- A feed checklist grouped by category in tab order, labelled with `sourceLabel`, with a FeedStatus slot filled in PR7.
-- Each change is a debounced PUT.
-- Delete uses an inline confirm.
-- Dialog, focus trap, safe area, and an entry in `C12_ROOTS`.
+- A 17px name field and a search field.
+- A checklist grouped in tab order, labelled with `sourceLabel`, with a FeedStatus slot that PR9 fills.
+- Debounced PUTs, an inline delete confirm, and a dialog in `C12_ROOTS`.
 
 **Removed:**
-- `PresetChips` (233-460, 2768-2774).
-- `activeSources`, `viewKind`, `multisub*` (571, 967-1044) and **the `activeSources` refetch effect**.
-- The filter chip row (2702-2735).
-- The handlers at 1860-1930, 2189 and 2362-2369.
-- `onSourceRenamed` (2200) and its `onRenamed` store hook.
-- Drawer "Save current view" (340-383) and "Sources" (404-495).
+- `PresetChips` (227-460, 2769-2775)
+- `activeSources`, `viewKind` and the multisub columns (571, 967-1044), plus the `activeSources` refetch effect (1520-1531)
+- the filter chip row (2703-2734)
+- the handlers at 1860-1931, 2189-2219 and 2362-2369
+- Drawer "Save current view" (340-383) and "Sources" (404-495)
 
-**Reset:** PR1 already keeps saves. The new keys (`custom_tabs`, `category_layout`, `muted_sources`) are never in its delete list; a test checks this.
+**Reset** never deletes `custom_tabs`, `category_layout` or `muted_sources`.
 
 ### Tests
-- **Unit:** `customTabs.test.ts` (conversion, unknown names dropped, idempotent, same ids from the same presets) and `columns.test.ts` (legacy fallback).
-- **pytest:**
-  - slice21 `HANDLERS`: remove `toggleSource`, `toggleSourceAndMaybeClose`, `clearSourceFilters` and `onSourceRenamed`; add `selectTab`. Do **not** add `setCustomTabs`: it comes from `usePreferences`, so it never matches `const … = useCallback(`.
-  - Keep the `sectionsCollapsedCache[columnName]` literal.
-  - slice19 unchanged.
+- **Unit:** `customTabs.test.ts`, and `columns.test.ts` (the legacy fallback).
+- **pytest `test_slice21_column_memo.py`:** HANDLERS drop `toggleSource`, `toggleSourceAndMaybeClose`, `clearSourceFilters` and `onSourceRenamed`, and add `selectTab`.
 - **Flows:**
-  - **FT, FA and FA2** (`flows.cjs` 357-462) and `capture.cjs:534` clicked the Menu's `edit <feed>` buttons. They now open the editor through Menu → Settings → the row, or `?source=`.
-  - FL becomes `flow-fl-rename-in-custom-tab`.
-  - FPR becomes `flow-custom-tab-create` (at most 6 taps).
-  - `flow-custom-tab-from-line`: the line is visible; Edit is 1 tap; adding a feed is 3 taps.
-  - `flow-preset-convert`: one PUT.
-  - `flow-reset-keeps-data`.
-  - FU moves to desktop width.
-- **Smoke:** remove the preset-strip expectations; add `tab-sheet` and `custom-tab`.
+  - FT, FA and FA2 (357-462) and `capture.cjs:534` open the editor through Settings or `?source=`.
+  - FL becomes `flow-fl-rename-in-custom-tab`. FPR becomes `flow-custom-tab-create` (at most 6 taps).
+  - New: `flow-custom-tab-from-line`, `flow-preset-convert`, `flow-reset-keeps-data`.
+  - FU moves to `widths: [1280]`.
+- **Smoke:** remove the preset-strip expectations. Add `tab-sheet-custom` and `custom-tab`.
 
-**Risks:** this removes UI the owner used. The old views survive in `filter_presets`, and reverting brings the chips back.
+### Risks
+- This removes UI the owner used. The old views survive in `filter_presets`, and a revert brings the chips back.
 
 ---
 
-## PR7: Feed health you can see (migration 0031)
+## PR9: Feed health you can see (migration 0031)
 
 **What you'll notice:**
-- Every feed row has a pill: Checking, OK · 12 this week, Quiet · nothing in 7 days, Found nothing, All already in Popping, Blocked, Failing, Stopped, Paused, Reddit off.
-- Each problem shows one fix button.
-- My feeds has search, "Needs attention" at the top, category headings in tab order, and a "Built in" heading with 24 h counts.
-- Check now and Refresh show their results in place.
+- Every feed row has a pill: Checking, 12 this week, Quiet, Blocked, Failing, Stopped, Paused, Reddit off, or Not checked yet.
+- Each problem shows one fix.
+- Feeds has search, then "Needs attention" first, then categories in tab order, then "Built in".
+- After a pull, the status row reads "3 new · 1 failing", and "1 failing" opens Needs attention.
 
-**Complaints:** "it didn't tell me if it is actually pulling", "I have to filter just for that", "change the settings, like browser".
+**Complaints:** "it didn't tell me if it is actually pulling", "change the settings, like browser".
 
 ### Migration
-
-`0031_source_health.py`:
-- `down_revision = "0030"`.
-- Adds `last_attempt_at` (timestamptz), `last_item_count` (int) and `last_new_count` (int), all nullable with no default. The `models.py` fields are Optional.
-- No `fetch_mode` (O1).
+`0031_source_health.py` (`down_revision = "0030"`) adds `last_attempt_at` (timestamptz), `last_item_count` (int) and `last_new_count` (int).
+- All three are nullable with no default, and the `models.py` fields are Optional.
+- There is no `fetch_mode` (D18).
 
 ### Backend
-
 **`_ingest` writes:**
-- Success: `last_attempt_at`, `last_item_count` (normalized count before the cap) and `last_new_count`.
-- Failure: `last_attempt_at`.
-- Paused: `summary['status'] = 'paused'`, using a new `IngestResult.status: Optional[str]`. PR3's `skipped` is an int, so `IngestResult(**summary)` (`routes/ingest.py:54-55`) would return 500.
+- On success, all three fields. `last_item_count` is counted before the cap.
+- On failure, `last_attempt_at`.
+- When paused, `summary["status"] = "paused"`. Add `IngestResult.status: Optional[str]`. `IngestResult` (schemas.py:497-502) ignores unknown keys, so without the field, `IngestResult(**summary)` (`routes/ingest.py:54-55`) would silently drop it.
 
-**Blocked websites are reported as blocked:**
-- `fetch_html_checked` in `article_extract.py` raises `HTTPStatusError` on any status of 400 or more. `fetch_html` keeps returning None for its other callers.
-- It is used for robots, sitemap and listing fetches. Headers are threaded through `discover_sitemap_urls` (199), `_crawl_sitemaps` (363), `_section_candidates` (103) and `_discover_page_links` (332).
+**Blocked sites:**
+- `fetch_html_checked` (article_extract.py) raises on status ≥ 400 for robots, sitemap and listing fetches.
+- Headers are threaded through `discover_sitemap_urls` (199), `_crawl_sitemaps` (363), `_section_candidates` (103) and `_discover_page_links` (332).
 - `discover_feed_url` (79) gains `headers=None`.
 
-**Zero yield is no longer silent:**
-- A website feed with no candidates raises `NoArticleListError` → `[no list]`.
-- `fetch_rss` raises `NotAFeedError` → `[not a feed]` when there are zero entries **and** the Content-Type contains `text/html` or the body starts with `<html` / `<!doctype html`. `_looks_like_feed` accepts any `text/*`, so it cannot decide this. Keep the single `ET.fromstring` (slice23).
-- A valid feed with 0 items stays a success.
+**Zero yield is reported:**
+- A website with no candidates raises `NoArticleListError` → `[no list]`.
+- `fetch_rss` raises `NotAFeedError` when there are zero entries and the response is HTML. Keep the single `ET.fromstring`.
+- A valid empty feed is still a success.
 
-**Reddit off:**
-- `_ingest` checks `reddit_client.is_disabled()` before fetching a Reddit feed and records `last_attempt_at` and `[reddit off]`.
-- The plugin is unchanged, so `test_dynamic_reddit_warned_disabled_cap.py` still passes.
+**Reddit off:** `_ingest` checks `reddit_client.is_disabled()` before fetching. `[reddit off]`, and `[no list]` within 24 h of `created_at`, never touch `error_count` (models.py:103).
 
-**`error_count` (which drives `auto_disabled`, `models.py:103`):** `[reddit off]`, and `[no list]` within 24 h of `created_at`, never increment it, never back off and never auto-disable. Every other error kind behaves as today.
+**`SourceOut`** gains `last_attempt_at`, the two counts, `stories_24h`, `stories_7d`, `newest_story_at` and `has_stories`.
+- The story counts come from one `GROUP BY` over 7 days with `FILTER`.
+- `has_stories` is an `EXISTS` on `source_id`.
+- Run `EXPLAIN` on `/sources`.
 
-**`SourceOut`** gains Optional fields: `last_attempt_at`, `last_item_count`, `last_new_count`, `stories_24h`, `stories_7d`, `newest_story_at` and `has_stories`.
-- One `GROUP BY` over the last 7 days with `FILTER`.
-- `has_stories` is an `EXISTS` on the indexed `source_id`.
-- Run `EXPLAIN` on `/sources` as well.
-
-**PATCH `type`:**
-- Allowed only for dynamic feeds, and only between rss, podcast and generic_scrape (`SourceUpdate` has no `type` field today).
-- It rebuilds the job (`scheduler.py:2453-2477`) and nulls `last_fetch_at` (D6).
-
-**`trigger_now`** reuses the job's plugin.
+**Other endpoints:**
+- PATCH `type` (dynamic feeds only; rss, podcast or generic_scrape) rebuilds the job (`scheduler.py:2453-2477`) and nulls `last_fetch_at`.
+- `trigger_now` reuses the job's plugin.
 
 ### Frontend
-- **`api.source(id)`** (new).
-- **`feedHealth()`** returns `checking | ok | quiet | empty | nothing_new | blocked | failing | stopped | paused | reddit_off | never`. `needsAttention()` is true for the problem states.
-- **`apiErrors.ts` `ERROR_ACTIONS`** maps each kind to one sentence and one action. FeedStatus, FeedEditor's Last problem box and `EmptyColumnMessage` all use it:
+- **`api.source(id)`.**
+- **`feedHealth()` / `needsAttention()`:**
+  - Quiet means the feed works but brought nothing new in 7 days, whatever the cause.
+  - Needs attention lists Blocked, Failing and Stopped feeds, plus Quiet feeds that have never brought a story.
+- **`apiErrors.ts` `ERROR_ACTIONS`** gives one sentence and one action per kind:
 
   | Kind | Action |
   |---|---|
   | not_found | Edit address |
-  | network / timeout / upstream | Check now, with "next try at …" |
-  | blocked | Read as Safari (O1): PATCH the User-Agent from `headers.ts`, with Undo |
+  | network / timeout / upstream | Check now |
+  | blocked | Read as Safari, with Undo |
   | stopped / paused | Resume |
   | no_list | Pick a section |
-  | empty | Check now |
-  | nothing_new | Delete |
-  | not_a_feed | Edit address (Find its feed in PR9) |
+  | quiet | Check now |
+  | not_a_feed | Edit address (Find its feed in PR11) |
 
 - **`FeedStatus`** appears in `SourceRow`, TabSheet, `EmptyColumnMessage` and the Menu subtitle.
-- **`MyFeedsTab`** (210-252) gains:
-  - a sticky 17px search field
-  - Needs attention, then categories via `orderColumns`, then "Built in" (`isBuiltIn`)
-  - the frozen-order logic (222-235) is kept
-- **`applyServerSource`** (`App.tsx` 2237) keeps the new count fields from the previous row, the same way it keeps `net_vote_score`, so the pill does not flicker after an autosave.
-- **Check now:** `api.checkNow([id], true)`, then poll `api.source(id)` every 5 s for up to 90 s, then show an inline line and 3 titles.
-- **`checkTabNow`:** polls `api.sources()` every 5 s for up to 90 s, then shows "Checked 6 feeds · 3 new · 1 problem".
+- **`MyFeedsTab`** (210-252) gains a sticky 17px search and grouped headings, and keeps the frozen order (222-235).
+- **`applyServerSource`** (App.tsx:2231-2238) keeps the count fields, so pills don't flicker after a save.
+- **Check now:** `checkNow([id], true)`, then poll `api.source(id)` every 5 s for up to 90 s, then show an inline line with 3 titles.
+- **`checkTabNow`** finishes early once every queued feed's `last_attempt_at` is at or after the server's `queued_at` (PR6), not the phone's clock.
 
 ### Tests
-- **pytest:**
-  - `test_migration_0031_source_health.py`: single head; every column nullable with no default.
-  - `test_source_health_fields.py`: counts; Reddit off leaves `error_count` unchanged; the 24 h exemption; a loopback 403 website shows `[blocked]`.
-  - `test_rss_not_a_feed.py`.
-  - `test_sources_story_counts.py`.
-  - `test_source_patch_type.py`.
-  - `test_ingest_paused_status.py`.
+- **pytest (new):**
+  - `test_migration_0031_source_health.py`
+  - `test_source_health_fields.py`
+  - `test_rss_not_a_feed.py`
+  - `test_sources_story_counts.py`
+  - `test_source_patch_type.py`
+  - `test_ingest_paused_status.py`
+- **pytest (extend or rewrite):**
   - Extend `test_scheduler_backoff.py` and `test_trigger_now_accepts_dynamic_sources.py`.
-- **Rewrite** `test_plugin_no_page_links_when_link_pattern_none` (`:90-103`) to expect `NoArticleListError`. `probe` catches the error and still returns `[]` (`test_generic_scrape.py:58-63`).
+  - Rewrite `test_plugin_no_page_links_when_link_pattern_none` (`:90-103`). `probe` still returns `[]` (`test_generic_scrape.py:58-63`).
 - **Unit:** `feedHealth.test.ts`, `apiErrors.test.ts`.
-- **Flows:**
-  - `flow-feeds-needs-attention`.
-  - `flow-feed-search`.
-  - `flow-check-now-inline`.
-  - `flow-refresh-results`.
-  - `flow-read-as-safari`: 3 taps, a PATCH, and Undo.
-  - `flow-pill-stable-after-edit`.
+- **Flows:** `flow-feeds-needs-attention`, `flow-feed-search`, `flow-check-now-inline`, `flow-pull-results`, `flow-read-as-safari` (3 taps and Undo), `flow-pill-stable-after-edit`.
 - **Smoke:** `settings-feeds`.
 
-**Rollback:** revert the app first, then `alembic downgrade 0030`.
+### Rollback
+Revert the app, then run `alembic downgrade 0030`.
 
 ---
 
-## PR8: Website feeds pull only articles
+## PR10: Website feeds pull only articles
 
-**What you'll notice:** a pasted site pulls this week's posts, not About, Contact, tag, author or shop pages. Undated stories sort last and say "date unknown".
+**What you'll notice:** a pasted site pulls its posts, not its About, Contact, tag, author or shop pages.
 
 **Complaints:** "it pulls random not articles from the site".
 
 ### Backend
-
-**Dependencies:** only packages already installed: `courlan` 1.4.0, `lxml` 6.1.3, `tld` and `trafilatura` 2.3.1 (`requirements.lock:47, 109, 219, 230`).
+It uses only installed packages: `courlan`, `lxml`, `tld` and `trafilatura` (`requirements.lock:47, 109, 219, 230`).
 
 **`app/article_detect.py` (new, pure):**
-- `url_ok(url, site)`: `courlan.check_url(strict=True)` plus a list of non-article segments (about, contact, privacy, terms, tag(s), category, author, page/N, search, login, account, cart, shop, subscribe, careers, jobs, faq). A single-segment page at the root passes only when it looks like a slug or carries a date.
-- `classify_sitemap(url)`: prefer news, post, article and blog sitemaps; skip category, tag, taxonomies, author, user, page, product, attachment, image and video ones.
-- `score_page(data, requested, final, hint) → (score, reasons)`, accepted at a score of 2 or more:
-  - +3 for an `og:type` or JSON-LD article kind; +1 for a date; +1 for 600+ characters.
-  - −3 for a website, collection or about kind; −2 under 300 characters; −3 when the title equals the site name or "404"; −3 for a redirect to another path; −2 for a canonical URL elsewhere; −1 for no date.
-- `listing_links(html, page_url)` with `lxml.html`:
-  - honours `<base>`; `urljoin` against the page; `courlan.normalize_url`
-  - same site by `is_external`
+- `url_ok(url, site)`: `courlan.check_url(strict=True)`, plus a list of path segments that aren't articles.
+- `classify_sitemap(url)`: prefer news, post, article and blog sitemaps, and skip taxonomy, author, product and media ones.
+- `score_page(...) → (score, reasons)`. A page is accepted at a score of 2 or more.
+  - Plus: +3 for an `og:type` or JSON-LD article, +1 for a date, +1 for 600+ characters.
+  - Minus: −3 for website/about kinds, −2 under 300 characters, −3 for a title equal to the site name or "404", −3 for a redirect to another path, −2 for a foreign canonical, −1 for no date.
+- `listing_links(html, page_url)`:
+  - honours `<base>`
+  - keeps same-site links only
   - drops nav, header, footer and aside
-  - anchor text of at least 15 characters or 3 words
-  - the largest group of 3 or more links sharing an ancestor signature and URL template
+  - takes the largest repeating group of 3 or more
   - reads `<time datetime>`
 
 **`feed_autodiscovery.py`:**
-- `_parse_sitemap_entries` (284-307) returns `(url, date, title)`, including `news:publication_date` and `news:title`.
-- `_crawl_sitemaps` puts preferred sitemaps first and skips the skip-list. Headers are already threaded from PR7.
+- `_parse_sitemap_entries` (284) returns `(url, date, title)`.
+- `_crawl_sitemaps` (363) orders and skips sitemaps by class.
 
 **`generic_scrape.py`:**
-- **One `plan_candidates(url, sitemap_url, link_pattern, headers) → Plan`**, used by both `fetch` and `probe`. `probe` keeps returning `[]` on `NoArticleListError`.
-- A non-root URL is read page-first; a root URL is sitemap-first.
+- One `plan_candidates(url, sitemap_url, link_pattern, headers) → Plan` serves both `fetch` and `probe`.
+- A non-root URL is read page-first. A root URL is read sitemap-first.
 - `link_pattern` filters every candidate.
 - Remove the silent whole-sitemap fallback in `_section_candidates` (103-112).
-- Before extraction, one `SELECT Entry.url IN (…)` skips stored stories.
+- Skip stored URLs before extraction.
 - At most 2 undated pages per poll.
-- `_extract_one` uses `score_page`. `fetch_html` gains `return_final_url` (`article_extract.py:60`).
-- **`_extract_links_from_html` stays as a thin wrapper over `listing_links`,** so the six `test_extract_links_*` tests keep passing.
-
-**`ARCHITECTURE.md`:** `_extracted_urls` is now only a cache.
+- `_extract_one` (123) uses `score_page`. `fetch_html` gains `return_final_url` (article_extract.py:60).
+- `_extract_links_from_html` (268) wraps `listing_links`, so the `test_extract_links_*` tests still pass.
 
 ### Frontend
-`Card.tsx` shows "date unknown" when `published_at` is null. Sorting is already handled by PR1.
+None. PR5 already shows no time for undated stories.
 
 ### Tests
-- **`test_article_detect.py`** (no_db), with fixtures in `backend/tests/fixtures/scrape/`:
-  - WordPress and Yoast sitemap indexes, a Shopify sitemap and a Google News sitemap
-  - a listing page with nav and pagination
-  - an about page with `og:type=website`
-  - a redirect to the home page, and a soft 404
-- The owner supplies the URLs of the sites that pulled junk; their HTML is saved offline as fixtures.
+- **`test_article_detect.py`** uses fixtures in `backend/tests/fixtures/scrape/`:
+  - WordPress, Yoast, Shopify and News sitemaps
+  - a listing page and an about page
+  - a home-page redirect and a soft 404
+  - the owner's junk sites, saved offline
 - **Rewrite:**
-  - `test_plugin_sitemap_wins_over_page_links`: a non-root URL is page-first.
+  - `test_plugin_sitemap_wins_over_page_links`.
   - `test_generic_scrape_sitemap_url.py:249-270`.
-  - `test_sitemap_newest_first.py`: news and post sitemaps first. `test_fetch_falls_back_to_whole_sitemap_when_section_empty` (100-109) now asserts there is **no** fallback.
-- **New:** `test_generic_scrape_skips_stored.py` (db).
+  - `test_sitemap_newest_first.py` (`:100-109` now asserts there is no fallback).
+- **New:** `test_generic_scrape_skips_stored.py`.
 
-### Verification and risks
-- From the VPS, probe each junk site read-only (`docker compose exec backend python -c …`) and compare with the old picks. Screenshot a former junk site's tab.
-- Some website feeds pull fewer stories or show `[no list]` in Needs attention.
-- Revert is safe; no data changes.
+### Risks
+- Probe the junk sites read-only from the VPS before merging.
+- Some feeds will pull fewer stories or show `[no list]`.
+- Revert is safe.
 
 ---
 
-## PR9: One add flow with a preview
+## PR11: One add flow with a preview
 
 **What you'll notice:**
-- ≡ → Add feed gives one field. Preview shows the stories Popping will pull: "10 added · 3 show in News now, 7 under Show older; 87 older skipped."
-- The category defaults to your current tab, and the name is prefilled.
-- After Add: "Checking…", then "✓ 10 stories in News" with 3 titles.
-- A blocked site shows "Reading as Safari · Undo".
-- A web-page feed gets "Find its feed".
-
-**Complaints:** "Feeds are added and then I have to click edit … didn't tell me if it is actually pulling", "change the settings, like browser".
+- ≡ → Add feed gives one field. The preview lists the stories, with one line such as "10 stories · 87 older skipped".
+- The name is prefilled, and the category defaults to the current tab.
+- After Add you see "Checking…", then "10 stories in News" with 3 titles and "Open News".
+- A blocked site shows "Reading as Safari · Undo". A web-page feed gets "Find its feed".
 
 ### Backend (`routes/sources.py`)
-
-**`BROWSER_HEADERS`** goes in `backend/app/sources/rss.py`:
-- The same Safari User-Agent as `headers.ts BROWSER_USER_AGENT`, plus `Accept-Language`.
-- Pinned against `headers.ts` in `test_frontend_feed_editor_rules.py`.
-- The backend has no `BROWSER_HEADERS` today, only `youtube._BROWSER_UA`.
+**`BROWSER_HEADERS`** in `sources/rss.py`: the Safari User-Agent from `headers.ts`, plus `Accept-Language`. It is pinned in `test_frontend_feed_editor_rules.py`.
 
 **`POST /api/sources/preview`** (`_write_deps`):
-- Request `{url, type?, custom_headers?, sitemap_url?, link_pattern?}`.
-- `asyncio.Semaphore(2)`, a 120 s TTL cache (at most 32 entries), an overall 60 s `wait_for`, and `to_thread` for parsing. Document the semaphore and cache in `ARCHITECTURE.md`.
-- **SSRF-guarded fetchers only:** `fetch_html` / `fetch_html_checked`, the rss fetch, and `discover_feed_url(headers=)`.
-- Pipeline:
-  1. YouTube and Apple resolution
-  2. Reddit
-  3. Fetch as a feed. On 401/403 or a challenge page, retry once with `BROWSER_HEADERS`, only if the caller sent no User-Agent. Website mode retries the same way through `fetch_html_checked`.
-  4. `discover_feed_url`
-  5. `plan_candidates`, then up to 8 extractions
-- Response fields:
+- Limits: `asyncio.Semaphore(2)`, a 120 s cache of at most 32 entries, a 60 s `wait_for`, and `to_thread` for parsing. Document the semaphore and cache in `ARCHITECTURE.md`.
+- It uses SSRF-guarded fetchers only.
+- **Pipeline:**
+  1. YouTube and Apple resolution.
+  2. Reddit.
+  3. Fetch as a feed. On 401/403 or a challenge page, retry once with `BROWSER_HEADERS`, but only if the caller sent no User-Agent.
+  4. `discover_feed_url`.
+  5. `plan_candidates`, then up to 8 extractions.
+- **Response:**
   - `ok`, `kind`, `url`, `headers_used`, `mode`, `feed_title`
   - `items[{title, url, published_at, accepted, reason}]`
-  - `total_count`, `will_add_count`, `in_window_count`, `older_skipped_count`, from `select_items_for_ingest(first_fetch=True)` and the 48 h window
+  - `total_count`, `will_add_count`, `older_skipped_count` (from `select_items_for_ingest(first_fetch=True)`)
   - `already_stored_count`, `duplicate_of`, `error_kind`, `error`
-- **`/sources/test` keeps `_test_source_impl` (974) unchanged,** so the error kinds that tests pin stay the same.
+- `/sources/test` keeps `_test_source_impl` (974) unchanged.
 
 **Duplicates:**
-- Only `POST /sources` (501) returns 409 "You already follow this feed as \<label\>." It matches `Source.url ==` the final URL, for every type.
-- `/auto` (671) keeps returning 200 `{found: true, source: <existing>}` for every type. Old clients rely on that for "Already added" (`FeedManager.tsx` 630-634), and `test_auto_adds_a_youtube_channel_once` expects it.
-
-The Cookie / Authorization / Host denylist (180) still applies.
+- Only `POST /sources` (501) returns 409, "You already follow this feed as \<label\>."
+- `/auto` (671) keeps returning 200 with the existing feed.
+- The header denylist (180) still applies.
 
 ### Frontend
+**`feeds/AddFeed.tsx`** replaces `AutoFeedBlock` (FeedManager.tsx:552-747) and `AddCustomTab` (757-1329):
+- One 17px URL field and a Preview button.
+- `FeedPreview`: up to 5 titles with dates, one count line, the name, `CategoryPicker`, and Add.
+- An Options disclosure: type, sitemap, link pattern and headers.
+- The draft is kept in a module store.
+- After Add, it polls `api.source(id)` every 5 s for up to 120 s.
 
-**`feeds/AddFeed.tsx`** replaces `AutoFeedBlock` (552-747) and `AddCustomTab` (757-1329):
-- One 17px field (`inputMode="url" autoCapitalize="none" autoCorrect="off"`) and a Preview button.
-- **`FeedPreview` card:**
-  - a strategy line, 5 titles with dates, and the counts
-  - the name from `cleanDisplayName`
-  - `CategoryPicker`, defaulting to the current `cat:` tab. From a meta tab it defaults to the last category used for Add, otherwise the first category in tab order.
-  - Add
-- An "Options" disclosure: type, sitemap, link pattern, headers.
-- Browser mode shows a note with Undo, which PATCHes `custom_headers: null`.
-- The draft lives in a module store, so closing Settings keeps it.
-- **After Add:** poll `api.source(id)` every 5 s for up to 120 s, then show 3 titles and "Open \<category\> tab".
-
-**`openSettings(tab, opts?: {sourceId?, sub?, category?})`** replaces `(tab, sourceId?)` (App 525); update every call site. `Settings` and `FeedManager` gain an `initialSubTab` prop.
-
-**"Find its feed"** (the `not_a_feed` action) previews the URL, then PATCHes `{type, url}` (PR7).
-
-**`apiErrors.ts`:** `ALREADY_FOLLOW_RE` matches "channel" or "feed".
-
-**Menu:** an "Add feed" row.
-
-**`api.ts`:** `previewSource`.
+**Elsewhere:**
+- `openSettings(tab, opts?: {sourceId?, sub?, category?})` replaces `(tab, sourceId?)` (App.tsx:526), and every call site is updated.
+- "Find its feed" previews the URL, then PATCHes `{type, url}`.
+- `ALREADY_FOLLOW_RE` matches "channel" or "feed".
+- Add `api.previewSource`.
+- PR6's "Add your first feed" row now opens Add.
 
 ### Tests
 - **pytest:**
-  - `test_sources_preview.py`: a loopback 403 for the default User-Agent, in both feed and website mode; semaphore; cache; 60 s budget; counts; the SSRF guard on private IPs.
-  - `test_source_duplicate_409.py`: POST returns 409; `/auto` returns 200 with the existing feed.
-  - `test_source_editor_contract.py::test_name_collision_is_409` gets two distinct URLs.
-  - Rewrite `test_frontend_slice15_add_generic_scrape.py` and `test_source_create_sitemap_link_pattern.py` to pin `AddFeed.tsx`.
+  - `test_sources_preview.py`: a loopback 403 in both modes, the semaphore, the cache, the time budget, the counts, and the SSRF guard.
+  - `test_source_duplicate_409.py`.
+  - `test_source_editor_contract.py::test_name_collision_is_409` gets two URLs.
+  - Rewrite `test_frontend_slice15_add_generic_scrape.py` and `test_source_create_sitemap_link_pattern.py`.
   - The `BROWSER_HEADERS` pin.
 - **Flows:**
-  - Rewrite FJ, FJ2, FP, FQ, FR, FS and **FG2** (866-886) for the new form.
-  - `flow-add-preview`: at most 5 taps.
-  - `flow-add-browser-fallback`.
-  - `flow-add-duplicate`.
-  - `flow-find-its-feed`.
-  - `flow-add-from-meta-tab`.
-- **Smoke:** remove the `settings-add-*` states (200-270); add `add-empty`, `add-preview` (390 / 320), `add-result` and `add-error`. `capture.cjs` mocks the preview.
+  - Rewrite FJ, FJ2, FP, FQ, FR, FS and FG2 (866-886).
+  - New: `flow-add-preview` (at most 5 taps), `flow-add-browser-fallback`, `flow-add-duplicate`, `flow-find-its-feed`, `flow-add-from-meta-tab`.
+- **Smoke:**
+  - Remove `settings-add-*` (smoke.cjs:200-270).
+  - Add `add-empty`, `add-preview` (390/320), `add-result` and `add-error`.
+  - `capture.cjs` mocks the preview.
 
-**Risks:**
-- A website preview can take up to 60 s; the semaphore bounds the load.
-- Revert restores the old forms; both endpoints are additive.
+### Risks
+- A website preview can take up to 60 s. The semaphore bounds the load.
+- Revert restores the old forms.
 
 ---
 
-## PR10: Menu of tasks, 4 Settings tabs, one vocabulary
+## PR12: Menu of tasks, 4 Settings tabs
 
 **What you'll notice:**
-- Menu: Add feed; Feeds (2 need attention); Saved; Edit tabs; Activity; Settings; How Popping works.
-- Settings: Feeds / AI & Brief / Activity / General.
-- The same words everywhere.
+- The Menu lists Add feed, Feeds (2 need attention), Saved, Edit tabs, Activity and Settings.
+- Settings has 4 tabs: Feeds / AI & Brief / Activity / General.
 
-**Complaints:** "This app is clunky", "Nothing is intuitive to a new user".
+**Complaints:** "This app is clunky".
 
 ### Changes
-
 **`Drawer.tsx`** (327-495) becomes task rows built from `Grouped.tsx`:
 - Saved selects `meta:saved`.
-- Activity opens Settings → Activity.
-- Jump to column appears on md and up only.
+- Jump to column shows only on md and up.
 
-**`lib/settingsTabs.ts` (already exists; keep `isSettingsTab`):**
-- `SETTINGS_TABS = ['feeds', 'llm', 'activity', 'general']`.
-- `normalizeSettingsTab(t) → {tab, sub}` maps the old ids:
-  - `notifications`, `reset` → `general`
-  - `history` → `activity/read`
-  - `hidden`, `voted` → `activity/not-interested`
+**`lib/settingsTabs.ts` (extend):**
+- `SETTINGS_TABS` shrinks from 8 ids to 4: `['feeds', 'llm', 'activity', 'general']`.
+- `isSettingsTab` (used at App.tsx:507) reads the new list.
+- `normalizeSettingsTab` maps the old ids:
+  - `notifications` and `reset` → general
+  - `history` and `voted` → activity/history (C5)
+  - `hidden` → activity/hidden
   - `starred` → closes Settings and selects Saved
-- App's `?tab=` sync uses it.
+- The `?tab=` sync (App.tsx:499-519) uses it.
 
 **`Settings.tsx`:**
 - AI & Brief: the LLM section plus a schedule line.
-- Activity: a segmented control, "Opened and saved" (`HistoryTabContent` 1118) / "Not interested" (Hidden and Downvoted merged through `EntryIdListContent` 1539).
-- General: Notifications status (415-456) and Reset.
-- Settings → Saved is deleted.
+- Activity: a History | Hidden segmented control (`HistoryTabContent` 1118, `EntryIdListContent` 1539).
+- General: Notifications and Reset.
+- Delete Settings → Saved and Downvoted, and App's `onHideAllDownvoted` (3231-3250).
 
-**Vocabulary sweep:** story, feed, tab, Saved, Unread / Read.
-- `Column.tsx:833` becomes "no stories in this tab yet", and `test_frontend_slice19_empty_column_source_status.py:84` is updated in the same commit. The pin changes; the word is not allowlisted.
+**Copy:** a hand sweep to stories, feeds and tabs, including the desktop health line (2679) and the For You row count (2855). There is no guard test.
 
-**No step changes the shared `sources` table** (D15).
+**Shared table:** no step changes the shared `sources` table.
 
 ### Tests
-- **pytest:** `test_frontend_vocabulary.py` (no_db) scans JSX text, `toast(…)`, `aria-label` and `title` strings for `entries?`, `preset`, `Fresh`, `History` and user-facing `source`, with an explicit allowlist for code identifiers.
-- **Unit:** `settingsTabs.test.ts`.
+- **Unit:** extend the settings-tabs coverage in a new `settingsTabs.test.ts`.
 - **Flows:**
   - Update FG, FT, FU and `flow-menu-closed-inert`.
-  - `flow-menu-rows`: each row reaches its target in 2 taps.
-  - `flow-settings-old-ids`.
-  - `flow-restore-hidden`: 3 taps.
+  - New: `flow-menu-rows` (2 taps each), `flow-settings-old-ids`, `flow-restore-hidden` (3 taps).
 - **Smoke:**
-  - Remove `settingsState('notifications' | 'history' | 'hidden' | 'starred' | 'voted' | 'reset')` (365-371). `starred` now closes Settings, so its wait would fail.
-  - Add `menu` and one state per new Settings tab, plus `settings-old-id-hidden`.
+  - Remove `settingsState('notifications' | 'history' | 'hidden' | 'starred' | 'voted' | 'reset')` (366-372).
+  - Add `menu`, one state per new tab, and `settings-old-id-hidden`.
 
-**Risks:** a broad copy change; the old URLs are mapped. Revert is safe.
+### Risks
+- The copy change is broad. Old URLs are mapped.
+- Revert is safe.
 
 ---
 
-## PR11: Deferred (needs a fresh owner yes, D17)
+## PR13: Deferred (each needs a fresh owner yes, D19)
 
-Each item ships as its own PR only after the owner says yes:
-- **Ranking retune:** views count only after 1 s on screen (IntersectionObserver, no worker); `DELETE /api/interactions/latest` so Undo also removes the ranking signal.
-- Category rename/merge endpoint.
-- Per-feed volume cap UI (its own nullable migration).
+- Category rename/merge.
+- A per-feed volume cap UI (with its own nullable migration).
 - Retention/pruning: off by default, dry run first. `interactions.entry_id` is ON DELETE CASCADE.
 - JSON Feed and guessed feed paths.
 - Framing Watch on the phone.
 - Drag-to-reorder.
-- **O1's automatic fallback on scheduled fetches, if approved after PR7 ships.** It then needs its own additive migration for `fetch_mode`.
+- Automatic Safari fallback on scheduled fetches (needs `fetch_mode` in its own migration).
+- Undo removing the ranking signal (`DELETE /api/interactions/latest`).
 
 ---
 
+## Dropped and why
+
+**First-run help and explanations**
+1. **The tip card** goes. Social-media conventions (the headline opens, ▲▼, bookmark, swipe, ⋯) need no tutorial (D15).
+2. **"How Popping works" and its Menu row** go, for the same reason. The desktop `?` sheet stays and only gains keys. It does not get a focus trap or a touch section.
+3. **Meta-tab "nothing to queue" explanations** go. Pulling Saved simply re-reads.
+
+**Old reading-model controls**
+4. **"Show older stories" and the "Older" divider** go. A row past the end would undo the end. ⋯ → Show stories from does the same job in 3 taps (D5).
+5. **`per_source_floor` (client and backend)** is never built.
+   - The window counts arrival time, so a slow feed's new story shows when it arrives. Health pills and the add result prove a feed works.
+   - Dropping it also removes a 90-day per-source `row_number` and its 422 rules.
+   - `per_source_cap` stays, so one busy feed can't fill a tab.
+6. **✓ Read, swipe-right, `m`, the context-menu "Mark as read", and the "Marked as read/unread" toasts** go. Opening a story or scrolling past it uses it up (D3).
+7. **The eye button, "Not interested", "More like this" and the two-signal swipe** go. ▲/▼ and Hide cover them, with Reddit's meanings (D1, D2).
+8. **Header-tap mark-read, the "+N new" chip, the seen-set reset and `last_viewed` writes** go (D4).
+9. **The "Unread" / "Read (N)" labels and persisted section collapse** go. Earlier folds again on every snapshot, so the end stays the end. `column_sections` rows are left for Reset to clear.
+10. **The "Show 30 more" button** goes, because batches append automatically (D16).
+11. **The unread accent ring** goes. The marker separates new from seen.
+
+**Toasts**
+12. **Chatty toasts go:** vote thank-yous, save/unsave, "refreshed", "Entry unhidden." and "Column restored.". The filled icon or the status row is the feedback, and Undo toasts remain.
+
+**Signals and controls**
+13. **`dwell` events** go.
+    - They came only from ✓ and swipe-right, and time on screen while scrolling measures scroll speed, not reading.
+    - The ranker's dwell weight goes idle, and `config.py` is untouched.
+    - The old dwell-unit fix is moot.
+14. **The phone header's Refresh button and 34px large title** go. Pull replaces Refresh (D10), and C4 keeps a path that isn't a gesture. The slimmer title gives the space back to stories.
+15. **The add flow's strategy line, "N show now / M under Show older", and `in_window_count`** go. The preview is titles plus one count line (D13).
+16. **Settings → Downvoted and "Hide all downvoted"** go (C5). Votes now mean Reddit votes, and they show in Activity → History.
+17. **"Date unknown"** goes. Undated stories show no time.
+18. **Move earlier, Move later and Hide this tab in the tab sheet** go. Edit tabs does each in 3 taps, and fewer rows keep the sheet scannable.
+19. **Separate "Found nothing" and "Nothing new" pills, and Delete as a quiet feed's fix,** go. Quiet covers all three states, Check now is the one safe fix, and Delete stays in the editor.
+20. **Desktop scroll tracking** goes (C2). Desktop columns scroll together, so scrolling past one doesn't mean you read it.
+
+**Tests**
+21. **`test_frontend_vocabulary.py`** is not nearly free (it needs JSX scanning plus an allowlist). Copy is fixed by hand in the PRs that touch it.
+
 ## Review notes
 
-Corrections I rejected or changed:
-- **#19, PR2 part:**
-  - Not a merged-value PUT. I used a server-side delta `PATCH /api/preferences/{key}` instead.
-  - A merged PUT sent from a suspended page can still erase another device's change made since the last resync.
-  - The PATCH is one keepalive-safe request, and it also removes the extra GET per flush.
-- **#6, Reddit tests:** Reddit-off is detected in `_ingest` before the fetch, not by raising in the plugin. `test_dynamic_reddit_warned_disabled_cap.py` therefore stays unchanged. The other named scrape tests are rewritten or kept, as listed in PR7 and PR8.
-- **#28, ShortcutsSheet:** its card is already `role="dialog" aria-modal="true"` (ShortcutsSheet.tsx:82-84); only the backdrop is `role="presentation"`. The missing focus trap is real, and PR4 adds it.
-- **#31, "Quiet":** I kept the 7-day window and changed the copy ("Quiet · nothing in 7 days"). With only single-column indexes on `entries`, an unwindowed per-source max can scan the `fetched_at` index for dead feeds. "All already in Popping" uses a cheap `EXISTS` on the indexed `source_id`.
-- **#12, cap and `active_only` without a window:** `per_source_floor` and `per_source_cap` now require `max_age_hours` (422 otherwise). An unbounded per-source `row_number` would scan the whole table. `active_only` works on its own.
+**Facts re-checked against main:**
+1. **Anchors:** every anchor was re-checked on 4be8766. #25's `frontend/` and `backend/` trees match its branch exactly. `brief.py:386/451` are the `fetched_at >= since` filters.
+2. **Phone scroller:** it is the list at `Column.tsx:493`, which has no `data-scroller` today. PR1 adds it. The `App.tsx:3077` wrapper only scrolls Brief.
+3. **Stale lists:** App mirrors `readEntries`, `hiddenEntries` and `starredEntries` into refs inside effects (App.tsx:765-781). `setReadEntries` replaces the whole list (preferences.tsx:592-606). So two calls in one tick lose an id, and a diff would PATCH a removal. PR2's `addIds` / `removeIds` fix this.
+4. **Desktop layout:** the grid `<main>` (2937) is a flex-1 scroll container inside an `h-full flex flex-col` root (2558). Its siblings (BriefCard, the For You row, FramingWatch) can't shrink, so a tall For You row collapses the grid. PR3's single scroller fixes it.
+5. **Phone `<main>`:** it is CSS-hidden at md and up but stays mounted (3000), while the desktop grid is gated by `isDesktop` (2936). The seen observer is gated the same way.
+6. **Frozen clock:** smoke calls `context.clock.setFixedTime(F.NOW)` (`smoke.cjs:934`), and timers keep running.
+7. **Status wait:** `smoke.cjs:990` waits up to 8 s for no `[role="status"]` before every state.
+8. **Preference mock:** `capture.cjs:182-186` echoes `body.value` for every method.
+9. **slice19:** six tests pin the empty state and the `<Column` call sites. The `<Column\b[^>]*>` regex (:136) stops at the first `>`.
+10. **Widths:** `WIDTHS` has only 390, 320 and 312 (`smoke.cjs:27-33`), and flows default to `[390]` (`flows.cjs:89-95`).
+11. **Built-ins:** every plugin gets a job (`scheduler.py:1799-1810`) and a row (110-135), so on a real install `columns.length === 0` (2824) never happens.
+12. **Brief:** BriefCard has no `onOpenSettings` prop and has four generate buttons. `Settings.tsx:405-412` sits on the AI tab.
+13. **`IngestResult`** (schemas.py:497-502) ignores unknown keys. It does not return a 500.
+14. **Existing libraries:** `lib/categories.ts` and `lib/settingsTabs.ts` exist (8 ids). Unit tests live in `frontend/scripts/unit/`. `flows.cjs` has no `tap` / `taps`. Card's constants are `SWIPE_DEAD_ZONE_PX` / `SWIPE_DIRECTION_RATIO`. `flows.cjs:742` is FL's PUT.
+15. **Entries ranking:** the per-category `row_number` orders by `composite_score` (entries.py:404-409). `categoryLabel('on_this_day')` gives "On This Day".
+16. **Tap targets:** 6 × 44 = 264px fits from a 310px viewport, which is 266px of bar at 312.
+17. **View signal:** the deep-dive asked for the on-mount `view` change to ship separately, with owner sign-off. D3 is the sign-off, and PR3 is the separate PR.
+
+**Corrections not taken as written:**
+- **#4 ("3 new" as a button that scrolls up):** not taken. The status row only shows at the top, where the automatic rebuild already applies. Arrivals that land after you've scrolled away follow PR3's rule.
+- **#5 (either a single scroller or open-only on desktop):** both are taken. The single scroller fixes a layout bug that exists regardless, and open-only avoids marking columns you weren't reading.
+- **#6 (iOS pull gesture):** taken, plus one rule: a move with `cancelable === false` ends the pull, because iOS has already given the touch to native scrolling.
+- **#11 ("Add your first feed" in `EmptyColumnMessage` for For You):** moved to a row at the top of For You (C7). Built-in stories mean For You is never empty, so an empty state would never show.
+- **#13, second option (qualify a card on about 600 ms of total visibility):** not taken. It needs a clock across observer callbacks, and a card flung past in under a second wasn't read. The ✓-text rule alone fixes the false end.
+- **#27 (`?since=` on resync):** taken, with one change: a full GET still runs on resume, because a `since` query can't report deleted rows.
+
+**Design choices to watch after deploy:**
+- **`SEEN_DWELL_MS = 1000`** is one constant. Tune it after the owner tries it.
+- **Read marks** go under the story's category key. Reads are a union, so PR8 doesn't migrate `read_entries` suffixes, and pruning stays per category.
+- **C7 and C8** are the newest calls. Each is a single row and easy to remove.
 
 ### Critical Files for Implementation
-- /home/user/popping/frontend/src/App.tsx (PR #25 version)
 - /home/user/popping/frontend/src/lib/preferences.tsx
-- /home/user/popping/backend/app/scheduler.py
-- /home/user/popping/backend/app/routes/entries.py
-- /home/user/popping/backend/app/routes/sources.py
-- /home/user/popping/frontend/scripts/iphone-audit/smoke.cjs
+- /home/user/popping/frontend/src/App.tsx
+- /home/user/popping/frontend/src/components/Column.tsx
+- /home/user/popping/frontend/src/components/Card.tsx
+- /home/user/popping/frontend/scripts/iphone-audit/smoke.cjs (with flows.cjs and capture.cjs)
