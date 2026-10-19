@@ -4,7 +4,8 @@ overwrite; GET /api/preferences?since=; and ``{key:path}`` keys.
 Two devices (or two calls in one tick) used to PUT whole lists, so the
 later write dropped the earlier one's ids. PATCH applies ``add`` /
 ``remove`` (or ``set`` for votes) to the row under ``SELECT ... FOR
-UPDATE``. The lock tests below are deterministic: a second session
+UPDATE`` (taken by ``INSERT ... ON CONFLICT DO UPDATE``). The lock
+tests below are deterministic: a second session
 holds the lock (or an uncommitted insert) while the PATCH runs as a
 task, so the interleaving that loses a write without the lock is the
 one that actually happens.
@@ -19,7 +20,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.auth.deps import ANONYMOUS_USER_ID, current_user
@@ -60,9 +61,10 @@ def _anon_row(key: str):
 @pytest.mark.asyncio
 async def test_patch_waits_for_the_row_lock_and_keeps_both_changes(app_client):
     """Session A holds ``SELECT ... FOR UPDATE`` on the row; PATCH B must
-    wait for it, then apply its add on top of A's committed value. With
-    ``with_for_update()`` removed, B reads the old value, waits only at
-    its UPDATE, and then overwrites A's id."""
+    wait for it, then apply its add on top of A's committed value.
+    Without the lock (``ON CONFLICT DO NOTHING`` plus a plain SELECT), B
+    reads the old value, waits only at its UPDATE, and then overwrites
+    A's id."""
     key = "hidden_entries"
     resp = await _patch(app_client, key, {"add": [1]})
     assert resp.status_code == 200, resp.text
@@ -93,9 +95,9 @@ async def test_patch_waits_for_the_row_lock_and_keeps_both_changes(app_client):
 
 @pytest.mark.asyncio
 async def test_first_write_waits_for_a_concurrent_insert(app_client):
-    """The ``INSERT ... ON CONFLICT DO NOTHING`` path: while another
-    transaction's insert of the same key is uncommitted, the PATCH
-    waits on the unique index, then locks and extends that row."""
+    """The first-write path: while another transaction's insert of the
+    same key is uncommitted, the PATCH waits on the unique index, then
+    locks and extends that row."""
     key = "starred_entries"
     async with SessionLocal() as a:
         await a.execute(
@@ -122,6 +124,52 @@ async def test_first_write_waits_for_a_concurrent_insert(app_client):
 
     assert resp.status_code == 200, resp.text
     assert resp.json()["value"] == [1, 2]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("lock_first", [True, False], ids=["locked", "unlocked"])
+async def test_patch_racing_a_delete_of_the_key_recreates_the_row(
+    app_client, lock_first
+):
+    """Reset and Mark all DELETE the key while another device PATCHes
+    it. Session A deletes the row and commits while PATCH B waits on it:
+    with ``locked``, A held ``FOR UPDATE`` before B started; with
+    ``unlocked``, A's uncommitted DELETE is what B waits on. B must not
+    find "no row" (that was a 500): it gets a fresh row holding only its
+    own change."""
+    key = "hidden_entries"
+    resp = await _patch(app_client, key, {"add": [1, 2]})
+    assert resp.status_code == 200, resp.text
+
+    async with SessionLocal() as a:
+        if lock_first:
+            await a.execute(_anon_row(key).with_for_update())
+        else:
+            await a.execute(
+                delete(UserPreference).where(
+                    UserPreference.user_id == ANONYMOUS_USER_ID,
+                    UserPreference.key == key,
+                )
+            )
+        b = asyncio.create_task(_patch(app_client, key, {"add": [3]}))
+        try:
+            await asyncio.sleep(0.2)
+            assert not b.done(), "PATCH must wait for the deleting transaction"
+            if lock_first:
+                await a.execute(
+                    delete(UserPreference).where(
+                        UserPreference.user_id == ANONYMOUS_USER_ID,
+                        UserPreference.key == key,
+                    )
+                )
+            await a.commit()
+        finally:
+            await a.rollback()
+            resp = await b
+
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["value"] == [3]
+    assert await _value(app_client, key) == [3]
 
 
 @pytest.mark.asyncio
@@ -293,11 +341,16 @@ async def test_key_longer_than_60_is_400(app_client, method):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("method", ["GET", "PUT", "PATCH", "DELETE"])
-@pytest.mark.parametrize("key", ["hidden_entries\n", "read_entries:a\nb"])
-async def test_newline_in_key_is_400(app_client, method, key):
+@pytest.mark.parametrize(
+    "key",
+    ["hidden_entries\n", "read_entries:a\nb", "seen:a\x00b", "hidden_entries\x00"],
+)
+async def test_newline_or_nul_in_key_is_400(app_client, method, key):
     """``match`` with the allowlist's closing ``$`` accepted a trailing
     newline, and the route pattern's own ``$`` dropped it before the
-    handler ran (or 404'd a newline mid-key)."""
+    handler ran (or 404'd a newline mid-key). A NUL passes the
+    allowlist's "anything non-empty" suffix, and Postgres text can't
+    hold it, so without its own check it was a 500."""
     body = {"value": [1]} if method == "PUT" else {"add": [1]}
     resp = await app_client.request(method, _url(key), json=body)
     assert resp.status_code == 400, resp.text
@@ -356,11 +409,30 @@ async def test_largest_ids_and_full_lists_are_accepted(app_client):
 
 
 @pytest.mark.asyncio
-async def test_naive_since_is_422(app_client):
-    resp = await app_client.get(
-        "/api/preferences", params={"since": "2026-10-19T12:00:00"}
-    )
+@pytest.mark.parametrize(
+    "since",
+    [
+        "2026-10-19T12:00:00",  # naive
+        # Aware, but outside year 1 to 9999 once converted to UTC: the
+        # driver couldn't bind these (a 500).
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ],
+)
+async def test_bad_since_is_422(app_client, since):
+    resp = await app_client.get("/api/preferences", params={"since": since})
     assert resp.status_code == 422, resp.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "since", ["0001-01-01T00:00:00+00:00", "9999-12-31T23:59:59+00:00"]
+)
+async def test_since_at_the_ends_of_the_range_is_200(app_client, since):
+    await _patch(app_client, "hidden_entries", {"add": [1]})
+    resp = await app_client.get("/api/preferences", params={"since": since})
+    expected = {"hidden_entries"} if since.startswith("0001") else set()
+    assert _keys(resp) == expected
 
 
 # ---------------------------------------------------------------------------

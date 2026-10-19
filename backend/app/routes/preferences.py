@@ -62,11 +62,13 @@ and was already fixed this way.
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import re
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import AwareDatetime
+from pydantic import AfterValidator, AwareDatetime
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -192,11 +194,21 @@ def _validate_key(key: str) -> None:
 
     ``fullmatch``, not ``match``: the pattern ends in ``$``, which
     also matches just before a trailing newline.
+
+    NUL is refused on its own: the suffix is "anything non-empty", so
+    the pattern lets ``seen:a\\x00b`` through, and Postgres text can't
+    hold a NUL (the bound parameter fails to encode, a 500). No key
+    the frontend writes can contain one.
     """
     if not isinstance(key, str) or len(key) > _KEY_MAX:
         raise HTTPException(
             status_code=400,
             detail=f"preference key must be {_KEY_MAX} characters or fewer",
+        )
+    if "\x00" in key:
+        raise HTTPException(
+            status_code=400,
+            detail="preference key can't contain a NUL character",
         )
     if not _PREFERENCE_KEY_RE.fullmatch(key):
         raise HTTPException(
@@ -318,9 +330,25 @@ def _apply_patch(
     return _trim_ids(ids, cap)
 
 
+def _since_to_utc(value: dt.datetime) -> dt.datetime:
+    """``since`` in UTC, or a 422 when it has no UTC equivalent.
+
+    ``0001-01-01T00:00:00+14:00`` is a valid aware datetime, but in UTC
+    it falls before year 1. Left to the driver, that is an
+    ``OverflowError`` while binding the parameter (a 500). A
+    ``ValueError`` here makes it a validation error instead.
+    """
+    try:
+        return value.astimezone(dt.timezone.utc)
+    except OverflowError as exc:
+        raise ValueError("since is out of range in UTC") from exc
+
+
 @router.get("/preferences", response_model=UserPreferenceListOut)
 async def list_preferences(
-    since: AwareDatetime | None = Query(default=None),
+    since: Annotated[AwareDatetime, AfterValidator(_since_to_utc)] | None = Query(
+        default=None
+    ),
     user: dict | None = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> UserPreferenceListOut:
@@ -335,8 +363,8 @@ async def list_preferences(
     back to the localStorage seed in that case -- see the
     one-way migration doc in the frontend's lib/preferences.ts.
 
-    ``since`` (timezone-aware; a naive timestamp is a 422) keeps only
-    rows with ``updated_at > since``. Deletions don't show up in a
+    ``since`` (timezone-aware; a naive timestamp, or one with no UTC
+    equivalent, is a 422) keeps only rows with ``updated_at > since``. Deletions don't show up in a
     since-response; a full GET is how they arrive.
 
     ``updated_at`` is ``now()``, the writing transaction's START time,
@@ -472,17 +500,23 @@ async def patch_preference(
     One transaction, so two devices (or two calls in one tick) both
     land instead of the later whole-list write winning:
 
-      1. ``INSERT ... ON CONFLICT DO NOTHING`` makes sure the row
-         exists, so step 2 always has a row to lock. Two first writes
-         to the same key serialize on the unique index here.
-      2. ``SELECT ... FOR UPDATE`` locks it. Without the lock, two
-         PATCHes read the same old value and the later UPDATE drops
-         the earlier one's change.
-      3. The locked value is coerced (``_coerce_ids`` /
+      1. ``INSERT ... ON CONFLICT DO UPDATE SET key = EXCLUDED.key
+         RETURNING value`` inserts an empty row, or locks the existing
+         one and reads its value, in one statement. Without the lock,
+         two PATCHes read the same old value and the later UPDATE
+         drops the earlier one's change. Two first writes to the same
+         key serialize on the unique index. It is one statement, not
+         ``ON CONFLICT DO NOTHING`` then ``SELECT ... FOR UPDATE``,
+         because a DELETE of the key (Reset, Mark all) committing
+         between those two left the SELECT with no row, and the
+         UPDATE then matched nothing (a 500). Here Postgres waits for
+         a conflicting row's writer, and when that writer deleted the
+         row it retries the insert, so a row always comes back, locked.
+      2. The locked value is coerced (``_coerce_ids`` /
          ``_coerce_votes``), since a PUT may have stored anything.
-      4. ``remove`` is applied before ``add``, then the result is
+      3. ``remove`` is applied before ``add``, then the result is
          trimmed to the cap, smallest entry id first.
-      5. The value is written with ``updated_at = now()``.
+      4. The value is written with ``updated_at = now()``.
     """
     _validate_key(key)
     cap = _set_key_cap(key)
@@ -515,14 +549,18 @@ async def patch_preference(
 
     user_id = resolve_user_id(user)
     where = (UserPreference.user_id == user_id, UserPreference.key == key)
-    await session.execute(
-        pg_insert(UserPreference)
-        .values(user_id=user_id, key=key, value={} if key == _VOTES_KEY else [])
-        .on_conflict_do_nothing(index_elements=["user_id", "key"])
+    insert = pg_insert(UserPreference).values(
+        user_id=user_id, key=key, value={} if key == _VOTES_KEY else []
     )
-    current = await session.scalar(
-        select(UserPreference.value).where(*where).with_for_update()
+    # ``SET key = EXCLUDED.key`` changes nothing; it is there so the
+    # conflict path takes the row lock and RETURNING reads the row.
+    locked = await session.execute(
+        insert.on_conflict_do_update(
+            index_elements=["user_id", "key"],
+            set_={"key": insert.excluded.key},
+        ).returning(UserPreference.value)
     )
+    current = locked.scalar_one()
     value = _apply_patch(key, current, body, cap)
     result = await session.execute(
         update(UserPreference)
