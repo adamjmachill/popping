@@ -55,6 +55,11 @@ const log = []
 // Each call gets its own deep copy of F.SOURCES and F.ENTRIES: POST, PATCH and
 // DELETE on /api/sources mutate that copy and every GET reads it, so a flow
 // sees its own edits and contexts never share state.
+// Preferences are a store of the same kind, empty at the start: PUT and
+// DELETE change it, and GET /api/preferences (with an optional `since`,
+// an ISO time) and GET /api/preferences/<key> read it, so a flow that
+// reloads gets back what it wrote. Each write's updated_at is F.NOW plus
+// a counter, so they stay in order under the frozen clock.
 // onUnmocked({ method, path, url }) is called for any request under
 // /api, /auth or /assets that no branch below answers (smoke.cjs rule C8).
 function mockApi(context, opts = {}) {
@@ -62,7 +67,9 @@ function mockApi(context, opts = {}) {
   const db = {
     sources: structuredClone(F.SOURCES),
     entries: structuredClone(F.ENTRIES),
+    preferences: new Map(),
   }
+  let prefWrites = 0
   const forYouIds = F.FOR_YOU.map((e) => e.id)
   const sourceById = (id) => db.sources.find((s) => s.id === id)
   const sourceName = (id) => (sourceById(id) || {}).name || 'unknown'
@@ -178,11 +185,28 @@ function mockApi(context, opts = {}) {
     if (p === '/api/llm/tags') return json(route, F.LLM_TAGS)
     if (p === '/api/settings' && m === 'GET') return json(route, F.SETTINGS)
     if (p === '/api/settings/llm') return json(route, F.SETTINGS)
-    if (p === '/api/preferences' && m === 'GET') return json(route, { items: [] })
+    if (p === '/api/preferences' && m === 'GET') {
+      const since = u.searchParams.get('since')
+      const after = since ? Date.parse(since) : NaN
+      const items = [...db.preferences.values()].filter((row) => Number.isNaN(after) || Date.parse(row.updated_at) > after)
+      return json(route, { items })
+    }
     mm = p.match(/^\/api\/preferences\/(.+)$/)
     if (mm) {
-      if (m === 'DELETE') return route.fulfill({ status: 204 })
-      return json(route, { key: decodeURIComponent(mm[1]), value: (req.postDataJSON() || {}).value ?? null, updated_at: new Date(F.NOW).toISOString() })
+      const key = decodeURIComponent(mm[1])
+      if (m === 'DELETE') {
+        db.preferences.delete(key)
+        return route.fulfill({ status: 204 })
+      }
+      if (m === 'GET') {
+        const row = db.preferences.get(key)
+        return row ? json(route, row) : json(route, { detail: `preference '${key}' not set for user` }, 404)
+      }
+      if (m === 'PUT') {
+        const row = { key, value: (req.postDataJSON() || {}).value ?? null, updated_at: new Date(F.NOW + ++prefWrites).toISOString() }
+        db.preferences.set(key, row)
+        return json(route, row)
+      }
     }
     mm = p.match(/^\/api\/ingest\/(.+)$/)
     if (mm) return json(route, { source: decodeURIComponent(mm[1]), fetched: 12, inserted: 2, duplicates: 10, error: null })

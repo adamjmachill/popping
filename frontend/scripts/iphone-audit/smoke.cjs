@@ -3,10 +3,12 @@
 //
 //   node smoke.cjs <base> [--csp] [--strict] [--browser chromium|webkit]
 //                         [--out <dir>] [--only <state>[,<state>...]]
+//                         [--states-only]
 //
 // Opens the built app (vite preview) at 390x844@3 and 320x568@2 with touch
 // emulation and a fully mocked API, drives it into each state in STATES, and
 // checks the layout rules C1-C15 in every state. Exit 1 on any failure.
+// --states-only skips the behaviour flows (the WebKit report-only run).
 //
 // The caller sets PLAYWRIGHT_BROWSERS_PATH (locally /opt/pw-browsers; CI uses
 // Playwright's default). This script never sets it. Keep it CommonJS:
@@ -30,6 +32,10 @@ const WIDTHS = {
   // A 390 iPhone with Safari's Page Zoom at 125%. Only the states that
   // list it run here.
   312: { width: 312, height: 675, deviceScaleFactor: 3.75 },
+  // A desktop browser: no touch, no iOS user agent, and no C1. Only the
+  // states and flows that list it run here; they wait for a desktop card
+  // (wait: 'main.grid article[data-card-id]').
+  1280: { width: 1280, height: 800, deviceScaleFactor: 1, desktop: true },
 }
 const DEFAULT_WIDTHS = [390, 320]
 
@@ -77,8 +83,9 @@ const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]',
 //   setup    async ({ page, width, settle }) after the app rendered
 //   extra    rule ids added to PAGE_RULES for this state (e.g. 'C2b')
 //   checks   false to skip the layout rules (behaviour flows)
-//   run      async ({ page, context, width, fail, settle }) assertions after
-//            the checks; call fail(rule, detail) for each problem
+//   run      async ({ page, context, width, fail, settle, shot }) assertions
+//            after the checks; call fail(rule, detail) for each problem, and
+//            shot(label) to save <width>-<name>-<label>.png under --out
 //   expectedFailedLoads  pathnames whose failed requests the state causes
 //            on purpose (a refused or dropped save); the browser's
 //            "Failed to load resource" line for them is not C8
@@ -139,10 +146,10 @@ const STATES = [
     name: 'dashboard',
     widths: [390, 320, 312],
     extra: ['C2b', 'C16'],
-    // The top bar holds exactly: title, search, refresh (phones) and
-    // the one Menu button.
+    // The App's top bar holds exactly: title, search, refresh (phones)
+    // and the one Menu button. Column headers are not counted.
     run: async ({ page, fail }) => {
-      const labels = await page.$$eval('header button', (els) =>
+      const labels = await page.$$eval('header[data-app-header] button', (els) =>
         els.filter((b) => b.getClientRects().length).map((b) => b.getAttribute('aria-label') || b.textContent.trim()),
       )
       const want = ['open search', 'refresh', 'open menu']
@@ -838,12 +845,12 @@ function pageChecks(cfg) {
 // ---------------------------------------------------------------------------
 function usage(msg) {
   if (msg) console.error(`smoke.cjs: ${msg}`)
-  console.error('usage: node smoke.cjs <base> [--csp] [--strict] [--browser chromium|webkit] [--out <dir>] [--only <state>[,<state>...]]')
+  console.error('usage: node smoke.cjs <base> [--csp] [--strict] [--browser chromium|webkit] [--out <dir>] [--only <state>[,<state>...]] [--states-only]')
   process.exit(2)
 }
 
 function parseArgs(argv) {
-  const opts = { base: null, csp: false, strict: false, browser: 'chromium', out: null, only: null }
+  const opts = { base: null, csp: false, strict: false, browser: 'chromium', out: null, only: null, statesOnly: false }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
     const val = () => {
@@ -856,6 +863,7 @@ function parseArgs(argv) {
     else if (a === '--browser') opts.browser = val()
     else if (a === '--out') opts.out = val()
     else if (a === '--only') opts.only = val().split(',').map((s) => s.trim()).filter(Boolean)
+    else if (a === '--states-only') opts.statesOnly = true
     else if (a === '-h' || a === '--help') usage()
     else if (a.startsWith('--')) usage(`unknown option ${a}`)
     else if (!opts.base) opts.base = a
@@ -880,18 +888,25 @@ function readCsp() {
   return { file, csp: m ? m[1] : null, error: m ? null : 'no Content-Security-Policy header found' }
 }
 
+// Safari on a Mac, for the desktop width.
+const DESKTOP_UA =
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15'
+
 function contextOptions(browserName, w) {
   const vp = { width: w.width, height: w.height }
   const common = {
     viewport: vp,
     screen: vp,
     deviceScaleFactor: w.deviceScaleFactor,
-    isMobile: true,
-    hasTouch: true,
+    isMobile: !w.desktop,
+    hasTouch: !w.desktop,
     colorScheme: 'dark',
     locale: 'en-CA',
     timezoneId: 'America/Vancouver',
   }
+  // A desktop is a mouse and a wide window: (hover: hover) matches and
+  // (pointer: coarse) does not.
+  if (w.desktop) return { ...common, userAgent: DESKTOP_UA }
   if (browserName === 'webkit') {
     // The iPhone 13 descriptor's viewport is 390x664 (Safari's toolbars);
     // the viewport and screen are set explicitly to the sizes under test.
@@ -981,6 +996,12 @@ async function runState(browser, state, width, opts) {
       shotTaken = true
       await page.screenshot({ path: path.join(opts.out, `${width}-${state.name}.png`) }).catch(() => {})
     }
+    // A flow's own screenshots (its end state, a step in between): the
+    // one above runs before `run`, so it shows only where a flow starts.
+    const labelled = async (label) => {
+      if (!opts.out) return
+      await page.screenshot({ path: path.join(opts.out, `${width}-${state.name}-${label}.png`) }).catch(() => {})
+    }
 
     try {
       await page.goto(opts.base + (state.url || '/'), { waitUntil: 'load', timeout: 30000 })
@@ -993,7 +1014,8 @@ async function runState(browser, state, width, opts) {
       await sleep(400)
 
       if (state.checks !== false) {
-        const rules = [...PAGE_RULES, ...(state.extra || [])]
+        // C1 asserts a touch phone, so a desktop width skips it.
+        const rules = [...PAGE_RULES, ...(state.extra || [])].filter((r) => !(w.desktop && r === 'C1'))
         const cfg = { c7Scopes: C7_SCOPES, c12Roots: C12_ROOTS }
         const first = await page.evaluate(pageChecks, { ...cfg, rules: rules.filter((r) => !MUTATING_RULES.includes(r)) })
         await shot()
@@ -1002,7 +1024,7 @@ async function runState(browser, state, width, opts) {
       }
       await shot()
       if (state.run) {
-        await state.run({ page, context, width, settle, fail: (rule, detail, extra = {}) => push(rule, { detail, ...extra }) })
+        await state.run({ page, context, width, settle, shot: labelled, fail: (rule, detail, extra = {}) => push(rule, { detail, ...extra }) })
       }
     } catch (e) {
       push('SETUP', { detail: `state could not be reached: ${String((e && e.message) || e).split('\n')[0]}` })
@@ -1051,10 +1073,13 @@ async function main() {
   const names = new Set(all.map((s) => s.name))
   if (names.size !== all.length) usage('duplicate state names')
   for (const n of opts.only || []) if (!names.has(n)) usage(`unknown state "${n}"; states: ${[...names].join(', ')}`)
-  const selected = opts.only ? all.filter((s) => opts.only.includes(s.name)) : all
+  const flowNames = new Set(FLOWS.map((s) => s.name))
+  const pool = opts.statesOnly ? STATES : all
+  const selected = opts.only ? pool.filter((s) => opts.only.includes(s.name)) : pool
 
   const browser = await playwright[opts.browser].launch({ headless: true })
   const results = []
+  const flowTimes = []
   const t0 = Date.now()
   try {
     for (const width of DEFAULT_WIDTHS.concat(Object.keys(WIDTHS).map(Number).filter((x) => !DEFAULT_WIDTHS.includes(x)))) {
@@ -1067,6 +1092,7 @@ async function main() {
           f.level = warn ? 'warn' : 'error'
         }
         results.push(...fs_)
+        if (flowNames.has(state.name)) flowTimes.push({ name: `${width} ${state.name}`, ms: Date.now() - t })
         const e = fs_.filter((f) => f.level === 'error').length
         const wn = fs_.length - e
         console.log(`[${width}] ${state.name}: ${e ? `${e} failure${e === 1 ? '' : 's'}` : 'ok'}${wn ? `, ${wn} warning${wn === 1 ? '' : 's'}` : ''} (${((Date.now() - t) / 1000).toFixed(1)}s)`)
@@ -1131,6 +1157,11 @@ async function main() {
     m.set(rk, (m.get(rk) || 0) + 1)
   }
   for (const [k, m] of by) console.log(`${k}: ${[...m].map(([r, n]) => `${r} x${n}`).join(', ')}`)
+  if (flowTimes.length) {
+    // Where CI time goes as flows are added.
+    console.log('\n==== slowest flows ====')
+    for (const f of flowTimes.sort((a, b) => b.ms - a.ms).slice(0, 10)) console.log(`${(f.ms / 1000).toFixed(1)}s ${f.name}`)
+  }
   console.log(`${errors.length} failure(s), ${warns.length} warning(s), browser ${opts.browser}${opts.cspActive ? ' with the production CSP' : ''}, ${((Date.now() - t0) / 1000).toFixed(0)}s`)
   process.exit(errors.length ? 1 : 0)
 }
