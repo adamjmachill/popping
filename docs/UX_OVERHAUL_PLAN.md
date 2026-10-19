@@ -227,8 +227,8 @@ D19. **Deferred** (each needs your yes later):
   - Commit this plan as `docs/UX_OVERHAUL_PLAN.md` on branch `claude/ux-overhaul-plan` and open it
     as a draft PR.
   - Scan the text for personal details first (names, emails, hosts, IPs) and leave them out.
-  - When the re-verified spec for your new direction arrives, replace the appendix and update the
-    PR.
+  - Before PR1: revise the appendix to D1–D19 and re-verify it against the code (paused to save
+    tokens).
 - **Before PR1:** check that #25 is merged. If it's still open, I branch from its head and rebase
   once it merges. I never push to #25 or merge it.
 - **Each PR:**
@@ -281,8 +281,9 @@ D19. **Deferred** (each needs your yes later):
 > - No tip card, help sheet, "Show older" row or per-feed floor.
 > - Pull to refresh.
 >
-> A re-verified revision is in progress and will replace this appendix. Line anchors are against
-> main a79c6ee plus PR #25.
+> **First job when work resumes:** revise this appendix to match D1–D19 and re-verify it against the
+> code before PR1 starts. The revision was paused to save tokens. Line anchors are against main a79c6ee
+> plus PR #25, which has since merged.
 
 **Base:** `main` at a79c6ee with PR #25 (`origin/claude/feed-display-names`, 355c596) merged.
 
