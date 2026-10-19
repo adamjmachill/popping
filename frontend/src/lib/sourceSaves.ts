@@ -15,6 +15,7 @@
 
 export type Field =
   | 'name'
+  | 'display_name'
   | 'url'
   | 'category'
   | 'refresh_interval_seconds'

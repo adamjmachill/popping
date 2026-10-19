@@ -275,9 +275,21 @@ export function suggestName(
     base = hostSlug(normalizeFeedInput(type, url))
   }
   if (!base) return null
+  return uniqueSlug(base, existingNames)
+}
+
+/** ``base``, or ``base_2``, ``base_3``… when a feed or a built-in
+ *  already has it. */
+export function uniqueSlug(base: string, existingNames: Iterable<string>): string {
   const taken = new Set(existingNames)
   for (const name of KNOWN_BUILT_INS) taken.add(name)
   let candidate = base
   for (let n = 2; taken.has(candidate); n++) candidate = `${base}_${n}`
   return candidate
+}
+
+/** A typed feed name with its spacing tidied ("  CPABC   News " ->
+ *  "CPABC News"). */
+export function cleanDisplayName(v: string): string {
+  return v.split(/\s+/).filter(Boolean).join(' ')
 }

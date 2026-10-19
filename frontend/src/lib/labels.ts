@@ -4,7 +4,8 @@
 // because the backend uses them as identifiers; these helpers turn them
 // into what a reader expects to see ("Bank of Canada",
 // "r/fantasyfootball"). Display only: anything sent back to the API
-// keeps using the raw name.
+// keeps using the raw name. A name the user typed (``display_name``)
+// wins over the derived label.
 
 // Built-in sources whose slug doesn't read well when title-cased.
 const KNOWN_SOURCES: Record<string, string> = {
@@ -36,11 +37,37 @@ function titleWord(word: string, index: number): string {
   return lower.charAt(0).toUpperCase() + lower.slice(1)
 }
 
+// Names the user typed for their feeds, by slug. Filled from the feed
+// list by App (rememberDisplayNames); sourceLabel shows these first.
+let displayNames = new Map<string, string>()
+let displayNamesVersion = 0
+const displayNameListeners = new Set<() => void>()
+
+export function rememberDisplayNames(sources: ReadonlyArray<{ name: string; display_name?: string | null }>): void {
+  const next = new Map<string, string>()
+  for (const s of sources) if (s.display_name) next.set(s.name, s.display_name)
+  if (next.size === displayNames.size && [...next].every(([k, v]) => displayNames.get(k) === v)) return
+  displayNames = next
+  displayNamesVersion++
+  displayNameListeners.forEach((cb) => cb())
+}
+
+export function subscribeDisplayNames(cb: () => void): () => void {
+  displayNameListeners.add(cb)
+  return () => {
+    displayNameListeners.delete(cb)
+  }
+}
+
+export function getDisplayNamesVersion(): number {
+  return displayNamesVersion
+}
+
 /** "bank_of_canada" -> "Bank of Canada", "r_canadianinvestor" ->
  *  "r/canadianinvestor", "mining_com" -> "Mining.com",
  *  "anthropic_yt" -> "Anthropic (YouTube)". Names that already look
  *  human (contain spaces or capitals) are returned unchanged. */
-export function sourceLabel(name: string | null | undefined): string {
+export function slugLabel(name: string | null | undefined): string {
   if (!name) return ''
   if (KNOWN_SOURCES[name]) return KNOWN_SOURCES[name]
   if (/[A-Z ]/.test(name)) return name
@@ -57,6 +84,12 @@ export function sourceLabel(name: string | null | undefined): string {
     return words.map(titleWord).join(' ') + `.${tld}` + suffix
   }
   return words.map(titleWord).join(' ') + suffix
+}
+
+/** The name the user typed for the feed, else the slug's label. */
+export function sourceLabel(name: string | null | undefined): string {
+  if (!name) return ''
+  return displayNames.get(name) ?? slugLabel(name)
 }
 
 /** "ai" -> "AI", "erp" -> "ERP", "commodities" -> "Commodities".

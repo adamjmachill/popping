@@ -11,7 +11,7 @@ import { CategoryPicker } from './CategoryPicker'
 import { HeadersEditor } from './HeadersEditor'
 import { FieldError, SaveStatus } from './SaveStatus'
 import { useSaveState } from '../../lib/useSaveState'
-import { REFRESH_PRESETS, checkName, isBuiltIn, normalizeFeedInput, normalizeName, refreshLabel } from '../../lib/feedRules'
+import { REFRESH_PRESETS, isBuiltIn, normalizeFeedInput, refreshLabel } from '../../lib/feedRules'
 import { BROWSER_USER_AGENT, type HeaderMap } from '../../lib/headers'
 import { errorMessage, fieldSaveMessage, lastErrorMessage } from '../../lib/apiErrors'
 import {
@@ -25,7 +25,7 @@ import {
   type Field,
   type SaveState,
 } from '../../lib/sourceSaves'
-import { sourceLabel } from '../../lib/labels'
+import { slugLabel, sourceLabel } from '../../lib/labels'
 import { toast } from '../Toast'
 
 // Types whose fetcher sends custom headers. Subreddits (and built-ins)
@@ -81,6 +81,7 @@ function TextField({
   hint,
   inputType = 'text',
   placeholder,
+  autoCapitalize = 'none',
 }: {
   sourceId: number
   field: Field
@@ -93,6 +94,7 @@ function TextField({
   hint?: (draft: string, savedAs: string | null) => string | null
   inputType?: 'text' | 'url'
   placeholder?: string
+  autoCapitalize?: 'none' | 'words'
 }) {
   const id = useId()
   const state = useSaveState(sourceId, field)
@@ -125,7 +127,9 @@ function TextField({
     }
     setLocalError(null)
     setSavedAs(null)
-    if ((r.value ?? '') !== value) setDraft(r.value ?? '')
+    // A cleaned-up value replaces the draft; null (clear) keeps what's
+    // shown until the saved value comes back.
+    if (r.value != null && r.value !== value) setDraft(r.value)
     sent.current = r.value
     commitField(sourceId, field, r.value, saveLabel)
   }
@@ -163,7 +167,7 @@ function TextField({
         id={id}
         type={inputType}
         inputMode={inputType === 'url' ? 'url' : undefined}
-        autoCapitalize="none"
+        autoCapitalize={autoCapitalize}
         autoCorrect="off"
         spellCheck={false}
         enterKeyHint="done"
@@ -218,7 +222,7 @@ export function FeedEditor({
   const builtIn = isBuiltIn(source)
   const type = source.type
   const takesHeaders = !builtIn && HEADER_TYPES.includes(type)
-  const label = sourceLabel(source.name)
+  const label = source.display_name || slugLabel(source.name)
 
   const categoryState = useSaveState(id, 'category')
   const refreshState = useSaveState(id, 'refresh_interval_seconds')
@@ -235,9 +239,14 @@ export function FeedEditor({
 
   // --- field rules (validated before any PATCH; nothing is sent on a
   // failure and the draft stays) ---------------------------------------
-  const checkNameField = (v: string): Check => {
-    const r = checkName(v)
-    return r.ok ? { ok: true, value: r.value } : r
+  // Any text the user likes; the internal slug never changes. Typing the
+  // label the feed already shows saves nothing.
+  const checkDisplayName = (v: string): Check => {
+    const t = v.split(/\s+/).filter(Boolean).join(' ')
+    if (!t) return { ok: false, message: 'Type a name.' }
+    if (t.length > 120) return { ok: false, message: 'Keep it to 120 characters or fewer.' }
+    if (!source.display_name && t === slugLabel(source.name)) return { ok: true, value: null }
+    return { ok: true, value: t }
   }
   const checkAddress = (v: string): Check => {
     const t = v.trim()
@@ -355,17 +364,12 @@ export function FeedEditor({
 
       <TextField
         sourceId={id}
-        field="name"
+        field="display_name"
         label="Name"
         saveLabel="name"
-        saved={source.name}
-        readOnly={builtIn}
-        check={checkNameField}
-        hint={(draft) =>
-          builtIn
-            ? 'Built-in feed: its name and address are fixed.'
-            : `Shows as “${sourceLabel(normalizeName(draft) || source.name)}”.`
-        }
+        saved={source.display_name ?? slugLabel(source.name)}
+        check={checkDisplayName}
+        autoCapitalize="words"
       />
 
       <TextField

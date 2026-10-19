@@ -117,6 +117,8 @@ export interface EntryOut extends Entry {
 export interface Source {
   id: number
   name: string
+  /** What the user calls the feed; null = a label derived from ``name``. */
+  display_name?: string | null
   type: string
   category: string
   url: string
@@ -371,6 +373,8 @@ export const api = {
    * scheduler registers an ingest job for the new row immediately. */
   createSource: (body: {
     name: string
+    // What the user typed for the feed's name, shown as typed.
+    display_name?: string
     type?: string
     category: string
     url: string
@@ -442,6 +446,8 @@ export const api = {
       active?: boolean
       category?: string
       name?: string
+      // Free-text name shown in the app; null clears it.
+      display_name?: string | null
       url?: string
       // Per-source HTTP header overrides (e.g. ``{User-Agent: ...}``).
       // Send null to clear an existing override; omit the field to

@@ -36,14 +36,15 @@ import {
   PODCAST_DEFAULT_REFRESH,
   REFRESH_PRESETS,
   YOUTUBE_DEFAULT_REFRESH,
-  checkName,
   classifyPaste,
+  cleanDisplayName,
   isStale,
   normalizeFeedInput,
   normalizeName,
   refreshLabel,
   suggestName,
   timeAgo,
+  uniqueSlug,
 } from '../lib/feedRules'
 import { CATEGORY_OPTIONS, resolveNewCategory } from '../lib/categories'
 import { type HeaderMap } from '../lib/headers'
@@ -852,10 +853,7 @@ function AddCustomTab({
   // the message to show on failure.
   const validateForm = (): string | null => {
     const trimmedUrl = normalizeFeedInput(sourceType, url)
-    if (name.trim()) {
-      const checked = checkName(name)
-      if (!checked.ok) return checked.message
-    }
+    if (cleanDisplayName(name).length > 120) return 'Keep the name to 120 characters or fewer.'
     if (!trimmedUrl) return sourceType === 'reddit' ? 'Type a subreddit, like r/python.' : 'Paste the address first.'
     if (
       sourceType === 'rss' ||
@@ -878,12 +876,7 @@ function AddCustomTab({
   // reflect whether the form is submittable. Errors show under the
   // field (not as a toast): toasts are for confirmations.
   useEffect(() => {
-    if (name.trim()) {
-      const checked = checkName(name)
-      setNameError(checked.ok ? null : checked.message)
-    } else {
-      setNameError(null)
-    }
+    setNameError(cleanDisplayName(name).length > 120 ? 'Keep it to 120 characters or fewer.' : null)
     const trimmedUrl = normalizeFeedInput(sourceType, url)
     if (!trimmedUrl) {
       setUrlError(null)
@@ -926,9 +919,9 @@ function AddCustomTab({
     setTestResult(null)
     let outcome: TestOutcome
     try {
-      const checked = name.trim() ? checkName(name) : null
+      const typedSlug = normalizeName(cleanDisplayName(name))
       const result = await api.testSource({
-        name: checked?.ok ? checked.value : undefined,
+        name: typedSlug || undefined,
         type: sourceType,
         category,
         url: normalizeFeedInput(sourceType, url),
@@ -975,7 +968,13 @@ function AddCustomTab({
     let sendUrl = normalized
     try {
       let outcome = testResult
-      let feedName = name.trim() ? normalizeName(name) : suggested
+      // The typed name is shown as typed; the feed's internal id is
+      // derived from it (or from the address) and never shown.
+      const displayName = cleanDisplayName(name)
+      const typedSlug = normalizeName(displayName).slice(0, 100)
+      let feedName = typedSlug
+        ? uniqueSlug(typedSlug, existingNames)
+        : suggested ?? suggestName(sourceType, normalized, existingNames, testResult?.resolvedUrl)
       if (!feedName) {
         // A YouTube video link or a non-Latin handle: the name comes
         // from the channel, which Test looks up.
@@ -995,6 +994,7 @@ function AddCustomTab({
       const trimmedLinkPattern = linkPattern.trim()
       const row = await api.createSource({
         name: feedName,
+        ...(displayName ? { display_name: displayName } : {}),
         type: sourceType,
         category,
         url: sendUrl,
@@ -1007,7 +1007,7 @@ function AddCustomTab({
           ? { link_pattern: trimmedLinkPattern }
           : {}),
       })
-      onCreated(row, `Added ${sourceLabel(feedName)} to ${categoryLabel(category)}`)
+      onCreated(row, `Added ${displayName || sourceLabel(feedName)} to ${categoryLabel(category)}`)
       setName('')
       setUrl('')
       setUrlTouched(false)
@@ -1031,9 +1031,9 @@ function AddCustomTab({
   const nameHint =
     nameError ??
     (name.trim()
-      ? `Will be saved as: ${normalizeName(name)}`
+      ? null
       : suggested
-        ? `Will be saved as: ${suggested}`
+        ? `Leave it blank to call it “${sourceLabel(suggested)}”.`
         : sourceType === 'youtube_channel' && url.trim()
           ? 'Name is chosen after Test.'
           : 'Leave it blank to name the feed after its address.')
@@ -1155,18 +1155,20 @@ function AddCustomTab({
         <input
           id="fm-name"
           type="text"
-          autoCapitalize="none"
+          autoCapitalize="words"
           autoCorrect="off"
           spellCheck={false}
           enterKeyHint="next"
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="my_blog"
+          placeholder="e.g. CPABC Newsroom"
           className={fieldClass}
         />
-        <p className={`text-ios-caption mt-1 break-words ${nameError ? 'text-red-300' : 'text-label-secondary'}`}>
-          {nameHint}
-        </p>
+        {nameHint && (
+          <p className={`text-ios-caption mt-1 break-words ${nameError ? 'text-red-300' : 'text-label-secondary'}`}>
+            {nameHint}
+          </p>
+        )}
       </div>
       {/* Slice 20: discovery hints for ``type='generic_scrape'`` sources.
           Two optional inputs that let the user bypass the homepage-based

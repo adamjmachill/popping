@@ -247,3 +247,31 @@ async def test_category_only_patch_does_not_rebuild_the_job(app_client, fake_dns
     resp = await app_client.patch(f"/api/sources/{source_id}", json={"custom_headers": {"X-Ok": "1"}})
     assert resp.status_code == 200
     assert len(fake.added) == 1
+
+
+# --- display name ------------------------------------------------------------------
+
+
+async def test_display_name_keeps_what_the_user_typed(app_client, fake_dns, db_session):
+    created = await _create(app_client, name="cpabc_newsroom", display_name="  CPABC   Newsroom ")
+    assert created.status_code == 200
+    assert created.json()["display_name"] == "CPABC Newsroom"
+    assert created.json()["name"] == "cpabc_newsroom"
+
+    sid = created.json()["id"]
+    resp = await app_client.patch(f"/api/sources/{sid}", json={"display_name": "B.C. Gov – Finance"})
+    assert resp.status_code == 200
+    assert resp.json()["display_name"] == "B.C. Gov – Finance"
+    # The internal slug never changes with the label.
+    assert resp.json()["name"] == "cpabc_newsroom"
+    assert (await _row(db_session, sid)).display_name == "B.C. Gov – Finance"
+
+    resp = await app_client.patch(f"/api/sources/{sid}", json={"display_name": "   "})
+    assert resp.status_code == 200
+    assert resp.json()["display_name"] is None
+
+
+async def test_display_name_too_long_is_refused(app_client, fake_dns):
+    created = await _create(app_client, name="long_label")
+    resp = await app_client.patch(f"/api/sources/{created.json()['id']}", json={"display_name": "x" * 121})
+    assert resp.status_code == 422

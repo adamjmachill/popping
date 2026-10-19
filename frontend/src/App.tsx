@@ -36,7 +36,7 @@ import { SkeletonGrid } from './components/Skeleton'
 import { Settings } from './components/Settings'
 import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
 import { recordImmediate } from './lib/interactions'
-import { categoryLabel, sourceLabel } from './lib/labels'
+import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
 import { briefFailureMessage, errorMessage, fieldSaveMessage, isRetryable } from './lib/apiErrors'
 import { sameHeaders, type HeaderMap } from './lib/headers'
@@ -617,11 +617,15 @@ export function App() {
         if (ac.signal.aborted) return
         const jobId = ack.job_id
         const POLL_MS = 800
-        const TIMEOUT_MS = 30_000
+        // The server tries each AI provider in turn and may retry a
+        // cut-off reply, each call allowed 60 s, so a slow provider
+        // can take a couple of minutes. Waiting less dropped briefs
+        // that were still on their way.
+        const TIMEOUT_MS = 150_000
         const startedAt = Date.now()
         while (!ac.signal.aborted) {
           if (Date.now() - startedAt > TIMEOUT_MS) {
-            onError?.('The brief took too long. Try again.')
+            onError?.('The brief is taking much longer than usual. Try again in a few minutes.')
             return
           }
           await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS))
@@ -847,6 +851,8 @@ export function App() {
     () => new Map(sources.map((s) => [s.id, s.name])),
     [sources],
   )
+  // Feed names the user typed, for every sourceLabel() in the app.
+  useEffect(() => rememberDisplayNames(sources), [sources])
   // Same key as ``sourcesById`` but the value is the source's
   // category. Passed down to Column → Card so each card can render
   // its category-colored left stripe. Optional because older source
