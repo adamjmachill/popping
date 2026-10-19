@@ -63,13 +63,9 @@ async def test_column_id_with_uppercase_and_space_is_accepted(app_client):
     A lowercase-only charset silently 400'd every one of those, so
     read-state / last-viewed / column-prefs never persisted for them.
     """
-    # NOTE: a columnId containing a literal ``/`` (e.g. a Reddit
-    # source's display name "r/technology" as the multi-source-filter
-    # column id) is NOT covered here — that 404s at the route-matching
-    # layer (``/api/preferences/{key}`` uses Starlette's default
-    # ``str`` converter, which doesn't match ``/`` even when percent-
-    # encoded) rather than the allowlist. That's a separate, pre-
-    # existing routing limitation, not something this regex fixes.
+    # A columnId containing a literal ``/`` (e.g. "r/technology", or a
+    # category like "News/Tech") is covered by
+    # ``test_preferences_delta.py::test_slash_keys_round_trip_through_every_route``.
     for key in (
         "last_viewed:Saved",
         "read_entries:For You",

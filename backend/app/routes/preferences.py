@@ -23,14 +23,25 @@ Endpoints
 ---------
 
   - ``GET    /api/preferences`` -- all (key, value) rows for the
-    caller. One round-trip on app load.
+    caller. One round-trip on app load. ``?since=<iso>`` returns
+    only the rows written after that instant (the delta poll).
   - ``GET    /api/preferences/{key}`` -- one row. Optional; the
     frontend can read from the bulk response.
   - ``PUT    /api/preferences/{key}`` -- upsert. Body is
     ``{"value": <json>}``. Idempotent.
+  - ``PATCH  /api/preferences/{key}`` -- apply a change to a set
+    key (``{"add": [...], "remove": [...]}``, or ``{"set": {...}}``
+    for votes) under a row lock, so concurrent writers merge
+    instead of overwriting each other.
   - ``DELETE /api/preferences/{key}`` -- remove the row. Used by
     the "reset all preferences" button (not implemented today;
     included for completeness).
+
+Every single-key route takes the rest of the path as the key
+(``{key:preference_key}``, see ``_PreferenceKeyConvertor``): a
+category can contain ``/`` (``read_entries:News/Tech``), the client
+percent-encodes it, and the server decodes ``%2F`` before routing, so
+a plain ``{key}`` (which stops at ``/``) 404'd those keys.
 
 Auth: soft (``current_user``, not ``require_user``), resolved to a
 stable id via ``resolve_user_id``: the session's ``sub`` for real
@@ -54,28 +65,63 @@ from __future__ import annotations
 import logging
 import re
 
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import delete, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import AwareDatetime
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.convertors import Convertor, register_url_convertor
 
 from app.auth.deps import current_user, resolve_user_id
 from app.db import get_session
 from app.models import UserPreference
-from app.schemas import UserPreferenceIn, UserPreferenceListOut, UserPreferenceOut
+from app.schemas import (
+    UserPreferenceIn,
+    UserPreferenceListOut,
+    UserPreferenceOut,
+    UserPreferencePatchIn,
+)
 
 logger = logging.getLogger("popping.routes.preferences")
 
 router = APIRouter(tags=["preferences"])
 
 
-# Allowlist of the 9 known preference key namespaces the frontend
-# actually uses (see ``PREFERENCE_KEYS`` in
+class _PreferenceKeyConvertor(Convertor[str]):
+    """Starlette's ``path`` convertor, but newlines included.
+
+    ``{key:path}`` is ``.*`` inside a pattern Starlette closes with
+    ``$``. ``.`` stops at a newline and ``$`` also matches just before
+    a trailing one, so ``hidden_entries%0A`` would route as
+    ``hidden_entries`` and a newline mid-key would 404. With ``(?s:)``
+    the handler gets the decoded key exactly as sent, and
+    ``_validate_key`` refuses it with a 400.
+    """
+
+    regex = "(?s:.*)"
+
+    def convert(self, value: str) -> str:
+        return value
+
+    def to_string(self, value: str) -> str:
+        return value
+
+
+register_url_convertor("preference_key", _PreferenceKeyConvertor())
+
+
+# Allowlist of the 10 known preference key namespaces the frontend
+# uses (see ``PREFERENCE_KEYS`` in
 # ``frontend/src/lib/preferences.tsx``). Five of them take a
 # ``:<columnId>`` suffix (``read_entries``, ``last_viewed``,
-# ``column_prefs``, ``column_sections``). Four of them are global
-# (no suffix: ``hidden_entries``, ``starred_entries``,
+# ``column_prefs``, ``column_sections``, ``seen``). Five of them are
+# global (no suffix: ``hidden_entries``, ``starred_entries``,
 # ``voted_entries``, ``filter_presets``, ``history_group_by``).
+# ``seen:<category>`` is the home for new seen marks, which clients
+# write only by PATCH (PUT of set keys is refused from PR2c on): old
+# bundles still PUT whole 200-id lists to ``read_entries:<col.name>``,
+# which is the same string as a per-category ``read_entries`` key, so
+# new marks can't share it.
 # The ``hidden_entries`` etc. keys are also valid WITHOUT a
 # suffix because the legacy localStorage keys were the bare
 # names; the frontend migrates them on first load.
@@ -95,7 +141,7 @@ router = APIRouter(tags=["preferences"])
 # So the suffix here is deliberately "anything non-empty"; the
 # actual security boundary is the PREFIX allowlist below (a caller
 # still can't write to an unrelated key like ``admin_override`` —
-# it just won't match any of these 9 prefixes).
+# it just won't match any of these prefixes).
 #
 # Why an allowlist at all: the URL is the source of truth for which
 # row gets written. Allowing any string here lets a caller with
@@ -113,6 +159,7 @@ _PREFERENCE_KEY_RE = re.compile(
             "last_viewed",
             "column_prefs",
             "column_sections",
+            "seen",
         )
     ) + "|" + "|".join(
         # Global names: bare key, no suffix.
@@ -128,32 +175,152 @@ _PREFERENCE_KEY_RE = re.compile(
 )
 
 
+# ``user_preferences.key`` is ``String(60)``; a longer key would be a
+# Postgres ``DataError`` (a 500), so it's refused up front.
+_KEY_MAX = 60
+
+
 def _validate_key(key: str) -> None:
     """Raise HTTP 400 if ``key`` isn't on the preference allowlist.
 
-    Applied to all 3 single-key endpoints (GET, PUT, DELETE) so a
-    caller can read / write / delete exactly the rows the frontend
-    writes, and no others. The bulk ``GET /api/preferences`` is
-    intentionally not gated — the caller can only read their own
+    Applied to all 4 single-key endpoints (GET, PUT, PATCH, DELETE)
+    so a caller can read / write / delete exactly the rows the
+    frontend writes, and no others. The bulk ``GET /api/preferences``
+    is intentionally not gated — the caller can only read their own
     rows, so pollution on the read side is bounded by what they
-    already wrote (which is gated by PUT).
+    already wrote (which is gated by PUT and PATCH).
+
+    ``fullmatch``, not ``match``: the pattern ends in ``$``, which
+    also matches just before a trailing newline.
     """
-    if not isinstance(key, str) or not _PREFERENCE_KEY_RE.match(key):
+    if not isinstance(key, str) or len(key) > _KEY_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"preference key must be {_KEY_MAX} characters or fewer",
+        )
+    if not _PREFERENCE_KEY_RE.fullmatch(key):
         raise HTTPException(
             status_code=400,
             detail=(
                 f"preference key {key!r} is not on the allowlist; "
-                f"expected one of the 9 known namespaces "
+                f"expected one of the 10 known namespaces "
                 f"(read_entries:<id>, last_viewed:<id>, "
-                f"column_prefs:<id>, column_sections:<id>, "
+                f"column_prefs:<id>, column_sections:<id>, seen:<id>, "
                 f"hidden_entries, starred_entries, voted_entries, "
                 f"filter_presets, history_group_by)"
             ),
         )
 
 
+# Set keys: the keys whose value is a set of entry ids (or, for
+# ``voted_entries``, a map of entry id -> "up" / "down"). Only these
+# take PATCH. ``<name>:*`` is a suffixed namespace. The cap is the
+# most the row may hold; PATCH trims down to it, smallest entry id
+# first. Clients prune first, so this is a backstop. Pinned against
+# the frontend's ``MAX_*`` constants by ``test_preferences_delta.py``.
+SET_KEY_CAPS: dict[str, int] = {
+    "starred_entries": 1000,
+    "hidden_entries": 1000,
+    "voted_entries": 2000,
+    "read_entries:*": 1000,
+    "seen:*": 1000,
+}
+
+_VOTES_KEY = "voted_entries"
+_ID_MAX = 2**63 - 1
+_VOTE_ID_RE = re.compile(r"[1-9][0-9]{0,18}")
+
+
+def _set_key_cap(key: str) -> int | None:
+    """The cap for an allowlisted ``key``, or None if it isn't a set
+    key. Call after ``_validate_key``: it relies on suffixed names
+    having a non-empty suffix and global names having none."""
+    name, sep, _ = key.partition(":")
+    return SET_KEY_CAPS.get(f"{name}:*" if sep else name)
+
+
+def _is_entry_id(value: object) -> bool:
+    # ``type(...) is int``: a JSON ``true`` decodes to ``bool``, which
+    # ``isinstance(..., int)`` would let through.
+    return type(value) is int and 1 <= value <= _ID_MAX
+
+
+def _coerce_ids(value: object) -> list[int]:
+    """The stored id list as clean, de-duplicated ints, in stored order.
+
+    PUT stores opaque JSON, so the row may hold anything: a non-list
+    becomes empty and non-id elements are dropped. Without this a
+    malformed row would 500 every PATCH to its key.
+    """
+    if not isinstance(value, list):
+        return []
+    out: list[int] = []
+    present: set[int] = set()
+    for item in value:
+        if _is_entry_id(item) and item not in present:
+            out.append(item)
+            present.add(item)
+    return out
+
+
+def _coerce_votes(value: object) -> dict[str, str]:
+    """The stored votes as ``{"<id>": "up" | "down"}``; anything else
+    (a non-dict row, a bad id, a bad vote) is dropped."""
+    if not isinstance(value, dict):
+        return {}
+    return {
+        k: v
+        for k, v in value.items()
+        if isinstance(k, str)
+        and _VOTE_ID_RE.fullmatch(k)
+        and int(k) <= _ID_MAX
+        and v in ("up", "down")
+    }
+
+
+def _trim_ids(ids: list[int], cap: int) -> list[int]:
+    """Drop the smallest ids until ``cap`` remain, keeping order.
+    Entry ids are monotonic, so this drops the oldest stories, as
+    the frontend's ``trimVotedEntries`` does."""
+    if len(ids) <= cap:
+        return ids
+    keep = set(sorted(ids)[-cap:])
+    return [i for i in ids if i in keep]
+
+
+def _trim_votes(votes: dict[str, str], cap: int) -> dict[str, str]:
+    if len(votes) <= cap:
+        return votes
+    keep = set(sorted(votes, key=int)[-cap:])
+    return {k: v for k, v in votes.items() if k in keep}
+
+
+def _apply_patch(
+    key: str, current: object, body: UserPreferencePatchIn, cap: int
+) -> list[int] | dict[str, str]:
+    """The new value for ``key``: the coerced ``current`` value with
+    ``body`` applied (``remove`` before ``add``), trimmed to ``cap``."""
+    if key == _VOTES_KEY:
+        votes = _coerce_votes(current)
+        for entry_id, vote in body.set_.items():
+            if vote is None:
+                votes.pop(entry_id, None)
+            else:
+                votes[entry_id] = vote
+        return _trim_votes(votes, cap)
+    removed = set(body.remove)
+    ids = [i for i in _coerce_ids(current) if i not in removed]
+    present = set(ids)
+    for entry_id in body.add:
+        if entry_id not in present:
+            ids.append(entry_id)
+            present.add(entry_id)
+    return _trim_ids(ids, cap)
+
+
 @router.get("/preferences", response_model=UserPreferenceListOut)
 async def list_preferences(
+    since: AwareDatetime | None = Query(default=None),
     user: dict | None = Depends(current_user),
     session: AsyncSession = Depends(get_session),
 ) -> UserPreferenceListOut:
@@ -167,11 +334,23 @@ async def list_preferences(
     Empty list on a fresh user (no rows yet). The frontend falls
     back to the localStorage seed in that case -- see the
     one-way migration doc in the frontend's lib/preferences.ts.
+
+    ``since`` (timezone-aware; a naive timestamp is a 422) keeps only
+    rows with ``updated_at > since``. Deletions don't show up in a
+    since-response; a full GET is how they arrive.
+
+    ``updated_at`` is ``now()``, the writing transaction's START time,
+    and writes to different keys don't block each other. So a write
+    that started first can commit after a poll has already returned a
+    later row: a client polls with an overlap (``since`` = the newest
+    ``updated_at`` it has seen, minus 60 s), not from that timestamp
+    itself.
     """
     user_id = resolve_user_id(user)
-    rows = await session.scalars(
-        select(UserPreference).where(UserPreference.user_id == user_id)
-    )
+    stmt = select(UserPreference).where(UserPreference.user_id == user_id)
+    if since is not None:
+        stmt = stmt.where(UserPreference.updated_at > since)
+    rows = await session.scalars(stmt)
     items = [
         UserPreferenceOut(
             key=row.key,
@@ -183,7 +362,7 @@ async def list_preferences(
     return UserPreferenceListOut(items=items)
 
 
-@router.get("/preferences/{key}", response_model=UserPreferenceOut)
+@router.get("/preferences/{key:preference_key}", response_model=UserPreferenceOut)
 async def get_preference(
     key: str,
     user: dict | None = Depends(current_user),
@@ -216,7 +395,7 @@ async def get_preference(
     )
 
 
-@router.put("/preferences/{key}", response_model=UserPreferenceOut)
+@router.put("/preferences/{key:preference_key}", response_model=UserPreferenceOut)
 async def put_preference(
     key: str,
     body: UserPreferenceIn,
@@ -276,7 +455,88 @@ async def put_preference(
     )
 
 
-@router.delete("/preferences/{key}", status_code=204)
+@router.patch("/preferences/{key:preference_key}", response_model=UserPreferenceOut)
+async def patch_preference(
+    key: str,
+    body: UserPreferencePatchIn,
+    user: dict | None = Depends(current_user),
+    session: AsyncSession = Depends(get_session),
+) -> UserPreferenceOut:
+    """Apply a change to one set key and return the whole new row.
+
+    400 for a key that isn't a set key (see ``SET_KEY_CAPS``). 422 for
+    a body that doesn't fit the key: ``set`` on an id-list key,
+    ``add`` / ``remove`` on ``voted_entries``, or a list longer than
+    the key's cap.
+
+    One transaction, so two devices (or two calls in one tick) both
+    land instead of the later whole-list write winning:
+
+      1. ``INSERT ... ON CONFLICT DO NOTHING`` makes sure the row
+         exists, so step 2 always has a row to lock. Two first writes
+         to the same key serialize on the unique index here.
+      2. ``SELECT ... FOR UPDATE`` locks it. Without the lock, two
+         PATCHes read the same old value and the later UPDATE drops
+         the earlier one's change.
+      3. The locked value is coerced (``_coerce_ids`` /
+         ``_coerce_votes``), since a PUT may have stored anything.
+      4. ``remove`` is applied before ``add``, then the result is
+         trimmed to the cap, smallest entry id first.
+      5. The value is written with ``updated_at = now()``.
+    """
+    _validate_key(key)
+    cap = _set_key_cap(key)
+    if cap is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"preference key {key!r} doesn't take PATCH; only the "
+                f"set keys do ({', '.join(SET_KEY_CAPS)})"
+            ),
+        )
+    sent = body.model_fields_set
+    if key == _VOTES_KEY:
+        if sent & {"add", "remove"}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} takes 'set', not 'add' or 'remove'",
+            )
+    else:
+        if "set_" in sent:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} takes 'add' and 'remove', not 'set'",
+            )
+        if len(body.add) > cap or len(body.remove) > cap:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{key} takes at most {cap} ids per list",
+            )
+
+    user_id = resolve_user_id(user)
+    where = (UserPreference.user_id == user_id, UserPreference.key == key)
+    await session.execute(
+        pg_insert(UserPreference)
+        .values(user_id=user_id, key=key, value={} if key == _VOTES_KEY else [])
+        .on_conflict_do_nothing(index_elements=["user_id", "key"])
+    )
+    current = await session.scalar(
+        select(UserPreference.value).where(*where).with_for_update()
+    )
+    value = _apply_patch(key, current, body, cap)
+    result = await session.execute(
+        update(UserPreference)
+        .where(*where)
+        .values(value=value, updated_at=func.now())
+        .returning(UserPreference.updated_at)
+    )
+    row_updated_at = result.scalar_one()
+    await session.commit()
+    logger.debug("preference: user=%s key=%s patched", user_id, key)
+    return UserPreferenceOut(key=key, value=value, updated_at=row_updated_at)
+
+
+@router.delete("/preferences/{key:preference_key}", status_code=204)
 async def delete_preference(
     key: str,
     user: dict | None = Depends(current_user),

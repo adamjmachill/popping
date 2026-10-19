@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import datetime as dt
 import enum
-from typing import Optional
+from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
 
 
 class SourceOut(BaseModel):
@@ -732,10 +732,9 @@ class UserPreferenceOut(BaseModel):
     and as the body of ``GET /api/preferences/{key}``.
 
     ``updated_at`` is the server's record of when the row was last
-    written. The frontend doesn't currently use it (PUT is unconditional
-    upsert; the client owns the "did this change" logic) but it's
-    surfaced for future diff-based sync and for debugging "when did
-    my read state last change?".
+    written (the writing transaction's start time). It's the watermark
+    for ``GET /api/preferences?since=``, and useful for debugging "when
+    did my read state last change?".
     """
 
     key: str
@@ -769,6 +768,53 @@ class UserPreferenceIn(BaseModel):
     """
 
     value: Optional[object] = None
+
+
+# Entry ids are BIGINT-safe positive ints. ``strict`` so ``"5"``,
+# ``5.0`` and ``true`` are refused instead of coerced: the stored
+# lists hold JSON numbers, and the client always sends numbers.
+PreferenceEntryId = Annotated[int, Field(strict=True, ge=1, le=2**63 - 1)]
+
+
+def _check_vote_id(value: str) -> str:
+    if int(value) > 2**63 - 1:
+        raise ValueError("entry id out of range")
+    return value
+
+
+# A vote key is the entry id as a canonical digit string (no sign, no
+# leading zero), so "7" and "07" can't name the same story twice.
+PreferenceVoteId = Annotated[
+    str,
+    StringConstraints(pattern=r"^[1-9][0-9]{0,18}$"),
+    AfterValidator(_check_vote_id),
+]
+
+# Outer bounds on one PATCH body. They equal the largest per-key caps
+# in ``routes/preferences.py`` (``_SET_KEY_CAPS``); the route then
+# checks the key's own cap.
+MAX_PATCH_IDS = 1000
+MAX_PATCH_VOTES = 2000
+
+
+class UserPreferencePatchIn(BaseModel):
+    """Body of ``PATCH /api/preferences/{key}``: a change to a set key,
+    not a whole new value, so two devices (or two calls in one tick)
+    can't overwrite each other's edits.
+
+    ``add`` / ``remove`` apply to the id-list keys; ``set`` applies to
+    ``voted_entries`` only (``null`` clears a vote). Which ops a key
+    takes is checked by the route, which answers 422 for a wrong
+    pairing. Unknown fields are refused.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    add: list[PreferenceEntryId] = Field(default_factory=list, max_length=MAX_PATCH_IDS)
+    remove: list[PreferenceEntryId] = Field(default_factory=list, max_length=MAX_PATCH_IDS)
+    set_: dict[PreferenceVoteId, Optional[Literal["up", "down"]]] = Field(
+        default_factory=dict, alias="set", max_length=MAX_PATCH_VOTES
+    )
 
 
 class FramingArticleOut(BaseModel):
