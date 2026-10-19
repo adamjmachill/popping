@@ -734,6 +734,14 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
       )}
       {!collapsed && (
         <div id={bodyId} className="px-4 pb-3 space-y-2">
+          {/* Right under Regenerate, where the eye is after tapping it;
+              at the end of a long brief it went unseen. */}
+          {generating && (
+            <p role="status" className="text-ios-caption text-label-secondary">
+              Writing a new brief. This can take up to a minute.
+            </p>
+          )}
+          {error && <p role="alert" className="text-ios-caption text-red-400">{error}</p>}
           {/* One-sentence hero. Larger than the original body text
               so the brief's "headline" lands with weight — this is
               what the user reads first, and it's the line the model
@@ -786,7 +794,6 @@ export function BriefCard({ brief, onBriefChange, tone, onToneChange, triggerGen
               but it should require explicit opt-in (a flag on the
               parsed result, e.g. ``parsed.hasUsefulRemainder``)
               rather than render any leftover text by default. */}
-          {error && <p className="text-ios-caption text-red-400">{error}</p>}
         </div>
       )}
     </section>

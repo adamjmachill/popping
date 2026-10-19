@@ -488,6 +488,16 @@ async def get_source_endpoint(
 # --- POST / PATCH / DELETE (Phase 5) -------------------------------------
 
 
+def _clean_display_name(value: str | None) -> str | None:
+    """Trim a user-typed feed label; blank means "no label" (NULL)."""
+    if value is None:
+        return None
+    value = " ".join(value.split())
+    if len(value) > 120:
+        raise HTTPException(status_code=422, detail="Keep the name to 120 characters or fewer.")
+    return value or None
+
+
 @router.post(
     "/sources",
     response_model=SourceOut,
@@ -593,6 +603,8 @@ async def create_source_endpoint(
                 detail="link_pattern must be a path prefix, not a full URL",
             )
         link_pattern_value = candidate
+    # Checked before the row exists, so a bad label can't leave a feed behind.
+    display_name = _clean_display_name(body.display_name)
     row = await scheduler.add_source(
         session,
         name=body.name,
@@ -604,6 +616,10 @@ async def create_source_endpoint(
         link_pattern=link_pattern_value,
         custom_headers=headers,
     )
+    if display_name is not None:
+        row.display_name = display_name
+        await session.commit()
+        await session.refresh(row)
     # Auto-expand the Recommended pool from what the user just added.
     # Reddit isn't in scope for LLM feed discovery (it only suggests
     # RSS/Atom URLs), so this only fires for rss/podcast rows.
@@ -908,6 +924,12 @@ async def update_source_endpoint(
         )
     if row is None:
         raise HTTPException(status_code=404, detail="source not found")
+    # A label only: no rescheduling, so it's set here rather than in
+    # scheduler.update_source.
+    if "display_name" in body.model_fields_set:
+        row.display_name = _clean_display_name(body.display_name)
+        await session.commit()
+        await session.refresh(row)
     return SourceOut.model_validate(row)
 
 

@@ -42,6 +42,9 @@ class Source(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(120), unique=True, nullable=False)
+    # What the user calls the feed ("CPABC Newsroom"). ``name`` stays the
+    # internal slug; NULL = show a label derived from it.
+    display_name: Mapped[Optional[str]] = mapped_column(String(120), nullable=True)
     type: Mapped[str] = mapped_column(String(20), nullable=False)  # rss / api / scrape
     category: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
     url: Mapped[str] = mapped_column(Text, nullable=False)

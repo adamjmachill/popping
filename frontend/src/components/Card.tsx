@@ -24,6 +24,7 @@ import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } f
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
 import { recordBatched, recordImmediate } from '../lib/interactions'
 import { sourceLabel } from '../lib/labels'
+import { useSourceLabels } from '../lib/useSourceLabels'
 import { SourceIcon } from './SourceIcon'
 import { toast } from './Toast'
 
@@ -292,6 +293,9 @@ const SWIPE_MAX_REVEAL_PX = 88
 const SWIPE_COMMIT_PX = 58
 
 export function CardInner({ entry, sourceName, unread, selected, cardRef, onActivate, category, onMarkRead, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote, onSourceTap }: Props) {
+  // A renamed feed shows its new name here even though memo skips
+  // re-renders when only the feed list changed.
+  useSourceLabels()
   const stripeClass = categoryStripeClass(category)
   const sourceTextClass = categorySourceTextClass(category)
   const borderClass = categoryBorderClass(category)

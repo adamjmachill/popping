@@ -12,6 +12,7 @@ from pydantic import BaseModel, ConfigDict
 class SourceOut(BaseModel):
     id: int
     name: str
+    display_name: Optional[str] = None
     type: str
     category: str
     url: str
@@ -112,6 +113,8 @@ class SourceCreate(BaseModel):
     # ``AttributeError`` and the request 500s before reaching any
     # client-visible error message.
     custom_headers: Optional[dict] = None
+    # Free-text label shown in the app; blank clears it.
+    display_name: Optional[str] = None
 
 
 class SourceAutoRequest(BaseModel):
@@ -190,6 +193,8 @@ class SourceUpdate(BaseModel):
     # omitting the field leaves the column untouched. The PATCH
     # endpoint tells the two apart with ``model_fields_set``.
     custom_headers: Optional[dict] = None
+    # Free-text label shown in the app; blank clears it.
+    display_name: Optional[str] = None
 
 
 class SourceTestRequest(BaseModel):

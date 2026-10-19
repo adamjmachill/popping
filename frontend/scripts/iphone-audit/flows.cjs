@@ -712,9 +712,9 @@ module.exports = [
   editorFlow('flow-fk-fixed-fields', 1, {
     run: async ({ page, fail }) => {
       await waitEditor(page, 1)
-      for (const label of ['Name', 'Address']) {
-        if ((await field(page, 1, label).getAttribute('readonly')) == null) fail('FK', `the built-in's ${label} is editable`)
-      }
+      if ((await field(page, 1, 'Address').getAttribute('readonly')) == null) fail('FK', "the built-in's Address is editable")
+      // The name is only a label, so a built-in can be renamed too.
+      if ((await field(page, 1, 'Name').getAttribute('readonly')) != null) fail('FK', "the built-in's Name is read-only")
       if (await page.locator('#fe-refresh-1').count()) fail('FK', 'the built-in has an interval picker')
       if (!(await page.locator(ROW(1)).getByText(/\(built-in feed\)$/).isVisible())) fail('FK', 'no "(built-in feed)" interval text')
       if (await rowButton(page, 1, 'Add header').count()) fail('FK', 'the built-in has a Headers section')
@@ -725,7 +725,7 @@ module.exports = [
     },
   }),
 
-  dashFlow('flow-fl-rename-follows-filter-and-view', {
+  dashFlow('flow-fl-rename-keeps-filter-and-view', {
     before: async ({ page }) => {
       const preset = { id: 'p1', name: 'Deals view', activeSources: ['slickdeals_frontpage', 'rfd_hot_deals'], columnPrefs: {} }
       await page.route(
@@ -748,17 +748,20 @@ module.exports = [
       await page.locator('button[aria-label="remove Slickdeals Frontpage from filter"]').waitFor({ state: 'visible' })
       await openEditor(page, 6)
       const name = field(page, 6, 'Name')
-      await name.fill('slickdeals_renamed')
+      // Typed as the user wants it shown: capitals and spaces kept.
+      await name.fill('Slickdeals Renamed')
       await name.press('Enter')
       if (!(await waitFor(() => page._patches.length === 1))) return fail('FL', 'no PATCH for the rename')
+      const body = page._patches[0]
+      if (body.display_name !== 'Slickdeals Renamed' || 'name' in body) fail('FL', `the rename sent ${JSON.stringify(body)}`)
       await waitFor(() => savedShown(page, 6), 3000)
+      if ((await name.inputValue()) !== 'Slickdeals Renamed') fail('FL', `the field shows ${JSON.stringify(await name.inputValue())}`)
       await closeSettings(page)
-      if (!(await page.locator('button[aria-label="remove Slickdeals Renamed from filter"]').isVisible())) fail('FL', 'the filter chip did not follow the rename')
+      if (!(await page.locator('button[aria-label="remove Slickdeals Renamed from filter"]').isVisible())) fail('FL', 'the filter chip did not show the new name')
       if (await page.locator('button[aria-label="remove Slickdeals Frontpage from filter"]').count()) fail('FL', 'the old name is still in the filter')
-      if (!(await waitFor(() => page._puts.length >= 1, 3000))) return fail('FL', 'the saved view was not updated')
-      const saved = (page._puts.at(-1).value || [])[0] || {}
-      const names = saved.activeSources || []
-      if (!names.includes('slickdeals_renamed') || names.includes('slickdeals_frontpage')) fail('FL', `the saved view holds ${JSON.stringify(names)}`)
+      // The feed's internal id didn't change, so the saved view needs no rewrite.
+      await sleep(1500)
+      if (page._puts.length) fail('FL', 'the saved view was rewritten for a label change')
     },
   }),
 
