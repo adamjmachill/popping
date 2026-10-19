@@ -22,7 +22,8 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 
 ## Pending
 
-_No units merged yet._
+- [ ] #<pr> sha-<short> · Open Menu → Settings → History. Pass: recent hides and saves are listed.
+- [ ] #<pr> sha-<short> · Add a Reddit feed (r/python) and tap Test. Pass: it shows a post count and titles, not an error.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
