@@ -9,7 +9,9 @@ name: build
 #   ghcr.io/<owner>/popping-backend:sha-<full sha> <- every push to main
 #   ghcr.io/<owner>/popping-frontend:main
 #   ghcr.io/<owner>/popping-frontend:sha-<full sha>
-#   ghcr.io/<owner>/popping-{backend,frontend}:<pr>-<num>  <- PR builds
+#   ghcr.io/<owner>/popping-{backend,frontend}:latest  <- every push to main
+#   PR builds are never pushed: login and push run only on push events
+#   (both image jobs), so a PR's pr-<num> tag exists only inside its run.
 
 on:
   push:
@@ -100,6 +102,9 @@ jobs:
 
   frontend-checks:
     name: frontend lint + build
+    # Lint, build, unit tests and both smoke runs take about 8 minutes;
+    # fail fast instead of GitHub's 6h default.
+    timeout-minutes: 30
     runs-on: ubuntu-latest
     # Read-only token, and not left in the checkout: this job downloads
     # Playwright and browsers, and must not be able to push an image.
@@ -143,9 +148,11 @@ jobs:
       # (frontend/scripts/iphone-audit/README.md).
       - name: iPhone layout smoke test
         run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp --strict
+      # States only: the behaviour flows drive Chromium (CDP touch) and
+      # would roughly double the job's time here for a report nobody gates on.
       - name: iPhone layout smoke test (Safari engine, report only)
         continue-on-error: true
-        run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit
+        run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit --states-only
 
   build-backend:
     name: backend image

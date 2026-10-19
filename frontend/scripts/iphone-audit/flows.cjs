@@ -5,6 +5,29 @@
 // Flows record the requests they care about with page routes, which run
 // before capture.cjs's context mock and then fall through to it.
 // smoke.cjs requires this file, so it must not require smoke.cjs.
+//
+// Counting taps (H1). A tap-count flow proves "this takes at most N taps":
+// - tap(page, locator) is locator.tap() (phone contexts have hasTouch) and
+//   adds 1 to page._taps.
+// - taps(page, max, id) fails the flow under rule `id` when page._taps is
+//   over max. The count starts at 0 when `run` starts.
+// - A swipe through touchDrag() counts as 1. Typing with fill() is free.
+// - A tap-count flow starts from its URL and uses only tap, touchDrag and
+//   fill to get there: no evaluate, pushState, .click(), .check(),
+//   selectOption or startPoll shortcuts. The older flows below use those
+//   freely; they count requests, not taps.
+//
+// Every flow also gets installHarness() before the page loads: window.open,
+// navigator.share and the clipboard are stubbed (nothing leaves the page),
+// and fetches to /api/preferences and /api/interactions are recorded with
+// their keepalive flag, which Playwright's Request does not expose
+// (harnessLog()).
+//
+// Time. Flows that assert dwell, batch, toast, poll or arrival timing call
+// installClock(page) in `before` and move time with page.clock.runFor (as
+// flow-fn-quiet-poll does). runFor also fires the regular visible poll, so
+// GET counts allow for it. Where real time is kept, pause at least twice
+// the delay under test.
 'use strict'
 
 const F = require('./fixtures.cjs')
@@ -62,6 +85,11 @@ const MENU = 'aside[aria-label="menu"]'
 
 async function openMenu(page) {
   await page.locator('button[aria-label="open menu"]').click()
+  await menuOpened(page)
+}
+
+// The Menu has slid in and takes input.
+async function menuOpened(page) {
   await page.waitForFunction(() => {
     const a = document.querySelector('aside[aria-label="menu"]')
     if (!a || a.hasAttribute('inert')) return false
@@ -87,12 +115,141 @@ async function inView(page, selector, scrollerSelector) {
   }, [selector, scrollerSelector])
 }
 
+// --- H1: harness helpers ----------------------------------------------------
+
+// Runs in the page before the app (addInitScript; a CSP doesn't apply).
+// window.__harness collects what the stubs and the fetch wrapper saw.
+function harnessInit() {
+  const h = (window.__harness = { fetches: [], opened: [], shared: [], copied: [] })
+  const realFetch = window.fetch
+  window.fetch = function (input, init) {
+    try {
+      const req = input instanceof Request ? input : null
+      const url = new URL(req ? req.url : String(input), location.href)
+      if (/^\/api\/(preferences|interactions)(\/|$)/.test(url.pathname)) {
+        h.fetches.push({
+          method: String((init && init.method) || (req && req.method) || 'GET').toUpperCase(),
+          path: url.pathname,
+          keepalive: !!(init && 'keepalive' in init ? init.keepalive : req && req.keepalive),
+        })
+      }
+    } catch {
+      // A URL the wrapper can't read is still fetched as usual.
+    }
+    return realFetch.apply(this, arguments)
+  }
+  window.open = (url, target) => {
+    h.opened.push({ url: url == null ? '' : String(url), target: target == null ? '' : String(target) })
+    return null
+  }
+  Object.defineProperty(navigator, 'share', {
+    configurable: true,
+    value: async (data) => {
+      h.shared.push({ ...(data || {}) })
+    },
+  })
+  Object.defineProperty(navigator, 'canShare', { configurable: true, value: () => true })
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      writeText: async (text) => {
+        h.copied.push(String(text))
+      },
+      readText: async () => h.copied[h.copied.length - 1] || '',
+    },
+  })
+}
+
+const installHarness = (page) => page.addInitScript(harnessInit)
+
+// What the stubs and the fetch wrapper recorded so far:
+// { fetches: [{ method, path, keepalive }], opened, shared, copied }.
+const harnessLog = (page) => page.evaluate(() => window.__harness)
+
+const isChromium = (page) => page.context().browser().browserType().name() === 'chromium'
+
+// Installs the fake clock at F.NOW. touchDrag then waits in Node instead
+// of on animation frames, which a paused clock never delivers.
+async function installClock(page, time = F.NOW) {
+  page._clockInstalled = true
+  await page.clock.install({ time })
+}
+
+async function tap(page, locator) {
+  await locator.tap()
+  page._taps = (page._taps || 0) + 1
+}
+
+// False (and one failure under `id`) when more than `max` taps were used.
+function taps(page, max, id) {
+  const n = page._taps || 0
+  if (n <= max) return true
+  page._fail(id, `${n} taps, expected at most ${max}`)
+  return false
+}
+
+// One finger from `from` to `to` ({ x, y } in CSS pixels) through CDP touch
+// events: `steps` moves `stepMs` apart, then `holdMs` still before the
+// finger lifts. Counts as one tap. Chromium only (the WebKit run is report
+// only): elsewhere it does nothing and returns false. Assert outcomes (a
+// request sent or not, a card hidden, a transform, defaultPrevented), never
+// exact scroll offsets. Chromium doesn't deliver page touch moves under
+// about 40px, so rules about small movements belong in unit tests.
+async function touchDrag(page, { from, to, steps = 10, stepMs = 50, holdMs = 150 }) {
+  if (!isChromium(page)) return false
+  // A drag right after load sometimes didn't scroll; two frames plus
+  // 300 ms always did.
+  if (!page._clockInstalled) {
+    await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+  }
+  await sleep(300)
+  const cdp = await page.context().newCDPSession(page)
+  const point = (x, y) => [{ x: Math.round(x), y: Math.round(y), id: 1, radiusX: 1, radiusY: 1, force: 1 }]
+  try {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: point(from.x, from.y) })
+    for (let i = 1; i <= steps; i++) {
+      await sleep(stepMs)
+      const x = from.x + ((to.x - from.x) * i) / steps
+      const y = from.y + ((to.y - from.y) * i) / steps
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: point(x, y) })
+    }
+    await sleep(holdMs)
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+  } finally {
+    await cdp.detach().catch(() => {})
+  }
+  page._taps = (page._taps || 0) + 1
+  return true
+}
+
+// Leaving the app and coming back: iOS sets both visibilityState and
+// hidden, then fires visibilitychange (the app reads visibilityState).
+async function setHidden(page, hidden) {
+  await page.evaluate((h) => {
+    const state = h ? 'hidden' : 'visible'
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => state })
+    Object.defineProperty(document, 'hidden', { configurable: true, get: () => h })
+    document.dispatchEvent(new Event('visibilitychange'))
+  }, hidden)
+}
+
 const flow = (name, fields) => ({
   name,
   url: '/?view=settings&tab=feeds',
   widths: [390],
   checks: false,
   ...fields,
+  before: async (ctx) => {
+    await installHarness(ctx.page)
+    if (fields.before) await fields.before(ctx)
+  },
+  run:
+    fields.run &&
+    (async (ctx) => {
+      ctx.page._taps = 0
+      ctx.page._fail = ctx.fail
+      return fields.run(ctx)
+    }),
 })
 
 // PR5 flows run from the dashboard.
@@ -805,7 +962,7 @@ module.exports = [
 
   dashFlow('flow-fn-quiet-poll', {
     before: async ({ page }) => {
-      await page.clock.install({ time: F.NOW })
+      await installClock(page)
     },
     run: async ({ page, fail }) => {
       let polls = 0
@@ -1065,6 +1222,166 @@ module.exports = [
       if (await page.getByText(/^Renamed to/).count()) fail('FPR', 'an unchanged name was saved as a rename')
       if (!(await chip.isVisible())) fail('FPR', 'the chip is gone after an unchanged rename')
       if (dialogs) fail('FPR', `a browser dialog opened ${dialogs} time(s)`)
+    },
+  }),
+
+  // --- H1: the harness checks itself -----------------------------------------
+
+  // A known 2-tap path (≡, then Settings) counts 2, passes taps(…, 2) and
+  // fails taps(…, 1).
+  dashFlow('flow-h1-taps', {
+    run: async ({ page, fail }) => {
+      await tap(page, page.locator('button[aria-label="open menu"]'))
+      await menuOpened(page)
+      await tap(page, page.locator(MENU).getByRole('button', { name: /^Settings/ }))
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      if (page._taps !== 2) return fail('H1-TAPS', `Menu → Settings counted ${page._taps} taps, expected 2`)
+      if (!taps(page, 2, 'H1-TAPS')) return
+      const real = page._fail
+      const caught = []
+      page._fail = (rule, detail) => caught.push([rule, detail])
+      const passed = taps(page, 1, 'H1-TAPS')
+      page._fail = real
+      if (passed || caught.length !== 1 || caught[0][0] !== 'H1-TAPS') {
+        fail('H1-TAPS', `taps(page, 1) after 2 taps returned ${passed} and reported ${JSON.stringify(caught)}`)
+      }
+    },
+  }),
+
+  // touchDrag does nothing off Chromium; on Chromium an upward drag
+  // scrolls the phone list and counts as one tap.
+  dashFlow('flow-h1-touch-drag', {
+    run: async ({ page, fail }) => {
+      const webkit = { context: () => ({ browser: () => ({ browserType: () => ({ name: () => 'webkit' }) }) }) }
+      // A stand-in page that only answers the browser check: anything
+      // past the early return throws.
+      const ran = await touchDrag(webkit, { from: { x: 100, y: 600 }, to: { x: 100, y: 200 } }).catch((e) => `a throw (${e.message})`)
+      if (ran !== false || webkit._taps) fail('H1-DRAG', `off Chromium touchDrag returned ${ran} and counted ${webkit._taps || 0} taps`)
+      if (!isChromium(page)) return
+      const scroller = page.locator(`${MOBILE_MAIN} section div.overflow-y-auto`).first()
+      const box = await scroller.boundingBox()
+      if (!box) return fail('H1-DRAG', 'no phone list to drag')
+      const top = () => scroller.evaluate((el) => el.scrollTop)
+      const start = await top()
+      const x = box.x + box.width / 2
+      if (!(await touchDrag(page, { from: { x, y: box.y + box.height * 0.8 }, to: { x, y: box.y + box.height * 0.2 } }))) {
+        return fail('H1-DRAG', 'touchDrag did not run on Chromium')
+      }
+      if (!(await waitFor(async () => (await top()) > start, 2000))) fail('H1-DRAG', 'an upward drag did not scroll the phone list')
+      if (page._taps !== 1) fail('H1-DRAG', `a drag counted ${page._taps} taps, expected 1`)
+    },
+  }),
+
+  // setHidden sets both visibilityState and hidden; coming back runs the
+  // app's quiet poll.
+  dashFlow('flow-h1-set-hidden', {
+    run: async ({ page, fail }) => {
+      let polls = 0
+      page.on('request', (r) => {
+        if (r.method() === 'GET' && new URL(r.url()).pathname === '/api/sources') polls++
+      })
+      const read = () => page.evaluate(() => JSON.stringify([document.visibilityState, document.hidden]))
+      await setHidden(page, true)
+      if ((await read()) !== '["hidden",true]') fail('H1-HIDDEN', `hidden page reads ${await read()}`)
+      await sleep(300)
+      const hiddenPolls = polls
+      await setHidden(page, false)
+      if ((await read()) !== '["visible",false]') fail('H1-HIDDEN', `shown page reads ${await read()}`)
+      if (!(await waitFor(() => polls > hiddenPolls, 3000))) fail('H1-HIDDEN', 'coming back to the page sent no quiet poll')
+    },
+  }),
+
+  // The fetch wrapper records keepalive: the load-time GET without it, and
+  // the views still queued when the page hides with it (beacon refused).
+  dashFlow('flow-h1-keepalive', {
+    before: async ({ page }) => {
+      // Views stay queued (no idle callback) and the beacon is refused, so
+      // hiding the page has to send them with fetch and keepalive.
+      await page.addInitScript(() => {
+        window.requestIdleCallback = () => 0
+        Object.defineProperty(navigator, 'sendBeacon', { configurable: true, value: () => false })
+      })
+    },
+    run: async ({ page, fail }) => {
+      const { fetches } = await harnessLog(page)
+      const load = fetches.find((f) => f.method === 'GET' && f.path === '/api/preferences')
+      if (!load) fail('H1-KEEPALIVE', `the load-time GET /api/preferences was not recorded: ${JSON.stringify(fetches)}`)
+      else if (load.keepalive) fail('H1-KEEPALIVE', 'the load-time GET /api/preferences was recorded with keepalive')
+      if (fetches.some((f) => f.keepalive)) fail('H1-KEEPALIVE', `a keepalive fetch before the page hid: ${JSON.stringify(fetches)}`)
+      await setHidden(page, true)
+      const sent = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'POST' && f.path === '/api/interactions/batch' && f.keepalive))
+      if (!(await waitFor(sent, 3000))) {
+        fail('H1-KEEPALIVE', `hiding the page sent no keepalive POST /api/interactions/batch: ${JSON.stringify((await harnessLog(page)).fetches)}`)
+      }
+    },
+  }),
+
+  // capture.cjs keeps preferences: a PUT is read back (all, since, by
+  // key), a DELETE removes it, and a reload still sees what was written.
+  dashFlow('flow-h1-pref-store', {
+    // The read after DELETE is a 404 on purpose.
+    expectedFailedLoads: ['/api/preferences/hidden_entries'],
+    run: async ({ page, fail }) => {
+      const call = (method, path, body) =>
+        page.evaluate(
+          async ([m, p, b]) => {
+            const r = await fetch(p, { method: m, headers: { 'Content-Type': 'application/json' }, body: b === undefined ? undefined : JSON.stringify(b) })
+            return { status: r.status, body: r.status === 204 ? null : await r.json() }
+          },
+          [method, path, body],
+        )
+      const keys = (res) => res.body.items.map((i) => i.key).sort().join(',')
+      const a = await call('PUT', '/api/preferences/hidden_entries', { value: [101] })
+      const b = await call('PUT', '/api/preferences/starred_entries', { value: [102] })
+      if (a.body.updated_at >= b.body.updated_at) fail('H1-PREFS', `writes are out of order: ${a.body.updated_at}, ${b.body.updated_at}`)
+      const all = await call('GET', '/api/preferences')
+      if (keys(all) !== 'hidden_entries,starred_entries') fail('H1-PREFS', `GET lists ${keys(all)}`)
+      const since = await call('GET', `/api/preferences?since=${encodeURIComponent(a.body.updated_at)}`)
+      if (keys(since) !== 'starred_entries') fail('H1-PREFS', `GET since the first write lists ${keys(since)}`)
+      const one = await call('GET', '/api/preferences/starred_entries')
+      if (JSON.stringify(one.body.value) !== '[102]') fail('H1-PREFS', `GET by key returns ${JSON.stringify(one.body)}`)
+      await call('DELETE', '/api/preferences/hidden_entries')
+      if ((await call('GET', '/api/preferences/hidden_entries')).status !== 404) fail('H1-PREFS', 'a deleted key still reads back')
+      await page.reload()
+      await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
+      const loaded = await harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'GET' && f.path === '/api/preferences').length)
+      if (loaded !== 1) fail('H1-PREFS', `the reload sent ${loaded} GET /api/preferences`)
+      if (keys(await call('GET', '/api/preferences')) !== 'starred_entries') fail('H1-PREFS', 'the store did not survive a reload')
+    },
+  }),
+
+  // The 1280 width is a desktop (mouse, no touch, desktop grid), and the
+  // stubs catch Copy link and Open in new tab from a card's context menu.
+  dashFlow('flow-h1-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    run: async ({ page, context, fail }) => {
+      const env = await page.evaluate(() => ({
+        hover: matchMedia('(hover: hover)').matches,
+        coarse: matchMedia('(pointer: coarse)').matches,
+        touchPoints: navigator.maxTouchPoints,
+        phoneShown: !!document.querySelector('main.md\\:hidden')?.getClientRects().length,
+      }))
+      if (!env.hover || env.coarse || env.touchPoints || env.phoneShown) fail('H1-DESKTOP', `1280 is not a desktop: ${JSON.stringify(env)}`)
+      const menuButton = (name) => page.locator('#card-context-menu').getByRole('button', { name, exact: true })
+      // The menu opens at the pointer and runs downwards, so right-click a
+      // card that starts in the top half of the window.
+      const at = await page.evaluate(() => {
+        for (const a of document.querySelectorAll('article[data-card-id]')) {
+          const r = a.getBoundingClientRect()
+          if (r.width && r.top > 80 && r.top < innerHeight / 2) return { x: r.left + 24, y: r.top + 24 }
+        }
+        return null
+      })
+      if (!at) return fail('H1-DESKTOP', 'no desktop card starts in the top half of the window')
+      await page.mouse.click(at.x, at.y, { button: 'right' })
+      await menuButton('Copy link').click()
+      await page.mouse.click(at.x, at.y, { button: 'right' })
+      await menuButton('Open in new tab').click()
+      const log = await harnessLog(page)
+      if (log.copied.length !== 1 || !/^https?:/.test(log.copied[0])) fail('H1-DESKTOP', `the clipboard stub holds ${JSON.stringify(log.copied)}`)
+      if (log.opened.length !== 1 || log.opened[0].target !== '_blank') fail('H1-DESKTOP', `the window.open stub saw ${JSON.stringify(log.opened)}`)
+      if (context.pages().length !== 1) fail('H1-DESKTOP', `${context.pages().length} pages are open; window.open was not stubbed`)
     },
   }),
 ]

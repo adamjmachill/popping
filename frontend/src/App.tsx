@@ -2564,8 +2564,9 @@ export function App() {
           health line, Refresh and Brief. A hairline divider sits at the
           bottom — the UI leans on these 1px ``rgba(255,255,255,0.08)``
           lines as its only border. Stacking: header z-20 < Menu z-30/40
-          < Settings z-50 < toasts z-[60]. */}
-      <header className="sticky top-0 z-20 pt-[env(safe-area-inset-top)] bg-bg-app/85 supports-[backdrop-filter]:backdrop-blur-xl border-b border-hairline">
+          < Settings z-50 < toasts z-[60]. data-app-header tells this
+          bar apart from the Column headers for the smoke test. */}
+      <header data-app-header className="sticky top-0 z-20 pt-[env(safe-area-inset-top)] bg-bg-app/85 supports-[backdrop-filter]:backdrop-blur-xl border-b border-hairline">
         {/* Title row. The title never truncates: with one Menu button
             the row has room for "Popping" at 320 and at 312 (Page Zoom),
             and below 360px it drops to 28px for margin (smoke rule C16).

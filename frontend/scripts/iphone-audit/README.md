@@ -2,7 +2,8 @@
 
 Everything here renders the built app in a browser with iPhone emulation
 (390x844 at 3x and 320x568 at 2x, touch on; a few states also at 312x675, a
-390 phone with Page Zoom at 125%) against a fully mocked API
+390 phone with Page Zoom at 125%; desktop flows at 1280x800 with no touch)
+against a fully mocked API
 (`capture.cjs` `mockApi`, data in `fixtures.cjs`). All scripts are CommonJS
 (`.cjs`) because `frontend/package.json` is `"type": "module"`, and card
 locators are scoped to `main.md\:hidden` because App renders the hidden
@@ -37,7 +38,8 @@ browser it can launch. Nothing is added to `package.json`.
 ## smoke.cjs
 
     node scripts/iphone-audit/smoke.cjs <base> [--csp] [--strict] \
-         [--browser chromium|webkit] [--out <dir>] [--only <state>[,<state>...]]
+         [--browser chromium|webkit] [--out <dir>] [--only <state>[,<state>...]] \
+         [--states-only]
 
 - `<base>`: where `vite preview` serves the build, e.g. `http://127.0.0.1:4173`.
 - `--csp`: serve every document with the production Content-Security-Policy,
@@ -49,8 +51,14 @@ browser it can launch. Nothing is added to `package.json`.
   explicitly to each width (the descriptor's own viewport is 390x664).
   Chromium uses an iOS Safari user agent with `isMobile` and `hasTouch`.
 - `--out <dir>`: write `<width>-<state>.png` for every state. Without it no
-  screenshots are taken (CI cannot retrieve them anyway).
+  screenshots are taken (CI cannot retrieve them anyway). That picture is
+  taken before a flow's `run`, so it shows where a flow starts; a flow saves
+  its later steps with `shot(label)`, written as `<width>-<state>-<label>.png`.
 - `--only`: run only the named states (comma-separated).
+- `--states-only`: skip the behaviour flows (`flows.cjs`). CI's WebKit
+  report-only run uses it.
+
+After the summary, the 10 slowest flows are listed with their times.
 
 Local run, from `frontend/` (section 13 of the plan):
 
@@ -69,7 +77,13 @@ looks wrong".
 For each width, each state gets a fresh browser context (never
 `setViewportSize`: long sessions gave false `pointer: coarse` readings) with
 `colorScheme: 'dark'`, the `en-CA` locale, the `America/Vancouver` time zone
-and `clock.setFixedTime(F.NOW)`, so relative times ("12m ago") are stable. Then:
+and `clock.setFixedTime(F.NOW)`, so relative times ("12m ago") are stable.
+`setFixedTime` freezes `Date.now` but timers keep running. The phone widths
+have `isMobile`, `hasTouch` and an iOS user agent. The 1280 width
+(`desktop: true`, not in the default widths) has neither, uses a desktop
+Safari user agent and skips C1; only states and flows that list it run there,
+and they need `wait: 'main.grid article[data-card-id]'`, because the default
+wait looks for a phone card in the hidden `main.md:hidden`. Then:
 
 1. `mockApi(context, { onUnmocked })`, the runtime listeners (C8) and, with
    `--csp`, the CSP route (C9); then the state's `before` hook (extra routes);
@@ -78,13 +92,14 @@ and `clock.setFixedTime(F.NOW)`, so relative times ("12m ago") are stable. Then:
    "refreshed" toast go away;
 3. run the state's `setup`, let requests settle, wait 400 ms;
 4. run the layout rules, take the screenshot, then run the rules that
-   temporarily change the page (C2b, C6), which put everything back.
+   temporarily change the page (C2b, C6), which put everything back;
+5. run the state's `run({ page, context, width, settle, fail, shot })`.
 
 ### States (PR2)
 
 | State | What it shows |
 |---|---|
-| `dashboard` | the phone dashboard at 390, 320 and 312 (also runs C2b and C16); the top bar must hold exactly search, refresh and the Menu button, and no settings gear |
+| `dashboard` | the phone dashboard at 390, 320 and 312 (also runs C2b and C16); the App's top bar (`header[data-app-header]`, not the Column headers) must hold exactly search, refresh and the Menu button, and no settings gear |
 | `card-summary` | summaries open on card 101 (180-character title, thumbnail, 60-character source) and 102 (90-character unbroken token) |
 | `search-x` | search open with "x" typed |
 | `search-60` | search with the 60-character `F.SEARCH_QUERY_60` (results header) |
@@ -105,7 +120,7 @@ picked by position, headers by `aria-label` (`close settings`, `close menu`).
 To add a state, append to `STATES` in `smoke.cjs`:
 
     { name, url, widths, wait, before({ page, context }), setup({ page, settle }),
-      extra: ['C16'], checks: false, run({ page, fail }) }
+      extra: ['C16'], checks: false, run({ page, fail, shot }) }
 
 Every field but `name` is optional. `extra` adds rules for that state only;
 `checks: false` skips the layout rules; `run` does assertions after the checks
@@ -170,11 +185,13 @@ installs `playwright@1.56.1` with `--no-save` (and proves `package.json` and
 the lockfile are untouched), installs Chromium and WebKit, starts
 `vite preview` on 127.0.0.1:4173, then runs
 
-    node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp
-    node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit   # report only
+    node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp --strict
+    node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit --states-only   # report only
 
 The WebKit step is `continue-on-error`: WebKit on Linux is not iOS Safari.
-PR9 adds `--strict` to the Chromium command.
+It skips the flows, which drive Chromium's touch input and would add about
+as much time again for a report nobody gates on. The job has a 30-minute
+timeout.
 
 Read CI failures with
 `gh api repos/<owner>/<repo>/check-runs/<id>/annotations`.
@@ -199,8 +216,69 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-ft-menu-edit-feed` | a source row's › in the Menu opens that feed in Settings, in view; a `?source=` change while Settings is open moves to another feed |
 | `flow-fu-jump-to-column` | Jump to column selects that phone tab and scrolls it into the strip |
 | `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
+| `flow-h1-taps` | the harness: ≡ then Settings counts 2 taps, passes `taps(page, 2, …)` and fails `taps(page, 1, …)` |
+| `flow-h1-touch-drag` | the harness: `touchDrag` does nothing off Chromium; on Chromium an upward drag scrolls the phone list and counts 1 |
+| `flow-h1-set-hidden` | the harness: `setHidden` sets `visibilityState` and `hidden`; coming back runs the app's quiet poll |
+| `flow-h1-keepalive` | the harness: the fetch log shows the load-time `GET /api/preferences` without keepalive, and the views still queued when the page hides (beacon refused) sent with it |
+| `flow-h1-pref-store` | the mock: a preference PUT reads back in the list, with `since` and by key; DELETE removes it; a reload loads it once and still sees it |
+| `flow-h1-desktop` | the harness at 1280: a mouse desktop with the desktop grid; a card's Copy link and Open in new tab land in the clipboard and `window.open` stubs |
 
 Run one with `--only <name>`; PR6 and PR8 add the PATCH and PUT counting flows.
+
+### Helpers (H1)
+
+Every flow made with `flow()` (and so `dashFlow`, `editorFlow`, `aiFlow`)
+gets `installHarness(page)` before the page loads: `window.open`,
+`navigator.share` and `navigator.clipboard` are stubs that record their
+calls, and fetches to `/api/preferences` and `/api/interactions` are recorded
+with their `keepalive` flag, which Playwright's Request does not expose.
+`harnessLog(page)` returns `{ fetches: [{ method, path, keepalive }], opened,
+shared, copied }`. `sendBeacon` is not stubbed.
+
+| Helper | What it does |
+|---|---|
+| `tap(page, locator)` | `locator.tap()`, and one more in `page._taps` (0 when `run` starts) |
+| `taps(page, max, id)` | fails the flow under rule `id` when more than `max` taps were used; returns false then |
+| `touchDrag(page, { from, to, steps = 10, stepMs = 50, holdMs = 150 })` | one finger from `from` to `to` (`{ x, y }`, CSS px) through CDP `Input.dispatchTouchEvent`, after two animation frames and 300 ms; holds `holdMs` before lifting; counts as one tap. Chromium only: elsewhere it returns false and does nothing |
+| `setHidden(page, hidden)` | sets `document.visibilityState` and `document.hidden`, then fires `visibilitychange` |
+| `installClock(page, time = F.NOW)` | `page.clock.install`; `touchDrag` then waits in Node instead of on animation frames |
+
+Tap-count flows prove "at most N taps". They start from their URL and reach
+the target only with `tap`, `touchDrag` (a swipe is one tap) and `fill`
+(typing is free): no `evaluate`, `pushState`, `.click()`, `.check()`,
+`selectOption` or `startPoll`. They assert outcomes (a request sent or not, a
+card hidden, a transform, `defaultPrevented`), never exact scroll offsets.
+`tap` needs a touch context, so it is for the phone widths.
+
+Chromium doesn't deliver page touch moves under about 40px, so rules about
+small movements are unit-tested in `scripts/unit/`. Moves closer than about
+50 ms apart fling to different offsets from run to run, hence the defaults.
+Flows about seen-on-scroll and IntersectionObserver drive the scroller's
+`scrollTop` or `scrollBy`; touch drags are for gestures.
+
+Time: flows that assert dwell, batch, toast, poll or arrival timing call
+`installClock(page)` in `before` and move time with `page.clock.runFor`
+(`flow-fn-quiet-poll`). A timer set during load can fire hundreds of
+milliseconds late in real time, so real pauses have no margin over a short
+delay. `runFor` also fires the regular visible poll, so GET counts allow for
+it. Where real time is kept (for example "a fling marks nothing"), pause at
+least twice the delay under test.
+
+### The mutation check
+
+Every new flow, and every new behavioural pytest, is shown to catch what it
+guards:
+
+1. Name the one product line it guards.
+2. Break that line as a scratch edit.
+3. `npm run build`, then `smoke.cjs <base> --only <flow>` (or the single
+   pytest).
+4. Confirm it fails on the expected rule or assertion.
+5. Restore with `git checkout -- <file>`, then `git diff --exit-code`.
+6. Record "flow → broken line → failing rule" in the unit's notes,
+   `docs/ux-notes/<unit>.md`.
+
+Gesture and timing flows also pass 5 runs in a row before they merge.
 
 ## capture.cjs, probe.cjs, run.sh
 
@@ -217,6 +295,12 @@ builds, serves on 127.0.0.1:4173 and writes next to the scripts:
 (`/api/`, `/auth/`, `/assets/`), keeps its own deep copy of the sources and
 entries per call (POST, PATCH and DELETE change that copy; GET reads it), and
 calls `onUnmocked({ method, path, url })` for anything it does not answer.
+Preferences are a per-call store too, empty at the start: `PUT
+/api/preferences/<key>` stores `{ key, value, updated_at }` and `DELETE`
+removes it; `GET /api/preferences` lists the rows (only those updated after
+`since` when it is given) and `GET /api/preferences/<key>` returns one or 404.
+`updated_at` is `F.NOW` plus one millisecond per write. Any other method on a
+preference key is unmocked (C8).
 
 `capture.cjs` and `probe.cjs` open Settings the way a person does since PR5:
 the Menu (`open menu`), then its Settings row.
@@ -236,3 +320,50 @@ FONTCONFIG_FILE=$PWD/scripts/iphone-audit/fonts-ci.conf \
 
 `fc-match system-ui` with that variable set should print DejaVu Sans.
 Run it this way before every push.
+
+## Local loop
+
+What a session runs before pushing. CI stays authoritative, and WebKit
+results come only from CI. The database is a throwaway test cluster, not an
+app process.
+
+Backend, from the repository root:
+
+    apt-get update && apt-get install -y postgresql-16-pgvector   # Ubuntu noble universe
+    pg_ctlcluster 16 main start
+    su postgres -c "psql -c \"CREATE ROLE popping_test LOGIN SUPERUSER PASSWORD 'popping_test'\""
+    su postgres -c "createdb -O popping_test popping_test"
+    PGPASSWORD=popping_test psql -h localhost -U popping_test -d popping_test \
+      -c 'CREATE EXTENSION IF NOT EXISTS vector'
+    python3.12 -m venv /path/outside/the/repo/venv && . /path/outside/the/repo/venv/bin/activate
+    TORCH_VERSION=$(sed -n 's/^ARG TORCH_VERSION=//p' backend/Dockerfile)
+    pip install --index-url https://download.pytorch.org/whl/cpu "torch==${TORCH_VERSION}"
+    pip install --no-deps -r backend/requirements-dev.lock
+    pip install --no-deps -e backend
+    cd backend && POSTGRES_HOST=localhost POSTGRES_PORT=5432 POSTGRES_USER=popping_test \
+      POSTGRES_PASSWORD=popping_test POSTGRES_DB=popping_test pytest -ra
+
+- `conftest.py` and `0001_initial.py` need the `vector` extension.
+- CI uses Python 3.12; a container's default `python3` may be newer.
+- apt.postgresql.org may be blocked; the Ubuntu package is enough.
+- In a cloud environment the setup script does the installs once; a session
+  only starts the cluster (`pg_ctlcluster 16 main start`).
+- Two sessions at once use two databases (for example `popping_test` and
+  `popping_test_f`), and a git worktree sets `PYTHONPATH=<worktree>/backend`
+  so `app` is imported from the worktree.
+
+Frontend, from `frontend/`:
+
+    npm ci
+    git diff --exit-code package.json package-lock.json
+    npm run lint && npm run build
+    node --experimental-strip-types --test 'scripts/unit/*.test.ts'
+    nohup ./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173 --strictPort > /tmp/preview.log 2>&1 &
+    FONTCONFIG_FILE=$PWD/scripts/iphone-audit/fonts-ci.conf PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers \
+      node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp --strict
+
+- Playwright is installed without saving it (`npm install --no-save
+  playwright@1.56.1`, as CI does), and the `git diff` above stays clean.
+- `vite preview` serves `dist/` from disk, so a rebuild needs no restart.
+  Stop it by its PID, not `pkill -f` (the pattern matches the shell running it).
+- The strict smoke takes about 3 minutes and reports 0 failures on main.
