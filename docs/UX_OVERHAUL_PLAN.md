@@ -251,8 +251,9 @@ D20. **Units and tracks.** About 34 units instead of 13 PRs: a strictly serial f
    parallel backend track, squash-merge, never stack. Each unit branches from up-to-date main
    after the previous unit in its track has merged.
 
-D21. **Device checks.** One pinned GitHub issue, "Device checks", is the running list and the only
-   reply channel. Frontend merges hold at Gate 1 (after PR3c) and Gate 2 (after PR6c). The backend
+D21. **Device checks.** `docs/DEVICE_CHECKS.md` on main is the running list and the only reply
+   channel. Issues are turned off on this repo; if you turn them on, the list can move to a pinned
+   issue. Frontend merges hold at Gate 1 (after PR3c) and Gate 2 (after PR6c). The backend
    track continues during a gate.
 
 D22. **PR1r.** A build line in Settings, and a reload onto a new build when you return after 10
@@ -305,7 +306,7 @@ may run both tracks interleaved, as long as those edges and each track's order h
 
 | Unit | What you'll notice on the phone | Track | Migration |
 |---|---|---|---|
-| H0 | Nothing in the app. This plan is final and on main, README.md:85 is fixed, and the Device checks issue exists | docs | no |
+| H0 | Nothing in the app. This plan is final and on main, README.md:85 is fixed, and the Device checks list exists | docs | no |
 
 **Backend track (B)**
 
@@ -391,8 +392,8 @@ PR13 (deferred items, each needing a fresh yes, D19) is not a unit on either tra
   - Done: the appendix was revised to D1–D19 and re-verified against main 4be8766, then revised
     again with the 2026-10-19 review (D20–D33).
   - H0 also fixes README.md:85 (PR images are never pushed: build.yml:175 and 187, and the same
-    for the frontend image, push only on push events; the fix is already on this branch), opens
-    the pinned Device checks issue, and merges #26. #26 is docs only, so it merges before any code
+    for the frontend image, push only on push events; the fix is already on this branch), adds
+    `docs/DEVICE_CHECKS.md`, and merges #26. #26 is docs only, so it merges before any code
     unit. H1 fixes the build.yml:12 comment along with its other build.yml changes.
 - **Branching and merging (D20).**
   - Branch each unit from up-to-date main and open it against main; build.yml:14-18 runs CI only
@@ -406,7 +407,7 @@ PR13 (deferred items, each needing a fresh yes, D19) is not a unit on either tra
     `popping-update` pulls. That includes in-between states such as PR3b without PR3c, or PR2c
     before both devices run PR2b (PR2c has its own merge condition).
 - **Each unit:**
-  - Read the Device checks issue first: move ticked items under "Checked", and turn `fail:`
+  - Read `docs/DEVICE_CHECKS.md` first: move ticked items under "Checked", and turn `fail:`
     replies into fix units.
   - Implement the spec. For units marked "Plan first", use plan mode; when you have said to keep
     going without approvals, write the plan into the unit's notes file before changing code.
@@ -428,14 +429,16 @@ PR13 (deferred items, each needing a fresh yes, D19) is not a unit on either tra
 
 ### Deploy and device checks
 
-1. **The Device checks issue.** One pinned GitHub issue, "Device checks", is the running list and
-   the only reply channel (D21).
-   - A unit's lines go in only after it merges and the main-branch build run for its merge commit
-     is green. Images publish minutes after the merge, and `cancel-in-progress`
-     (build.yml:24-26) means a quick second merge replaces the first run.
+1. **The Device checks list.** `docs/DEVICE_CHECKS.md` on main is the running list and the only
+   reply channel (D21). Issues are turned off on this repo, so it is a file.
+   - You reply by editing it on GitHub: tick a line, or write `fail: <line>` under it. Telling the
+     session in chat works too; the session then records it in the file.
+   - A unit's PR adds its lines under "Pending". Run a check only after the main-branch build run
+     for that merge commit is green. Images publish minutes after the merge, and
+     `cancel-in-progress` (build.yml:24-26) means a quick second merge replaces the first run.
    - Each line is an unticked item: `- [ ] #<pr> sha-<short> · <one action>. Pass: <one sentence>.`
    - PR6's on-device list lives there, in Gate 2.
-   - Each session reads the issue at start, moves ticked items under "Checked", and turns `fail:`
+   - Each session reads the file at start, moves ticked items under "Checked", and turns `fail:`
      replies into fix units.
 2. **Step 0 for every check:**
    - Run `popping-update` only after that run is green.
@@ -474,7 +477,7 @@ PR13 (deferred items, each needing a fresh yes, D19) is not a unit on either tra
    - Never edit tracked files in `/opt/popping`: `git pull --ff-only` would then refuse, and every
      later `popping-update` stops.
    - Never pin in `.env`: later updates would silently stay on the pin.
-   - The issue keeps "Last good: sha-<…>", the last passed check. It was deployed, so its tag
+   - The file keeps "Last good: sha-<…>", the last passed check. It was deployed, so its tag
      exists.
    - Fast frontend-only rollback:
      `cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d frontend`. Then no
@@ -490,7 +493,7 @@ PR13 (deferred items, each needing a fresh yes, D19) is not a unit on either tra
      `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp --only <states> --out <scratchpad>/shots/<unit>`.
      Without `--out`, smoke writes no PNGs.
    - Look at each one, and send at most 6 with the session's file-send tool. If a session has no
-     such tool, describe them in the issue.
+     such tool, describe them in the unit's PR.
    - A flow screenshot shows only its start; H1 adds a `shot(label)` callback for end states.
    - Never commit PNGs.
 
@@ -618,7 +621,7 @@ Notes:
   backoff and completion; migration 0031 single head and up/down/up; source health; website error
   semantics (robots.txt 404 still finds sitemaps; refusals show Blocked); article_detect fixtures;
   preview deadline, semaphore and cache; duplicate 409.
-- **At the gates:** you pass Gate 1 and Gate 2 in the Device checks issue.
+- **At the gates:** you pass Gate 1 and Gate 2 in the Device checks list.
 - **After the final unit:** a full strict smoke at 390, 320 and 312 wide plus 1280, every flow, and
   a screenshot set.
 
@@ -642,7 +645,7 @@ Every merge needs CI green and the unit's review step (D32) unless the merge con
 | Unit | Title | What you'll notice on the phone | Size | Migration | Track | Depends on | Merge condition |
 |---|---|---|---|---|---|---|---|
 | PR0 | Merge #25 | Feeds keep the name you type (#25, merged) | M | 0030 (merged) | — | none | merged |
-| H0 | Plan revision, README fix, Device checks issue | Nothing in the app: this plan on main, README.md:85 fixed, the Device checks issue open | S | no | docs | none | the owner has read the units, gates and decisions |
+| H0 | Plan revision, README fix, Device checks list | Nothing in the app: this plan on main, README.md:85 fixed, the Device checks list open | S | no | docs | none | the owner has read the units, gates and decisions |
 | PR1a | Scheduler defaults, extraction off the event loop, Reddit Test, History | Website feeds no longer stall the app; the daily brief and feed checks stop getting skipped; Subreddit Test works; History shows your history | S | no | B | H0 | standard |
 | PR2a | Preference PATCH routes | Nothing yet: the PATCH save route, with no caller | M | no | B | PR1a (track order) | standard |
 | PR4a | Ingest rules, brief guard, On this day | A new or resumed feed adds 10 stories plus the last 2 days; On this day posts 5 a day; the brief skips a new feed's backfill | M | no | B | PR2a (track order; scheduler.py after PR1a) | standard |
@@ -652,7 +655,7 @@ Every merge needs CI green and the unit's review step (D32) unless the merge con
 | PR10a | article_detect library | Nothing: the article_detect library and fixtures | M | no | B | PR9a (track order) | standard |
 | PR10b | Website crawl wiring and errors | Website feeds pull articles; a site that refuses us shows as Blocked | L | no | B | PR10a, PR9a (error kinds), PR1a (`_extract_one` in a thread), PR4a (the undated cap) | the owner's read-only VPS probe of item counts |
 | PR11a | Preview endpoint, browser headers, PATCH type | Nothing yet: the preview route, browser headers, PATCH `type` | M | no | B | PR10b (`plan_candidates`), PR9a, PR4a (`select_items_for_ingest`) | standard |
-| PR2c | Refuse whole-list PUTs of set keys | An old copy of the app can't overwrite your saves | S | no | B (floating) | PR2b deployed on both devices; PR5b if it includes `muted_sources` | the Device checks issue shows both devices on the PR2b build |
+| PR2c | Refuse whole-list PUTs of set keys | An old copy of the app can't overwrite your saves | S | no | B (floating) | PR2b deployed on both devices; PR5b if it includes `muted_sources` | the Device checks list shows both devices on the PR2b build |
 | H1 | Test harness groundwork and local loop | Nothing in the app: test harness groundwork and the local loop | M | no | F (test-only) | H0 | flows 5 times locally |
 | PR1r | Build stamp and reload on a new build | Settings shows the build; the app reloads onto a new build after 10 minutes away | S | no | F | H1 | standard; after its first deploy the owner confirms the build line |
 | PR1b | Tab keys, resolveTab, tap-to-top, phone scroller | Saving never moves you to another tab. A new phone opens on For You. Tapping the current tab scrolls to the top | M | no | F | PR1r (track order), H1 | standard |
@@ -678,7 +681,7 @@ Every merge needs CI green and the unit's review step (D32) unless the merge con
 | PR12b | Copy sweep | One vocabulary everywhere | S | no | F | PR12a | standard; full smoke and every flow |
 | PR13 | Deferred | Deferred items, each needing a fresh yes (D19) | varies | maybe | — | as needed | the owner's yes |
 
-**Gates (D21):** Gate 1 sits after PR3c (PR3b and PR3c deploy together); Gate 2 sits after PR6c. Frontend units that follow a gate don't merge until the owner has passed it in the Device checks issue. The backend track continues during a gate.
+**Gates (D21):** Gate 1 sits after PR3c (PR3b and PR3c deploy together); Gate 2 sits after PR6c. Frontend units that follow a gate don't merge until the owner has passed it in the Device checks list. The backend track continues during a gate.
 
 **Cross-track edges** (the backend unit merges first): PR2a→PR2b; PR4b→PR4c and PR4d; PR6a→PR6b; PR9a→PR9b; PR11a→PR11b; PR10b and PR9b→PR11c; PR2b deployed on both devices→PR2c.
 
@@ -816,7 +819,7 @@ Every merge needs CI green and the unit's review step (D32) unless the merge con
 - Working notes go in `docs/ux-notes/<unit>.md`. This plan is `docs/UX_OVERHAUL_PLAN.md`, and it changes only when a decision or the spec changes.
 - Update `ARCHITECTURE.md` (new process-local state) and `frontend/scripts/iphone-audit/README.md` (new flows and states).
 - Take screenshots with `smoke.cjs --only <state> --out <scratchpad>/shots/<unit>`. Never commit PNGs.
-- Device checks follow "Deploy and device checks" in How I'll work: the lines go in the pinned issue after the main build is green, and the owner relaunches the home-screen app before checking.
+- Device checks follow "Deploy and device checks" in How I'll work: the unit's PR adds its lines to `docs/DEVICE_CHECKS.md`, the owner checks after the main build is green, and the owner relaunches the home-screen app before checking.
 - The local loop and the mutation check are in How I'll work; H1 builds the test helpers they use.
 
 ---
@@ -939,7 +942,7 @@ The same recipe is summarised under "How I'll work → Local loop". It is a thro
 - Every "until it reloads" risk in this plan is unbounded without this. The owner also can't tell which build a device runs: `/health` has no version, and the sha exists only as an image label.
 
 **Units:**
-- PR1r: Build stamp and reload on a new build (frontend track). Depends on: H1. Merge condition: CI green; after the first deploy, the owner relaunches each device once and confirms the Settings build line in the Device checks issue.
+- PR1r: Build stamp and reload on a new build (frontend track). Depends on: H1. Merge condition: CI green; after the first deploy, the owner relaunches each device once and confirms the Settings build line in the Device checks list.
 
 ### PR1r: Build stamp and reload on a new build (frontend track)
 
@@ -1166,7 +1169,7 @@ The same recipe is summarised under "How I'll work → Local loop". It is a thro
 **Units:**
 - **PR2a: Preference PATCH routes** (backend track). Depends on: nothing functional; it follows PR1a in the backend track. Merge condition: CI green and the review step. It is additive with no caller, so it merges alone, and reverts alone until PR2b merges.
 - **PR2b: prefSync client and sync rules** (frontend track). Depends on: PR2a merged (cross-track), PR1c in track order (file overlap only: `preferences.tsx` and App.tsx, no functional edge on PR1). Merge condition: CI green and the review step.
-- **PR2c: Refuse whole-list PUTs of set keys** (backend track, floating). Depends on: PR2b deployed, and the Device checks issue showing both devices on the PR2b build stamp (D23). It doesn't hold the backend track.
+- **PR2c: Refuse whole-list PUTs of set keys** (backend track, floating). Depends on: PR2b deployed, and the Device checks list showing both devices on the PR2b build stamp (D23). It doesn't hold the backend track.
 
 ### PR2a: Preference PATCH routes (backend track)
 
@@ -1317,7 +1320,7 @@ The same recipe is summarised under "How I'll work → Local loop". It is a thro
 - `capture.cjs`'s PUT mock answers 409 for set keys.
 
 #### Merge condition
-- Merge only after PR2b is deployed and the Device checks issue shows both devices on the PR2b build stamp (D23, D32). PR2b must already have removed the legacy seed's set-key PUTs.
+- Merge only after PR2b is deployed and the Device checks list shows both devices on the PR2b build stamp (D23, D32). PR2b must already have removed the legacy seed's set-key PUTs.
 
 #### Risks and rollback
 - After PR2c, an old bundle loses only its own unsaved action until it reloads.
@@ -1551,7 +1554,7 @@ Every removal of ✓, swipe-right, `m`, the context-menu "Mark as read", the hea
 
 ### Device gate 1 (after PR3c)
 - The owner deploys PR3b and PR3c in the same `popping-update` (D33), after the main-branch build for PR3c's merge commit is green.
-- The checklist is a section of the Device checks issue (D21). Step 0 (revision check, force-quit and reopen, build line) applies first.
+- The checklist is a section of the Device checks list (D21). Step 0 (revision check, force-quit and reopen, build line) applies first.
   - Open the top story of a badged tab and come back. Pass: the badge drops by 1 and the list hasn't moved.
   - Scroll slowly past 5 cards. Pass: they count as seen.
   - Fling past 20. Pass: those stay unseen, and the end row offers "N not seen · Mark as read".
@@ -2052,7 +2055,7 @@ From PR6b on, the status row (phone) or the sub-row's text slot (desktop) is the
 
 #### Risks
 - The non-passive listener makes iOS wait for JavaScript on every move. It returns at once unless it is tracking, and cards already do the same.
-- CDP touch in Chromium tests the wiring, not how it feels on iOS: Chromium has no rubber-band, hides moves under about 38px, and the WebKit run is report-only. The thresholds are covered by `pull.test.ts`, and the feel by Gate 2 in the Device checks issue.
+- CDP touch in Chromium tests the wiring, not how it feels on iOS: Chromium has no rubber-band, hides moves under about 38px, and the WebKit run is report-only. The thresholds are covered by `pull.test.ts`, and the feel by Gate 2 in the Device checks list.
 - **If Gate 2 fails** because a slow pull's first 1-2px move hands the touch to native scrolling (iOS has no touch slop): while tracking, listen to the list's `scroll` event. If `scrollTop` goes below 0, drop the JS transform and arm from `−scrollTop` instead (arm at −64, refresh on `touchend`). Build it only if the owner sees the problem on the device.
 - Revert removes the pull and restores the old Refresh behaviour. The header button is still there until PR6c.
 
@@ -2081,7 +2084,7 @@ From PR6b on, the status row (phone) or the sub-row's text slot (desktop) is the
 **Run with:** effort high · plan first: no · review: /code-review high; then Gate 2.
 
 ### Device gate 2 (after PR6c)
-PR6b and PR6c deploy together. These lines go into the Gate 2 section of the Device checks issue once PR6c's main-branch build is green (see Deploy and device checks). Step 0 first: popping-update, paste the revision check, force-quit and reopen the home-screen app, and confirm Settings shows the expected build (PR1r).
+PR6b and PR6c deploy together. These lines are the Gate 2 section of `docs/DEVICE_CHECKS.md`; check them once PR6c's main-branch build is green (see Deploy and device checks). Step 0 first: popping-update, paste the revision check, force-quit and reopen the home-screen app, and confirm Settings shows the expected build (PR1r).
 - Pull at the top. Pass: the spinner follows the finger, and a release past the threshold shows "Checking N feeds…" and then a result. A short pull springs back with no check.
 - Shaky upward scroll from the top. Pass: native scroll, no spinner.
 - Diagonal drag. Pass: a pull or a card swipe, never both, never a stuck list.
