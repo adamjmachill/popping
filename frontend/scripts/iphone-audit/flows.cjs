@@ -2628,23 +2628,26 @@ module.exports = [
       await sleep(1200)
       if (log.navs !== 2) return fail('RELOAD-SAVED', 'reloaded although the pending save did not get through')
 
-      // 8b. Back again: it is sent again and fails again. It still keeps
-      // the page.
+      // 8b. Away again: hiding sends it and it fails again, and so does
+      // the return. It still keeps the page. (Each hide waits for the
+      // answer: a request still unanswered on the return is given up on,
+      // not sent again, sync rule 4.)
       let before = page._saves
-      await away(page, 11)
-      if (!(await waitFor(() => page._saves >= before + 1, 3000))) return fail('RELOAD-FLUSH', `coming back did not resend the unsaved save: ${page._saves - before} PATCHes`)
+      if (!(await awayAfterAnswer(11, page._refused + 1))) return fail('RELOAD-FLUSH', 'hiding the page did not send the unsaved save')
+      if (!(await waitFor(() => page._saves >= before + 2, 3000))) return fail('RELOAD-FLUSH', `coming back did not resend the unsaved save: ${page._saves - before} PATCHes`)
       await sleep(1200)
       if (log.navs !== 2) return fail('RELOAD-SAVED', 'reloaded although the save failed again')
 
-      // 8c. The server takes it again: back once more, the save is sent,
-      // and the page reloads only once it is saved.
-      page._refuse = []
+      // 8c. The server takes it again once the save sent by the hide has
+      // failed: back once more, the save is sent, and the page reloads only
+      // once it is saved.
+      page._refuse = [503]
       before = page._saves
-      await away(page, 11)
+      if (!(await awayAfterAnswer(11, page._refused + 1))) return fail('RELOAD-FLUSH', 'hiding the page did not send the unsaved save')
       if (!(await waitFor(() => log.navs === 3, 6000))) return fail('RELOAD-FLUSH', `back after 11 min with a new build: no reload: ${JSON.stringify(log)}`)
       const after = log.events.slice(events)
       if (after[0] !== 'save-done') fail('RELOAD-FLUSH', `the reload started before the pending save was done: ${after.join(', ')}`)
-      if (page._saves < before + 1) fail('RELOAD-FLUSH', 'the save was not sent before the reload')
+      if (page._saves < before + 2) fail('RELOAD-FLUSH', 'the save was not sent again before the reload')
       await page.clock.resume()
       if (!(await reloaded(3))) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 3`)
 

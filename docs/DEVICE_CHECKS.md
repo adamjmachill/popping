@@ -46,7 +46,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · With Popping open on the phone, save a story on the laptop, then wait a minute. Pass: the story shows as saved on the phone without a reload.
 - [ ] #<pr> · Hide a story on the phone and, within a few seconds, save a different story on the laptop; then force-quit and reopen the phone app and reload the laptop. Pass: on both, the hidden story stays hidden and the saved one stays saved.
 - [ ] #<pr> · Save a story on the phone and switch to another app straight away; force-quit Popping from the app switcher and reopen it. Pass: the story is still in Saved, on the laptop too.
-- [ ] #<pr> · Turn on airplane mode on the phone, save a story, turn airplane mode off and come back to Popping. Pass: within a few seconds the story shows as saved on the laptop (after its next poll or a reload).
+- [ ] #<pr> · In the Settings app, turn on airplane mode. Come back to Popping and save a story, then switch to the Settings app, turn airplane mode off, wait for Wi-Fi to reconnect, and switch back to Popping. Pass: after a reload of the laptop tab, or its next poll (up to a minute), the story shows as saved.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

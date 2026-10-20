@@ -38,7 +38,9 @@
 //     calls it when the page comes back to the front).
 //   - A write that doesn't get through is tried again (2, 4, 8 s, and
 //     again when the page comes back); one the server refuses is
-//     dropped. Each ends in one toast.
+//     dropped. Each ends in one toast. A write still unanswered after
+//     30 s, or when the page comes back, is not sent again: the next
+//     full read shows whether it landed.
 //
 // Server contract
 // ---------------
@@ -458,7 +460,8 @@ export interface PreferencesContextValue {
   registerBeforeFlush: (fn: () => void) => () => void
 
   /** Reset only, which reloads next: drop every queued write and its
-   *  retries, wait for the writes on the way, and send nothing more,
+   *  retries, wait for the writes on the way (at most 3 s: a request
+   *  that never settles must not stop Reset), and send nothing more,
    *  not even when the page goes. Without it, the reload's leave flush
    *  would write the queued rows back after Reset's DELETEs. */
   discardPending: () => Promise<void>
@@ -479,8 +482,9 @@ const FAILURE_TOAST_MS = 30_000
  *   2. Writes: optimistic in ``state`` at once, then batched to the
  *      server (``lib/prefSync.ts``).
  *   3. Hidden, pagehide, beforeunload: queued writes go with
- *      ``keepalive``. Back in front: writes sent before the hide stop
- *      being waited for, and failed ones are tried again.
+ *      ``keepalive``. Back in front: writes still unanswered are given
+ *      up on (App's full GET shows what the server holds), and failed
+ *      ones are tried again.
  */
 export function PreferencesProvider({ children }: { children: ReactNode }) {
   const [rows, setRows] = useState<Rows>({})

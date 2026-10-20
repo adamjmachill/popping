@@ -1353,9 +1353,9 @@ export function App() {
         allKeys.push(`${k}:${id}`)
       }
     }
-    // Queued writes are dropped, and the ones on the way waited for,
-    // before the DELETEs: sent after them (the reload's leave flush
-    // sends what is queued) they would write the rows back.
+    // Queued writes are dropped, and the ones on the way waited for (at
+    // most 3 s), before the DELETEs: sent after them (the reload's leave
+    // flush sends what is queued) they would write the rows back.
     void discardPrefs()
       .then(() => Promise.allSettled(allKeys.map((k) => api.deletePreference(k))))
       .finally(() => {
