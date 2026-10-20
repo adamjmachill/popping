@@ -26,6 +26,7 @@ import { Column, type ColumnPrefs } from './components/Column'
 import { byNewest, normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
 import { Drawer } from './components/Drawer'
 import { FramingWatch } from './components/FramingWatch'
+import { FirstFeedButton } from './components/FirstFeedButton'
 import { Hamburger } from './components/Hamburger'
 import { LoginPage } from './components/LoginPage'
 import { SearchResults } from './components/SearchResults'
@@ -206,8 +207,10 @@ type ColumnSections = Record<string, SectionCollapse>
 
 // One tab's column: ``key`` names it, ``label`` is what it shows,
 // ``name`` is the id its stored rows are kept under (see
-// ``availableTabs``).
-type TabColumn = { key: ColKey; name: string; label: string; entries: Entry[] }
+// ``availableTabs``). ``sourceName`` is the feed an empty column reports
+// on (Column's empty state): the one feed a filter shows, or for a
+// category the feed named like it. Saved and For You have none.
+type TabColumn = { key: ColKey; name: string; label: string; entries: Entry[]; sourceName?: string }
 
 // User-saved filter preset. Captures a complete dashboard
 // view: which sources are filtered, and the per-column
@@ -714,6 +717,10 @@ export function App() {
   // then the tab list is incomplete: the first-load skeleton shows, and
   // the phone neither migrates its stored tab nor settles a missing one.
   const [firstRefreshDone, setFirstRefreshDone] = useState(false)
+  // A refresh has brought the feed list back. Unlike ``firstRefreshDone``
+  // it stays false after a failed first load, while ``sources`` is still
+  // its initial empty list.
+  const [sourcesLoaded, setSourcesLoaded] = useState(false)
   // The source filter (``filterScope``) the last applied refresh loaded
   // the tabs for. Until it is the filter in force, the strip still holds
   // another scope's stories, so a missing phone tab may only be late,
@@ -813,8 +820,9 @@ export function App() {
   // to full width (matching Apple Mail's header behaviour). ``false``
   // on first mount so the large title gets the full row.
   const [searchOpen, setSearchOpen] = useState(false)
-  // Keyboard selection.
-  const [selectedColumnIndex, setSelectedColumnIndex] = useState(0)
+  // Keyboard selection. The column is held by its key, so a column that
+  // moves (Edit tabs) keeps the selection; null is the first column.
+  const [selectedColumnKey, setSelectedColumnKey] = useState<ColKey | null>(null)
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null)
   // Per-card summary expansion. Session-scoped on purpose — the user
   // typically expands once to scan, and re-expanding after a reload
@@ -978,7 +986,7 @@ export function App() {
       { key: FORYOU_KEY, name: 'For You', label: 'For You', entries: visibleForYou },
     ]
     for (const [cat, list] of byCategory) {
-      out.push({ key: colKey(cat), name: cat, label: categoryLabel(cat), entries: list })
+      out.push({ key: colKey(cat), name: cat, label: categoryLabel(cat), entries: list, sourceName: cat })
     }
     return out
   }, [visibleForYou, byCategory, visibleStarred])
@@ -1039,7 +1047,9 @@ export function App() {
       const name = sourcesById.get(e.source_id)
       return name != null && activeSources.has(name)
     })
-    return [{ key: FILTER_KEY, name: multisubColumnName, label: categoryLabel(multisubColumnName), entries: filtered }]
+    // One feed: an empty filter says how that feed is doing.
+    const sourceName = activeSources.size === 1 ? Array.from(activeSources)[0] : undefined
+    return [{ key: FILTER_KEY, name: multisubColumnName, label: categoryLabel(multisubColumnName), entries: filtered, sourceName }]
   }, [visibleEntries, activeSources, sourcesById, multisubColumnName])
 
   const baseColumns = viewKind === 'multisub' ? multisubColumn : allSubsColumns
@@ -1068,10 +1078,17 @@ export function App() {
         })
       }
       filtered = sortEntries(filtered, normalizeSort(prefs.sort, col.key), col.key)
-      return { key: col.key, name: col.name, label: col.label, entries: filtered, totalCount: col.entries.length }
+      return {
+        key: col.key,
+        name: col.name,
+        label: col.label,
+        entries: filtered,
+        sourceName: col.sourceName,
+        totalCount: col.entries.length,
+      }
     })
   }, [baseColumns, prefsFor])
-  // The columns the arrow keys walk (``selectedColumnIndex``): on the
+  // The columns the arrow keys walk (``selectedColumnKey``): on the
   // desktop the grid's, which leaves out For You in the 'all' view (it
   // is the row above the grid, with no selection); on the phone the
   // strip's.
@@ -1079,6 +1096,12 @@ export function App() {
     () => (isDesktop && viewKind === 'all' ? columns.filter((c) => c.key !== FORYOU_KEY) : columns),
     [columns, isDesktop, viewKind],
   )
+  // The selected column's place in ``keyColumns``, and the column itself.
+  // A key that is gone selects nothing until the effect below moves it.
+  const keyIndex = keyColumns.findIndex((c) => c.key === selectedColumnKey)
+  const selectedColumnIndex = keyIndex >= 0 ? keyIndex : 0
+  const selectedKeyColumn: TabColumn | undefined =
+    keyIndex >= 0 ? keyColumns[keyIndex] : selectedColumnKey == null ? keyColumns[0] : undefined
 
   // Read state is stored per-column (``readEntries[columnName]``)
   // because "mark all read" and its Undo are column-scoped
@@ -1259,6 +1282,7 @@ export function App() {
         }
         return reconcileById(prev, next)
       })
+      setSourcesLoaded(true)
       setForYou((prev) => reconcileById(prev, fy))
       setFirstRefreshDone(true)
       setTabsLoadedFor(filterScope(activeSources))
@@ -1561,10 +1585,22 @@ export function App() {
     return () => window.clearTimeout(id)
   }, [activeSources, refresh, authProbed])
 
-  // Desktop: j/k/o never target a column that has gone.
+  // The arrow keys never target a column that has gone (hidden, or out
+  // of the view): the selection moves to the column now at its last
+  // place, or the last one, and its card is dropped, since that card
+  // belonged to the column that went.
+  const lastKeyIndexRef = useRef(0)
   useEffect(() => {
-    if (keyColumns.length) setSelectedColumnIndex((i) => Math.min(i, keyColumns.length - 1))
-  }, [keyColumns.length])
+    if (selectedColumnKey == null) return
+    const i = keyColumns.findIndex((c) => c.key === selectedColumnKey)
+    if (i >= 0) {
+      lastKeyIndexRef.current = i
+      return
+    }
+    const fallback = keyColumns[Math.min(lastKeyIndexRef.current, keyColumns.length - 1)]
+    setSelectedColumnKey(fallback?.key ?? null)
+    setSelectedCardId(null)
+  }, [keyColumns, selectedColumnKey])
 
   // The phone's tabs in strip order: Brief, then the columns.
   const phoneTabs = useMemo<Tab[]>(
@@ -1709,9 +1745,10 @@ export function App() {
     [latestPrefs, setCategoryLayout],
   )
   // Every feed is a built-in: an empty Saved or For You offers "Add
-  // your first feed" (Settings → Feeds). Not before the feeds have
-  // loaded, so a slow first load doesn't flash it.
-  const noOwnFeeds = firstRefreshDone && !sources.some((s) => !isBuiltIn(s))
+  // your first feed" (Settings → Feeds). Only once a refresh has brought
+  // the feed list back: before that, or after a failed first load,
+  // ``sources`` is still empty and says nothing about the owner's feeds.
+  const noOwnFeeds = sourcesLoaded && !sources.some((s) => !isBuiltIn(s))
   const openFeeds = useCallback(() => openSettings('feeds'), [openSettings])
 
   // Note: readEntries, lastViewed, columnPrefs, columnSections,
@@ -1918,7 +1955,7 @@ export function App() {
   // The column lookup here uses the currently-selected
   // column's lastViewed for the mark-read. The user's
   // exact current column is best-effort (we use
-  // selectedColumnIndex or 0) because the mark-read flip
+  // the selected column or the first) because the mark-read flip
   // is per-column, not per-entry.
   const toggleHideEntry = useCallback(
     (columnName: string, entryId: number) => {
@@ -2117,16 +2154,17 @@ export function App() {
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        setSelectedColumnIndex((i) => Math.max(0, i - 1))
+        setSelectedColumnKey(keyColumns[Math.max(0, selectedColumnIndex - 1)].key)
         setSelectedCardId(null)
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
-        setSelectedColumnIndex((i) => Math.min(keyColumns.length - 1, i + 1))
+        setSelectedColumnKey(keyColumns[Math.min(keyColumns.length - 1, selectedColumnIndex + 1)].key)
         setSelectedCardId(null)
       } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault()
-        const col = keyColumns[selectedColumnIndex]
+        const col = selectedKeyColumn
         if (!col || col.entries.length === 0) return
+        setSelectedColumnKey(col.key)
         const idx = col.entries.findIndex((e2) => e2.id === selectedCardId)
         const next =
           e.key === 'ArrowDown'
@@ -2145,7 +2183,7 @@ export function App() {
         // only fire on bare ``m``.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const col = keyColumns[selectedColumnIndex]
+        const col = selectedKeyColumn
         if (!col) return
         markEntryRead(col.name, selectedCardId)
         recordImmediate({ entry_id: selectedCardId, type: 'view' })
@@ -2196,7 +2234,7 @@ export function App() {
         // focus.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const col = keyColumns[selectedColumnIndex]
+        const col = selectedKeyColumn
         if (!col) return
         // Mirrors the eye button's onClick (Card.tsx): record the
         // 'never' signal only on the hide direction (not unhide),
@@ -2222,6 +2260,7 @@ export function App() {
     columns,
     keyColumns,
     selectedColumnIndex,
+    selectedKeyColumn,
     selectedCardId,
     searchQuery,
     markEntryRead,
@@ -2489,8 +2528,7 @@ export function App() {
       setSearchOpen(false)
       // For You on the desktop is the row above the grid, not a column
       // the arrow keys select: the selection stays where it is.
-      const idx = keyColumns.findIndex((c) => c.key === key)
-      if (idx >= 0) setSelectedColumnIndex(idx)
+      if (keyColumns.some((c) => c.key === key)) setSelectedColumnKey(col.key)
       setSelectedCardId(null)
       selectTab(col.key)
       requestAnimationFrame(() => {
@@ -2501,7 +2539,7 @@ export function App() {
         ;(el?.firstElementChild as HTMLElement | null)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
       })
     }
-  }, [columns, keyColumns, setSelectedColumnIndex, setSelectedCardId, columnRefs, selectTab])
+  }, [columns, keyColumns, setSelectedCardId, columnRefs, selectTab])
 
   const setPrefsFor = useCallback((columnName: string, prefs: ColumnPrefs) => {
     setColumnPrefs(columnName, prefs as ColumnPrefsValue)
@@ -2967,22 +3005,33 @@ export function App() {
       ) : (
         <>
           {/* Desktop. The view is two surfaces stacked:
-              1. For You row — only in 'all' view, only when forYou is
-                 non-empty and its tab isn't hidden (Edit tabs). Full-width card grid; no column chrome so
-                 the personal feed reads as the "front page".
+              1. For You row — only in 'all' view, whenever its tab is
+                 shown (Edit tabs), empty or not, as the phone's For You
+                 tab is: Jump to column lands on it. Full-width card grid;
+                 no column chrome so the personal feed reads as the "front
+                 page". Empty, it says "No stories yet", with the
+                 first-feed button while every feed is a built-in.
               2. By-category grid — the All Subs columns. Skipped in
                  'multisub' view because the multi-sub column is the
                  whole dashboard there. */}
-          {isDesktop && viewKind === 'all' && visibleForYou.length > 0 && !hiddenTabs.has(FORYOU_KEY) && (
+          {isDesktop && viewKind === 'all' && !hiddenTabs.has(FORYOU_KEY) && (
             <section ref={setColumnRef(FORYOU_KEY)} className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
               <header className="flex items-center justify-between mb-2">
                 <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
                   For You
                 </h2>
-                <span className="text-ios-caption text-label-tertiary">
-                  {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
-                </span>
+                {visibleForYou.length > 0 && (
+                  <span className="text-ios-caption text-label-tertiary">
+                    {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
+                  </span>
+                )}
               </header>
+              {visibleForYou.length === 0 && (
+                <div className="px-1 space-y-3">
+                  <p className="text-ios-body text-label-secondary">No stories yet</p>
+                  {noOwnFeeds && <FirstFeedButton onClick={openFeeds} />}
+                </div>
+              )}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {visibleForYou.map((e) => {
                   // Per-card engagement props. The For You
@@ -3067,6 +3116,7 @@ export function App() {
                   <Column
                     columnKey={col.key}
                     label={col.label}
+                    sourceName={col.sourceName}
                     sections={sectionsByColumn.get(col.key) ?? { new: [], history: [] }}
                     sourcesById={sourcesById}
                     sourcesByName={sourcesByName}
@@ -3075,7 +3125,7 @@ export function App() {
                     newCount={newCountByColumn.get(col.key)}
                     onRefresh={manualRefresh}
                     onSourceTap={onSourceTap}
-                    selectedId={col.key === keyColumns[selectedColumnIndex]?.key ? selectedCardId ?? undefined : undefined}
+                    selectedId={col.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined}
                     cardRefs={cardRefs}
                     onMarkRead={() => markColumnRead(col.name)}
                     onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
@@ -3241,6 +3291,7 @@ export function App() {
                   scrollerRef={setPhoneScroller}
                   columnKey={phoneCol.key}
                   label={phoneCol.label}
+                  sourceName={phoneCol.sourceName}
                   sections={sectionsByColumn.get(phoneCol.key) ?? { new: [], history: [] }}
                   sourcesById={sourcesById}
                   sourcesByName={sourcesByName}
@@ -3250,7 +3301,7 @@ export function App() {
                   onRefresh={manualRefresh}
                   onSourceTap={onSourceTap}
                   selectedId={
-                    phoneCol.key === keyColumns[selectedColumnIndex]?.key ? selectedCardId ?? undefined : undefined
+                    phoneCol.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined
                   }
                   cardRefs={cardRefs}
                   onMarkRead={() => markColumnRead(phoneCol.name)}

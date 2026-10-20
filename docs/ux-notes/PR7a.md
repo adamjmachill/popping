@@ -61,8 +61,9 @@ changed.
     `keyColumns`, and its `selectedId` compares by key. Before, the arrow keys
     indexed a list that included For You while the grid didn't, so the
     highlight could land one column off.
-  - The desktop For You row renders only while For You is shown, and carries
-    a column ref, so Jump to For You scrolls to it.
+  - The desktop For You row renders whenever For You is shown, empty or
+    not (an empty one says "No stories yet"), and carries a column ref, so
+    Jump to For You always scrolls to it (review fix 3).
   - Edit pill: a 44px button after the `role="tablist"`, pinned at the
     trailing edge (the strip is `flex-1 min-w-0` and scrolls; the pill is
     `shrink-0`). A tab selected by code scrolls into the strip's view (one
@@ -74,15 +75,16 @@ changed.
     new categories from landing by label.
   - The `columns.length === 0` "No stories yet. Tap Refresh…" branch is gone;
     the skeleton renders while `!firstRefreshDone`.
-  - `noOwnFeeds` (after the first refresh, every feed `isBuiltIn`) goes to
-    each Column with `onAddFeed = openSettings('feeds')`.
+  - `noOwnFeeds` (once a refresh has brought the feed list back, every feed
+    `isBuiltIn`) goes to each Column with `onAddFeed = openSettings('feeds')`
+    (review fix 1).
   - Closing the editor puts focus back on the pill, or on ≡ when the editor
     was opened from the Menu.
 - `frontend/src/components/Column.tsx`: `columnKey` and `label` replace `name`
   and `tabKey`; the header renders `label`; the comparator compares both, and
-  `noOwnFeeds`. `EmptyColumnMessage` takes `columnKey` (a category tab looks up
-  `cat:<name>`'s feed as before), and its meta message is "No stories yet",
-  with `FirstFeedButton` on an empty Saved or For You while there is no feed of
+  `noOwnFeeds`. `EmptyColumnMessage` takes `sourceName`, the column's backing
+  feed (review fix 4), and its fallback message is "No stories yet", with
+  `FirstFeedButton` on an empty Saved or For You while there is no feed of
   one's own.
 - `frontend/src/components/FirstFeedButton.tsx` (new): the 44px "Add your
   first feed" button, built once so PR6c's row and PR11b's retarget reuse it.
@@ -228,9 +230,6 @@ restore, a byte compare against the backup and a rebuild.
 - Arrow keys, not j/k: the app has no j/k bindings, and its column walk is
   ArrowLeft / ArrowRight (the code comment calls it "j/k/o"). That walk now
   uses the shown tabs, through `keyColumns`.
-- The desktop For You row still renders only when For You has stories (and
-  is shown). The grid has no For You column; an empty desktop shows Saved's
-  "No stories yet" instead of an empty row.
 - `freshTabIndex` and the legacy-index count changed in `lib/columns.ts`
   (PR1b's lib), as above. Both keep PR1b's behaviour for the cases it covered
   and follow from Saved and For You always being present.
@@ -239,6 +238,73 @@ restore, a byte compare against the backup and a rebuild.
 - `#36`'s pending device line about Saved moving the phone is now wrong. It
   was left as written (another unit's line), and the PR7a lines say that
   theirs replaces it.
+
+## Review fixes (second commit, "PR7a: review fixes")
+
+Five findings, four distinct defects (findings 1 and 4 are the same one).
+All were confirmed against the code and fixed; none was skipped.
+
+1. **"Add your first feed" after a failed first load** (findings 1 and 4).
+   `noOwnFeeds` was gated on `firstRefreshDone`, which the refresh's catch
+   also sets while `sources` is still its initial `[]`. So offline, or
+   with /api/sources or /api/entries failing, every empty Saved or For You
+   offered the button to an owner with feeds. Now a `sourcesLoaded` state is
+   set only on refresh's success path, next to `setSources`, and
+   `noOwnFeeds = sourcesLoaded && !sources.some((s) => !isBuiltIn(s))`.
+   New flow `flow-first-feed-load-fails`.
+2. **Desktop arrow-key selection held by index.** `selectedColumnIndex`
+   was a plain index into `keyColumns`, so moving or hiding a tab in Edit
+   tabs pointed it at another column while `selectedCardId` stayed on the
+   old one: no highlight, ArrowDown jumped to the wrong column, and `m`/`h`
+   wrote the card's id into the wrong column's rows. Now App keeps
+   `selectedColumnKey` (null is the first column) and derives the index
+   with `findIndex`. ArrowLeft/ArrowRight store the next column's key,
+   ArrowDown/ArrowUp store the column they select in, and Jump to column
+   sets the key. One effect replaces the length-only clamp: when the key
+   leaves `keyColumns` (hidden, or out of the view), the selection moves to
+   the column now at its last place (or the last column) and the card is
+   dropped. Both Column call sites compare `selectedId` by that column's
+   key. New flow `flow-desktop-select-follows-tab`.
+3. **Jump to For You on the desktop did nothing while For You was
+   empty.** The row rendered only with stories, so its ref was never
+   mounted. Following the plan, the row now renders whenever For You is
+   shown; empty, it says "No stories yet", with `FirstFeedButton` while
+   every feed is a built-in, and its count line is left out. This removes
+   the earlier deviation note ("the desktop For You row still renders only
+   when For You has stories"). New flow `flow-foryou-empty-desktop`.
+4. **A one-feed filter lost its slice-19 status.** `EmptyColumnMessage`
+   only looked up `cat:` keys, so the filter column (`meta:filter`) showed
+   "No stories yet" for a broken or never-fetched feed. `TabColumn` gains
+   an optional `sourceName`: the one active source's name when the filter
+   holds exactly one feed, and the raw category for `cat:` tabs (the
+   lookup the slice-19 path always made). Both Column call sites pass it,
+   `_columnPropsEqual` compares it, and `EmptyColumnMessage` calls
+   `sourcesByName?.get(sourceName)`, falling back to "No stories yet" (plus
+   `FirstFeedButton` where set). New flow `flow-filter-one-feed-status`.
+   New pytest `test_empty_state_looks_up_the_columns_source_name` in the
+   slice19 file; `test_slice21_column_memo.py` also pins `sourceName` and
+   `noOwnFeeds` in the comparator.
+
+### Verification of the fixes
+
+- `npm run lint`: 0 errors (the same 5 warnings). `npm run build` passes.
+  Unit tests: 150 of 150.
+- Backend pytest on `popping_test_f2`: 1249 passed, 13 failed, exactly the
+  DNS-only baseline list.
+- Full strict smoke (`--csp --strict`, port 4174): 148 states and flows
+  (the 144 before plus the four new flows), 0 failures, 0 warnings. I looked
+  at the screenshots of the empty desktop For You row and the one-feed
+  filter's status; no PNGs are committed.
+- `git diff --exit-code package.json package-lock.json`: clean.
+- Mutation checks: with the first commit's `App.tsx` and `Column.tsx`
+  rebuilt, all four new flows fail (FIRST-FEED-FAIL: For You and Saved offer
+  the button after the failed load; SELECT-KEY: the selection is lost after
+  Move News to top and ArrowDown lands in Deals; FY-EMPTY-DESK: no For You
+  row; FILTER-STATUS: "No stories yet" instead of the feed's error). With the
+  fix in place but the gone-key fallback pointed at the last column instead
+  of the column's last place, SELECT-KEY fails ("selected … in Video,
+  expected a card in Saved"). Files were restored and byte-compared after
+  each run.
 
 ## Open items for later units
 

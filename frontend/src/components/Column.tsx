@@ -25,12 +25,16 @@ const SORTS: ReadonlyArray<{ value: Sort; label: string }> = [
 
 type Props = {
   // The tab's key (lib/columns): which sort it defaults to, whether it
-  // has a sort at all (Saved doesn't), and, for a category, the
-  // category its empty state looks up.
+  // has a sort at all (Saved doesn't), and whether its empty state may
+  // offer "Add your first feed" (Saved and For You).
   columnKey: ColKey
   // The name the header shows (App's column label: the category's
   // label, or Saved / For You).
   label: string
+  // The feed the empty state reports on (``sourcesByName``'s key): the
+  // one feed a filter shows, or for a category the feed named like it.
+  // Saved, For You and a filter of several feeds leave it unset.
+  sourceName?: string
   // Pre-split entry lists. App owns the "what's new" semantics
   // (derived from per-column lastViewed timestamps + the manual
   // readEntries set), and ships the two slices down in the tab's
@@ -49,9 +53,9 @@ type Props = {
   // the source's last_fetch_at / error_count / last_error and
   // tell the user why the column is empty ("last fetch errored",
   // "auto-disabled after 5 errors", etc.) instead of just
-  // "no entries yet". Optional — meta columns (Saved, For You,
-  // Multisub) pass ``undefined`` and the empty-state falls back
-  // to "No stories yet". Added in slice 19.
+  // "no entries yet". Optional — a column with no ``sourceName``
+  // (Saved, For You, a filter of several feeds), or one whose name
+  // matches no feed, falls back to "No stories yet". Added in slice 19.
   sourcesByName?: Map<string, import('../api').Source>
   // Every feed is a built-in one: an empty Saved or For You adds the
   // "Add your first feed" button, which calls ``onAddFeed`` (stable;
@@ -192,6 +196,7 @@ type Props = {
 export function ColumnInner({
   columnKey,
   label,
+  sourceName,
   sections,
   sourcesById,
   // Slice 19: optional sourcesByName map for context-aware empty-state.
@@ -522,7 +527,7 @@ export function ColumnInner({
           // For You / Multisub) don't have a backing source so
           // we fall back to the original generic message.
           <EmptyColumnMessage
-            columnKey={columnKey}
+            sourceName={sourceName}
             sourcesByName={sourcesByName}
             onAddFeed={noOwnFeeds && (columnKey === SAVED_KEY || columnKey === FORYOU_KEY) ? onAddFeed : undefined}
           />
@@ -844,20 +849,21 @@ function ChevronIcon({ className, collapsed }: { className?: string; collapsed?:
 const AUTO_DISABLE_THRESHOLD = 5
 
 function EmptyColumnMessage({
-  columnKey,
+  sourceName,
   sourcesByName,
   onAddFeed,
 }: {
-  columnKey: ColKey
+  sourceName?: string
   sourcesByName?: Map<string, import('../api').Source>
   // Set on an empty Saved or For You while every feed is a built-in.
   onAddFeed?: () => void
 }) {
-  // A category's tab looks up the feed named like it (``cat:<name>``).
-  const category = columnKey.startsWith('cat:') ? columnKey.slice(4) : null
-  const source = category != null ? sourcesByName?.get(category) : undefined
-  // Meta column (Saved / For You / Multisub) or sourcesByName not
-  // provided: "No stories yet", with the first-feed button when set.
+  // The column's feed: the one feed a filter shows, or the feed named
+  // like a category.
+  const source = sourceName != null ? sourcesByName?.get(sourceName) : undefined
+  // No such feed (Saved, For You, a filter of several feeds) or
+  // sourcesByName not provided: "No stories yet", with the first-feed
+  // button when set.
   if (!source) {
     return (
       <div className="px-1 space-y-3">
@@ -923,6 +929,7 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
   return (
     prev.columnKey === next.columnKey &&
     prev.label === next.label &&
+    prev.sourceName === next.sourceName &&
     prev.sections === next.sections &&
     prev.sourcesById === next.sourcesById &&
     prev.sourcesByName === next.sourcesByName &&

@@ -3201,4 +3201,151 @@ module.exports = [
       taps(page, 1, 'FIRST-FEED')
     },
   }),
+
+  // A first load that fails says nothing about the owner's feeds: the
+  // error banner shows, and an empty For You or Saved offers no "Add your
+  // first feed". The button comes once a refresh brings the feed list
+  // back with only built-ins.
+  dashFlow('flow-first-feed-load-fails', {
+    wait: `${STRIP} [aria-selected="true"]`,
+    expectedFailedLoads: ['/api/sources'],
+    before: async ({ page }) => {
+      const builtIns = ['bbc_news', 'hn_top', 'nvd_recent', 'cisa_kev', 'rfd_hot_deals']
+      const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+      page._sourcesDown = true
+      await page.route(
+        (u) => new URL(u).pathname === '/api/sources',
+        (route) => {
+          if (route.request().method() !== 'GET') return route.fallback()
+          if (page._sourcesDown) return route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' })
+          return route.fulfill(json(F.SOURCES.filter((src) => builtIns.includes(src.name))))
+        },
+      )
+      await page.route((u) => /^\/api\/(entries|foryou)(\/|$)/.test(new URL(u).pathname), (route) => route.fulfill(json([])))
+    },
+    run: async ({ page, fail, shot }) => {
+      const button = page.locator(`${MOBILE_MAIN} [data-first-feed]`)
+      const empty = page.locator(MOBILE_MAIN).getByText('No stories yet', { exact: true })
+      if (!(await waitFor(() => page.locator('[role="alert"]').isVisible(), 3000))) return fail('FIRST-FEED-FAIL', 'no error banner after the first load failed')
+      for (const re of [/^for you/i, /^saved/i]) {
+        await tap(page, phoneTab(page, re))
+        if (!(await waitFor(() => empty.isVisible(), 3000))) fail('FIRST-FEED-FAIL', `${re.source} does not say "No stories yet"`)
+        await sleep(200)
+        if (await button.count()) fail('FIRST-FEED-FAIL', `${re.source} offers "Add your first feed" after a failed load`)
+      }
+      await shot('failed')
+      // The feeds load (only built-ins): now the button shows.
+      page._sourcesDown = false
+      await startPoll(page)
+      if (!(await waitFor(() => button.isVisible(), 3000))) fail('FIRST-FEED-FAIL', 'no "Add your first feed" once only built-in feeds loaded')
+    },
+  }),
+
+  // Desktop: the arrow-key selection follows its column, not its place.
+  // Moving the selected card's column (Edit tabs) keeps that card
+  // selected, and ArrowDown goes on down the same column. Hiding the
+  // column drops the card, and the selection moves to the column now at
+  // its place.
+  dashFlow('flow-desktop-select-follows-tab', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ context }) => {
+      // Saved has a story, so the column that takes News's place has one
+      // to select.
+      prefMock(context).seed({ starred_entries: [103] })
+    },
+    run: async ({ page, fail }) => {
+      const SEL = 'main.grid article[data-card-id][tabindex="0"]'
+      const selected = () =>
+        page.evaluate((sel) => {
+          const card = document.querySelector(sel)
+          const h = card && card.closest('section') && card.closest('section').querySelector('header h2')
+          return card ? { id: card.getAttribute('data-card-id'), column: h ? h.textContent.trim() : null } : null
+        }, SEL)
+      const editTabs = async (name, role = 'button') => {
+        await openMenu(page)
+        await page.locator(MENU).getByRole('button', { name: 'Edit tabs' }).click()
+        await page.locator(TABS_EDITOR).waitFor({ state: 'visible' })
+        await page.locator(TABS_EDITOR).getByRole(role, { name, exact: true }).click()
+        await page.locator(TABS_EDITOR).getByRole('button', { name: 'Done', exact: true }).click()
+        await page.locator(TABS_EDITOR).waitFor({ state: 'detached' })
+        await sleep(300)
+      }
+      const grid = await gridLabels(page)
+      const at = grid.indexOf('News')
+      if (at < 2) return fail('SELECT-KEY', `unexpected grid ${JSON.stringify(grid)}`)
+      for (let i = 0; i < at; i++) await page.keyboard.press('ArrowRight')
+      await page.keyboard.press('ArrowDown')
+      await page.keyboard.press('ArrowDown')
+      await sleep(150)
+      const first = await selected()
+      if (!first || first.column !== 'News') return fail('SELECT-KEY', `the arrow keys selected ${JSON.stringify(first)}, expected a News card`)
+
+      await editTabs('Move News to top')
+      const moved = await gridLabels(page)
+      if (moved[0] !== 'News') return fail('SELECT-KEY', `Move News to top left the grid as ${JSON.stringify(moved)}`)
+      const kept = await selected()
+      if (!kept || kept.id !== first.id || kept.column !== 'News') fail('SELECT-KEY', `after moving News the selection is ${JSON.stringify(kept)}, expected card ${first.id} in News`)
+      await page.keyboard.press('ArrowDown')
+      await sleep(150)
+      const down = await selected()
+      if (!down || down.column !== 'News' || down.id === first.id) fail('SELECT-KEY', `ArrowDown after the move selected ${JSON.stringify(down)}, expected the next News card`)
+
+      await editTabs('Show News', 'switch')
+      const hidden = await gridLabels(page)
+      if (hidden.includes('News')) return fail('SELECT-KEY', `hiding News left the grid as ${JSON.stringify(hidden)}`)
+      if (await page.locator(SEL).count()) fail('SELECT-KEY', `a card is still selected after its column was hidden: ${JSON.stringify(await selected())}`)
+      await page.keyboard.press('ArrowDown')
+      await sleep(150)
+      const next = await selected()
+      if (!next || next.column !== hidden[0]) fail('SELECT-KEY', `ArrowDown after hiding News selected ${JSON.stringify(next)}, expected a card in ${hidden[0]}`)
+    },
+  }),
+
+  // Desktop: an empty For You still has its row (it is a shown tab), so
+  // Jump to column's For You lands on it.
+  dashFlow('flow-foryou-empty-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page }) => {
+      await page.route((u) => new URL(u).pathname === '/api/foryou', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }))
+    },
+    run: async ({ page, fail, shot }) => {
+      // The desktop row, not the phone's (hidden) For You column.
+      const row = page.locator('section').filter({ visible: true, has: page.locator('header h2', { hasText: /^For You$/ }) })
+      if (!(await waitFor(async () => (await row.count()) === 1, 3000))) return fail('FY-EMPTY-DESK', 'no For You row while For You is empty')
+      if (!(await row.getByText('No stories yet', { exact: true }).isVisible())) fail('FY-EMPTY-DESK', 'the empty For You row does not say "No stories yet"')
+      if (await row.locator('[data-first-feed]').count()) fail('FY-EMPTY-DESK', 'the empty For You row offers "Add your first feed" although there are feeds')
+      await openMenu(page)
+      if (!(await jumpLabels(page)).includes('For You')) return fail('FY-EMPTY-DESK', 'Jump to column has no For You')
+      await page.locator(MENU).locator('h3:text-matches("jump to column", "i")').locator('xpath=../..').getByRole('button', { name: 'For You', exact: true }).click()
+      await sleep(800)
+      const top = await row.evaluate((el) => el.getBoundingClientRect().top)
+      if (top < 0 || top > 200) fail('FY-EMPTY-DESK', `after Jump to For You its row starts at ${top}px`)
+      await shot('empty')
+    },
+  }),
+
+  // Filtered to one feed with no stories, the column says how that feed
+  // is doing (slice 19): cisa_kev's last check failed.
+  dashFlow('flow-filter-one-feed-status', {
+    before: async ({ page }) => {
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries' && new URL(u).searchParams.getAll('source').length > 0,
+        (route) => route.fulfill({ status: 200, contentType: 'application/json', body: '[]' }),
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      await openMenu(page)
+      await page.locator(MENU).getByRole('checkbox', { name: /^filter by cisa kev$/i }).check()
+      await page.keyboard.press('Escape')
+      if (!(await waitFor(async () => (await tabTexts(page)).length === 2, 3000))) return fail('FILTER-STATUS', `the filter left ${JSON.stringify(await tabTexts(page))}`)
+      const status = page.locator(MOBILE_MAIN).getByText(/^last fetch failed: HTTP 503/)
+      if (!(await waitFor(() => status.isVisible(), 3000))) {
+        const text = ((await page.locator(MOBILE_MAIN).textContent()) || '').trim().slice(0, 200)
+        return fail('FILTER-STATUS', `the empty one-feed filter does not show the feed's last error: ${JSON.stringify(text)}`)
+      }
+      await shot('status')
+    },
+  }),
 ]

@@ -53,6 +53,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · Open Saved and remove its only story. Pass: Saved stays in the strip and says "No stories yet", and the phone stays on it. This replaces #36's line about Saved moving the phone.
 - [ ] #<pr> · After moving any tab, give a feed a new category (Menu → Settings → Feeds, open the feed, New category). Pass: the new category's tab is last in the strip, and the feed's category list follows the tab order.
 - [ ] #<pr> · With VoiceOver on, open Edit and tap ↑ on a tab. Pass: VoiceOver reads the tab's name and new place, such as "News, 5 of 9", and focus stays on that ↑.
+- [ ] #<pr> · Turn on Airplane Mode, force-quit the home-screen app and open it again. Pass: the red error line shows, and no tab offers "Add your first feed".
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

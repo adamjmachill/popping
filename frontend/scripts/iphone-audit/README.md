@@ -253,6 +253,10 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-saved-always` | PR7a: with nothing saved, the strip starts Brief, Saved, For You; the empty Saved says "No stories yet" without the first-feed button, and a tap stores it |
 | `flow-fresh-device-opens-foryou` | PR7a: a stored order that puts News and a filled Saved ahead of For You; a new device still opens on For You and stores it |
 | `flow-first-feed-empty-meta` | PR7a: only built-in feeds and no stories (route overrides): a new device opens on For You, which says "No stories yet" with a 44px "Add your first feed"; one tap opens Settings → Feeds |
+| `flow-first-feed-load-fails` | PR7a: the first GET /api/sources answers 503 (only built-ins and no stories once it works): the error banner shows, and neither the empty For You nor the empty Saved offers "Add your first feed"; after a refresh brings the built-in feeds back, the button shows |
+| `flow-desktop-select-follows-tab` | PR7a at 1280: a News card selected with the arrow keys stays selected when Edit tabs moves News to the front, and ArrowDown goes on down News; hiding News drops the selected card, and ArrowDown then selects in the column now at News's place (Saved, with one seeded save) |
+| `flow-foryou-empty-desktop` | PR7a at 1280: with /api/foryou answering [], the For You row is still there and says "No stories yet" (no first-feed button: there are feeds), and Jump to column → For You lands on it |
+| `flow-filter-one-feed-status` | PR7a: the Menu filter on one feed (cisa_kev) with no stories shows that feed's slice-19 status ("last fetch failed: HTTP 503…"), not "No stories yet" |
 | `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
 | `flow-h1-taps` | the harness: ≡ then Settings counts 2 taps, passes `taps(page, 2, …)` and fails `taps(page, 1, …)` |
 | `flow-h1-touch-drag` | the harness: `touchDrag` does nothing off Chromium; on Chromium an upward drag scrolls the phone list and counts 1 |

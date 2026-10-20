@@ -183,3 +183,29 @@ def test_empty_state_distinguishes_auto_disabled_from_generic_error():
     assert has_error_snippet, (
         "Empty-state should still surface transient fetch errors"
     )
+
+# ---------------------------------------------------------------------------
+# 7. The lookup uses the column's backing feed, not its tab key (PR7a)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.no_db
+def test_empty_state_looks_up_the_columns_source_name():
+    """A one-feed filter's column key is ``meta:filter``, so the lookup
+    can't be derived from the key: App passes the backing feed's name as
+    ``sourceName`` (the one filtered feed, or a category's name) at every
+    Column call site, and the empty state looks that name up.
+    """
+    src = _read_column()
+    assert re.search(r"sourcesByName\?\.get\(sourceName\)", src), (
+        "EmptyColumnMessage should look up sourcesByName by sourceName"
+    )
+    app = _read_app()
+    sites = list(re.finditer(r"<Column\b[^>]*>", app, re.DOTALL))
+    for i, site in enumerate(sites):
+        assert "sourceName=" in site.group(0), (
+            f"Column call site #{i + 1} must pass sourceName"
+        )
+    assert re.search(r"activeSources\.size === 1", app), (
+        "a one-feed filter should name its feed as the column's sourceName"
+    )

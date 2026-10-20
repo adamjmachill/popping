@@ -95,6 +95,8 @@ def test_column_comparator_function_exists():
 @pytest.mark.parametrize("prop", [
     "columnKey",
     "label",
+    "sourceName",
+    "noOwnFeeds",
     "sections",
     "sourcesById",
     "sourcesByName",
