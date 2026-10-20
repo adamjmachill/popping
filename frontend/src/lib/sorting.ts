@@ -6,8 +6,8 @@
 // column) re-sorts by it. For You's ranking multiplies the score by a
 // convergence boost it doesn't send (routes/foryou.py), so For You's
 // Best is the order the server sent, never a client re-sort. Saved is
-// never sorted: it lists saves newest-published first, whatever the
-// stored sort says.
+// never re-sorted here: App lists saves by ``byNewest`` (published,
+// else fetched), whatever the stored sort says.
 
 import type { ColKey } from './columns.ts'
 import { FORYOU_KEY, SAVED_KEY } from './columns.ts'

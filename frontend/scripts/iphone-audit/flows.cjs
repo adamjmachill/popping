@@ -461,6 +461,24 @@ async function putPrefs(page, rows) {
   await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
 }
 
+// Every interaction event the app POSTs (one or a batch) from now on,
+// in page._events; they go on to the mock.
+async function recordInteractions(page) {
+  page._events = []
+  await page.route(
+    (u) => /^\/api\/interactions(\/batch)?$/.test(new URL(u).pathname),
+    (route) => {
+      const req = route.request()
+      if (req.method() === 'POST') {
+        const b = req.postDataJSON() || {}
+        for (const e of b.events || [b]) page._events.push(e)
+      }
+      return route.fallback()
+    },
+  )
+}
+const bookmarksFor = (page, id) => page._events.filter((e) => e.type === 'bookmark' && e.entry_id === id).length
+
 // Every PUT and DELETE to /api/preferences/<key> from now on, as
 // { method, key, value }; they go on to the mock.
 async function prefWrites(page) {
@@ -1475,11 +1493,44 @@ module.exports = [
     },
   }),
 
+  // Saved lists saves newest first by published, else fetched time: a
+  // page with no publish date fetched a minute ago leads; stories with
+  // neither date come last, the higher id first.
+  dashFlow('flow-saved-order', {
+    before: async ({ page }) => {
+      // The mock is a context route, so a page route can't edit what it
+      // answers; the page's fetch drops the dates on the way in instead.
+      await page.addInitScript((undated) => {
+        const orig = window.fetch
+        window.fetch = async (...args) => {
+          const res = await orig(...args)
+          const path = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href).pathname
+          if (path !== '/api/entries' && path !== '/api/entries/by-ids') return res
+          const rows = await res.clone().json()
+          if (!Array.isArray(rows)) return res
+          const out = rows.map((e) => (undated[e.id] ? { ...e, ...undated[e.id] } : e))
+          return new Response(JSON.stringify(out), { status: res.status, statusText: res.statusText, headers: res.headers })
+        }
+      }, {
+        110: { published_at: null, fetched_at: new Date(F.NOW - 60000).toISOString() },
+        111: { published_at: null, fetched_at: null },
+        112: { published_at: null, fetched_at: null },
+      })
+    },
+    run: async ({ page, fail }) => {
+      await putPrefs(page, { starred_entries: [105, 111, 103, 112, 110] })
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('SAVED-ORDER', 'no Saved tab')
+      await tap(page, phoneTab(page, /^saved/i))
+      const want = '110,103,105,112,111'
+      const ids = () => page.locator(`${MOBILE_MAIN} article[data-card-id]`).evaluateAll((els) => els.map((el) => el.getAttribute('data-card-id')).join(','))
+      if (!(await waitFor(async () => (await ids()) === want, 3000))) fail('SAVED-ORDER', `Saved shows ${await ids()}, expected ${want}`)
+    },
+  }),
+
   // With no AI provider, every Generate and Regenerate (and the desktop
   // header's Brief) reads "Brief needs an AI provider · Set up"; Set up
   // opens Settings › AI, and closing Settings after setting one up
-  // brings the buttons back without a reload. A save records `bookmark`,
-  // an unsave doesn't.
+  // brings the buttons back without a reload.
   dashFlow('flow-brief-needs-ai', {
     before: async ({ page }) => {
       page._llm = { configured: false, brief: false, statusGets: 0 }
@@ -1562,33 +1613,80 @@ module.exports = [
     },
   }),
 
-  // A save records `bookmark`; an unsave (☆ again, or the menu's Unsave)
-  // doesn't.
+  // A save records `bookmark`; an unsave (☆ again) doesn't. The menu's
+  // Save / Unsave and keyboard `b` are desktop paths (on a phone the
+  // press is the system's link menu): flow-bookmark-on-save-desktop.
   dashFlow('flow-bookmark-on-save', {
     before: async ({ page }) => {
-      page._events = []
-      await page.route(
-        (u) => /^\/api\/interactions(\/batch)?$/.test(new URL(u).pathname),
-        (route) => {
-          const req = route.request()
-          if (req.method() === 'POST') {
-            const b = req.postDataJSON() || {}
-            for (const e of b.events || [b]) page._events.push(e)
-          }
-          return route.fallback()
-        },
-      )
+      await recordInteractions(page)
     },
     run: async ({ page, fail }) => {
       await tap(page, phoneTab(page, /^news/i))
       const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
       const id = Number(await card.getAttribute('data-card-id'))
-      const bookmarks = () => page._events.filter((e) => e.type === 'bookmark' && e.entry_id === id).length
+      const bookmarks = () => bookmarksFor(page, id)
       await tap(page, card.locator('button[aria-label="save for later"]'))
       if (!(await waitFor(() => bookmarks() === 1, 3000))) return fail('BOOKMARK', `a save sent ${bookmarks()} bookmark events, expected 1`)
       await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="remove from saved"]`))
       await sleep(800)
       if (bookmarks() !== 1) fail('BOOKMARK', `an unsave sent a bookmark (${bookmarks()} in all)`)
+    },
+  }),
+
+  // The card menu's Save for later records `bookmark` once and its Unsave
+  // doesn't; keyboard `b` twice (save, then unsave) records one.
+  dashFlow('flow-bookmark-on-save-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page }) => {
+      await recordInteractions(page)
+    },
+    run: async ({ page, fail }) => {
+      const menuButton = (name) => page.locator('#card-context-menu').getByRole('button', { name, exact: true })
+      // The menu opens at the pointer and runs downwards, so right-click
+      // a card in the top half of the window (For You's row, at the top).
+      const rightClick = async (id) => {
+        const at = await page.evaluate((cardId) => {
+          for (const a of document.querySelectorAll(`article[data-card-id="${cardId}"]`)) {
+            const r = a.getBoundingClientRect()
+            const x = r.left + 24
+            const y = r.top + 24
+            if (r.width && y < innerHeight / 2 && document.elementFromPoint(x, y)?.closest('article[data-card-id]') === a) return { x, y }
+          }
+          return null
+        }, id)
+        if (!at) return false
+        await page.mouse.click(at.x, at.y, { button: 'right' })
+        return true
+      }
+      const id = await page.evaluate(() => {
+        for (const a of document.querySelectorAll('article[data-card-id]')) {
+          const r = a.getBoundingClientRect()
+          if (r.width && r.top > 80 && r.top < innerHeight / 2) return Number(a.getAttribute('data-card-id'))
+        }
+        return null
+      })
+      if (id == null) return fail('BOOKMARK', 'no desktop card starts in the top half of the window')
+      if (!(await rightClick(id))) return fail('BOOKMARK', `card ${id} can't be right-clicked`)
+      await menuButton('Save for later').click()
+      if (!(await waitFor(() => bookmarksFor(page, id) === 1, 3000))) return fail('BOOKMARK', `the menu's Save sent ${bookmarksFor(page, id)} bookmark events, expected 1`)
+      if (!(await rightClick(id))) return fail('BOOKMARK', `card ${id} can't be right-clicked after saving`)
+      await menuButton('Unsave').click()
+      await sleep(800)
+      if (bookmarksFor(page, id) !== 1) fail('BOOKMARK', `the menu's Unsave sent a bookmark (${bookmarksFor(page, id)} in all)`)
+
+      // Keyboard: select a card, then b (save) and b (unsave).
+      await page.keyboard.press('ArrowDown')
+      const sel = 'article[data-card-id][tabindex="0"]'
+      if (!(await waitFor(async () => (await page.locator(sel).count()) > 0, 3000))) return fail('BOOKMARK', 'ArrowDown selected no card')
+      const kid = Number(await page.locator(sel).first().getAttribute('data-card-id'))
+      const before = bookmarksFor(page, kid)
+      await page.keyboard.press('b')
+      if (!(await waitFor(() => bookmarksFor(page, kid) === before + 1, 3000))) return fail('BOOKMARK', `b (save) sent ${bookmarksFor(page, kid) - before} bookmark events, expected 1`)
+      await waitFor(async () => (await page.locator(sel).count()) > 0, 2000)
+      await page.keyboard.press('b')
+      await sleep(800)
+      if (bookmarksFor(page, kid) !== before + 1) fail('BOOKMARK', `b (unsave) sent a bookmark (${bookmarksFor(page, kid) - before} in all)`)
     },
   }),
 

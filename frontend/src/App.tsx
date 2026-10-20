@@ -23,7 +23,7 @@ import { api, type Brief, type CurrentUser, type Entry, type Health, type Source
 import { BriefCard } from './components/BriefCard'
 import { Card } from './components/Card'
 import { Column, type ColumnPrefs } from './components/Column'
-import { normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
+import { byNewest, normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
 import { Drawer } from './components/Drawer'
 import { FramingWatch } from './components/FramingWatch'
 import { Hamburger } from './components/Hamburger'
@@ -980,23 +980,14 @@ export function App() {
         .map(([id]) => Number(id)),
     [votedEntries, hiddenSet],
   )
-  // "Saved" column entries. The Saved column shows entries the
-  // user has starred, in chronological order (most recent first).
-  // Filter out hidden (a star + a hide is "I saved this but
-  // don't want to see it now" — hide wins). The order is
-  // chosen as published_at desc so the user sees their freshest
-  // saves at the top.
+  // "Saved" column entries: the stories the user has starred, newest
+  // first by ``byNewest`` (published, else fetched; dated before
+  // undated; then the higher id), so an undated page saved today sits
+  // by its fetch time. Hidden ones are left out (a star + a hide is
+  // "I saved this but don't want to see it now" — hide wins). This is
+  // Saved's only order: ``sortEntries`` hands Saved back as it came.
   const visibleStarred = useMemo(
-    () =>
-      entries
-        .filter((e) => starredSet.has(e.id) && !hiddenSet.has(e.id))
-        .sort((a, b) => {
-          // published_at is a string (ISO 8601) so string
-          // comparison works for chronological order.
-          if (!a.published_at) return 1
-          if (!b.published_at) return -1
-          return b.published_at.localeCompare(a.published_at)
-        }),
+    () => entries.filter((e) => starredSet.has(e.id) && !hiddenSet.has(e.id)).sort(byNewest),
     [entries, starredSet, hiddenSet],
   )
 

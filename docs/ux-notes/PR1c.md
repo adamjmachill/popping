@@ -13,7 +13,8 @@ up, the Brief buttons read "Brief needs an AI provider · Set up".
   - `entryTime` (`published_at ?? fetched_at`, null when neither parses),
     `byNewest` (newest first, dated before undated, then the higher id),
     `byBest` (`composite_score` descending, then `byNewest`).
-  - `sortEntries(entries, sort, key)`: Saved comes back as it came; Newest
+  - `sortEntries(entries, sort, key)`: Saved comes back as it came (App
+    already lists it by `byNewest`); Newest
     sorts by `byNewest`; Best on For You keeps the server's order (the
     convergence boost in `routes/foryou.py` isn't sent); Best elsewhere
     (categories, the filter's column) sorts by `byBest`.
@@ -43,6 +44,11 @@ up, the Brief buttons read "Brief needs an AI provider · Set up".
   - The columns memo applies the age filter, then sorts once with
     `sortEntries(…, normalizeSort(prefs.sort, key), key)`. `minScore` is
     ignored. `sectionsByColumn` no longer re-sorts its two sections.
+  - `visibleStarred` (Saved's stories) sorts with `byNewest`, which is the
+    order main gave Saved through `sectionsByColumn`'s re-sort: published,
+    else fetched, dated before undated, then the higher id. Its old
+    published-only comparator put an undated page saved today last and
+    left undated saves in no fixed order.
   - `applyPreset` sets the source filter only; `savePreset` and
     `updatePreset` still capture `columnPrefs`, so stored presets keep
     their shape.
@@ -94,8 +100,13 @@ up, the Brief buttons read "Brief needs an AI provider · Set up".
   rows read as the default, the same row gives the same object, malformed
   fields fall back.
 - Flows (`flows.cjs`, 390): `flow-sort-best`, `flow-brief-needs-ai` (its
-  step 4 at 1280 with `page.setViewportSize`), `flow-bookmark-on-save`,
-  `flow-reset-keeps-saves`. `flow-fz-reset-inline` follows the new button
+  step 4 at 1280 with `page.setViewportSize`), `flow-bookmark-on-save`
+  (☆), `flow-reset-keeps-saves`, `flow-saved-order` (an undated page
+  fetched a minute ago leads Saved; saves with neither date come last,
+  higher id first; the dates are dropped by an init-script fetch shim,
+  because the mock is a context route a page route can't edit). At 1280:
+  `flow-bookmark-on-save-desktop` (the card menu's Save for later and
+  Unsave, then keyboard `b` twice). `flow-fz-reset-inline` follows the new button
   names. New helpers: `putPrefs` (writes rows into the mock's store
   through the page, then reloads), `prefWrites` (records preference PUTs
   and DELETEs), `BRIEF`.
@@ -149,6 +160,10 @@ restored with a checksum check.
 | `flow-brief-needs-ai` | `regenerate-compact` ignores `needsAi` | BRIEF-AI: a brief, collapsed: no Set up button |
 | `flow-brief-needs-ai` | Set up opens Feeds | BRIEF-AI: Set up opened Settings on "feeds" |
 | `flow-bookmark-on-save` | ☆ records `bookmark` on unsave too | BOOKMARK: an unsave sent a bookmark (2 in all) |
+| `flow-bookmark-on-save-desktop` | the menu's Save records `bookmark` on unsave too (Card.tsx `if (!starred)` removed) | BOOKMARK: the menu's Unsave sent a bookmark (2 in all) |
+| `flow-bookmark-on-save-desktop` | the menu's Save records nothing | BOOKMARK: the menu's Save sent 0 bookmark events, expected 1 |
+| `flow-bookmark-on-save-desktop` | keyboard `b` records `bookmark` on unsave too (App.tsx `if (!wasStarred)` removed) | BOOKMARK: b (unsave) sent a bookmark (2 in all) |
+| `flow-saved-order` | `visibleStarred` back on the published-only comparator | SAVED-ORDER: Saved shows 103,105,110,111,112, expected 110,103,105,112,111 |
 
 The `regenerate-compact` mutation also hit a 30 s tap timeout after its
 failure; the flow now stops at the first missing Set up instead.
@@ -168,9 +183,12 @@ failure; the flow now stops at the first missing Set up instead.
 - The AI status is fetched once signed in (`authProbed` and either a user
   or OIDC off), not on `authProbed` alone, so the sign-in page doesn't
   send a request that would 401.
-- `flow-bookmark-on-save` and the `brief-needs-ai-compact` state are
-  extra: the spec doesn't list a test for the bookmark rule, and the
-  compact strip is where the label is tightest.
+- `flow-bookmark-on-save`, `flow-bookmark-on-save-desktop`,
+  `flow-saved-order` and the `brief-needs-ai-compact` state are extra: the
+  spec doesn't list a test for the bookmark rule or Saved's order, and the
+  compact strip is where the label is tightest. The menu and keyboard
+  paths are tested at 1280 because on a phone the press is the system's
+  link menu, not the card menu.
 - The Set up label is caption-sized on phones. At 17px in CI's DejaVu Sans
   it measures 278px, wider than the 256px the Brief row has at 312px, so it
   would wrap (C11); at 13px it is 221px.
@@ -196,3 +214,27 @@ Revert is safe. An older bundle reads a stored `best` as oldest-first
 on a pre-PR1 bundle still deletes saves, hides and presets if Reset is
 pressed there. As a git revert, PR1c stands alone until the next frontend
 unit that depends on it merges.
+
+## Review fixes (second commit)
+
+- Saved's order: `visibleStarred` sorted by `published_at` alone, so once
+  `sectionsByColumn` stopped re-sorting, an undated page saved today
+  dropped to the bottom and undated saves had no fixed order (the
+  comparator returned 1 both ways). It now sorts with `byNewest`, main's
+  order. `sortEntries` still hands Saved back untouched and Saved still
+  has no Sort control. The `lib/sorting.ts` header comment says so.
+  New flow `flow-saved-order`.
+- Bookmark coverage: `flow-bookmark-on-save`'s comment claimed the menu's
+  Unsave, which it never tapped. The new `flow-bookmark-on-save-desktop`
+  covers the menu's Save / Unsave and keyboard `b`; the shared interaction
+  recorder is the `recordInteractions` / `bookmarksFor` helpers. The stray
+  bookmark sentence in `flow-brief-needs-ai`'s comment is gone.
+- Checks after the fixes: lint 0 errors, 5 warnings; build clean; unit
+  97 of 97; the five PR1c flows touched (`flow-saved-order`,
+  `flow-bookmark-on-save`, `flow-bookmark-on-save-desktop`,
+  `flow-sort-best`, `flow-brief-needs-ai`) looped 5 times with 0
+  failures; the four new mutations above each fail their flow; full
+  strict smoke (`--csp --strict`, fonts-ci.conf, preview on 4173): 0
+  failures, 0 warnings, 323 s. Backend tests that pin frontend source
+  (slice19, slice21, preferences, reserved names) pass apart from the two
+  DNS-only baseline failures; `package.json` and the lockfile untouched.
