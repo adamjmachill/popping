@@ -35,7 +35,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR9b Feed health UI | F | not started | |
 | PR10a article_detect library | B | merged | #34 |
 | PR10b Website crawl wiring and errors | B | in review | #39 |
-| PR11a Preview endpoint, browser headers, PATCH type | B | in review | |
+| PR11a Preview endpoint, browser headers, PATCH type | B | in review | #41 |
 | PR11b Add flow and 409 | F | not started | |
 | PR11c Find its feed | F | not started | |
 | PR12a Menu of tasks and 4 Settings tabs | F | not started | |
