@@ -28,6 +28,8 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #30 · A day or more after the deploy, open the On This Day tab. Pass: the stories that arrived in the last 24 hours number at most 10 (at most 5 per UTC day, which turns at 5 pm Pacific), and none of them are in For You. Stories fetched before the deploy don't count.
 - [ ] #30 · The day after adding that feed, open Brief. Pass: no highlight is one of the new feed's older stories.
 - [ ] #31 · Pause a feed that has a story in For You, then force-quit and reopen the app and open For You. Pass: none of that feed's stories are in For You (resume the feed afterwards).
+- [ ] #<pr> · After the first deploy with PR1r, force-quit and reopen the home-screen app, reload the desktop tab, and open Menu → Settings → Reset on each. Pass: both show the same "Build <8 characters> · <day> <month>, <time>" line, with the time the image was built.
+- [ ] #<pr> · After the next frontend deploy, leave the home-screen app in the background for 10 minutes or more without force-quitting it, then come back to it. Pass: it reloads by itself once, and Settings → Reset shows the new build; a desktop tab that was hidden as long shows "New version · Reload" instead.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

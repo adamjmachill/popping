@@ -369,6 +369,59 @@ const onTop = (locator) =>
     return !!at && (at === el || el.contains(at))
   })
 
+// --- PR1r: reload on a new build ----------------------------------------------
+
+// The server "deploys" a new build: fetches of / (the update check's, not
+// page loads) get index.html with its entry script renamed to
+// page._nextScript, which answers HEAD with a script (or a 404 when its
+// name says "gone"). page._hold, when set, is a promise each such fetch
+// waits for. Under vite preview a real reload still loads the old build,
+// so the reloaded page runs the old id against the new one again.
+// The log: { checks, heads, navs, events } counts the update check's
+// fetches of /, the HEADs of a new script and the page loads after the
+// first; events lists 'put-done' and 'nav' in the order they happened.
+async function newBuild(page) {
+  const log = { checks: 0, heads: [], navs: 0, events: [] }
+  page._nextScript = '/static/index-next.js'
+  await page.route(
+    (u) => new URL(u).pathname === '/',
+    async (route) => {
+      if (route.request().resourceType() !== 'fetch') return route.fallback()
+      log.checks++
+      if (page._hold) await page._hold
+      const res = await route.fetch()
+      const html = (await res.text()).replace(/\/static\/index-[^"]+\.js/, page._nextScript)
+      return route.fulfill({ response: res, body: html })
+    },
+  )
+  await page.route(
+    (u) => /^\/static\/index-(next|gone)\.js$/.test(new URL(u).pathname),
+    (route) => {
+      const p = new URL(route.request().url()).pathname
+      log.heads.push(`${route.request().method()} ${p}`)
+      if (p.includes('gone')) return route.fulfill({ status: 404, contentType: 'text/plain', body: '' })
+      return route.fulfill({ status: 200, contentType: 'text/javascript', body: '' })
+    },
+  )
+  let loads = 0
+  page.on('request', (r) => {
+    if (r.resourceType() !== 'document' || r.frame() !== page.mainFrame()) return
+    if (++loads > 1) {
+      log.navs++
+      log.events.push('nav')
+    }
+  })
+  return log
+}
+
+// Away from the app for `minutes` of the page's clock, then back.
+async function away(page, minutes) {
+  await setHidden(page, true)
+  const now = await page.evaluate(() => Date.now())
+  await page.clock.setSystemTime(now + minutes * 60_000)
+  await setHidden(page, false)
+}
+
 module.exports = [
   flow('flow-fj-youtube-handle', {
     before: async ({ page }) => {
@@ -1382,6 +1435,169 @@ module.exports = [
       if (log.copied.length !== 1 || !/^https?:/.test(log.copied[0])) fail('H1-DESKTOP', `the clipboard stub holds ${JSON.stringify(log.copied)}`)
       if (log.opened.length !== 1 || log.opened[0].target !== '_blank') fail('H1-DESKTOP', `the window.open stub saw ${JSON.stringify(log.opened)}`)
       if (context.pages().length !== 1) fail('H1-DESKTOP', `${context.pages().length} pages are open; window.open was not stubbed`)
+    },
+  }),
+
+  // --- PR1r: reload on a new build -------------------------------------------
+
+  // The phone moves onto a new build when it comes back after 10 min or
+  // more away: not sooner, not when it hid right after opening a story,
+  // not when the user presses a key first, not onto a script that isn't
+  // there, not with the Menu open, not while a save is still unsaved,
+  // only once the pending writes are saved, and once per build.
+  dashFlow('flow-reload-on-new-build', {
+    // Step 4's HEAD of the missing script and step 6's refused save fail
+    // on purpose.
+    expectedFailedLoads: ['/static/index-gone.js', '/api/preferences/starred_entries'],
+    before: async ({ page }) => {
+      await installClock(page)
+      page._reload = await newBuild(page)
+      // Saves (PUT starred_entries): the first `page._refuse` are answered
+      // 503; the rest are held 500 ms and marked done just before they are
+      // answered, so a reload that didn't wait for one comes first.
+      // (Playwright reports a request a navigation cut short as failed even
+      // when the page had its response, so requestfinished can't tell.)
+      page._refuse = 0
+      page._savePuts = 0
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences/starred_entries',
+        async (route) => {
+          if (route.request().method() !== 'PUT') return route.fallback()
+          page._savePuts++
+          if (page._refuse > 0) {
+            page._refuse--
+            return route.fulfill({ status: 503, contentType: 'application/json', body: '{"detail":"unavailable"}' })
+          }
+          await sleep(500)
+          page._reload.events.push('put-done')
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, fail }) => {
+      const log = page._reload
+      const quiet = async (rule, what, checks) => {
+        await sleep(1200)
+        if (log.checks !== checks) fail(rule, `${what}: the update check fetched / (${log.checks} checks, expected ${checks})`)
+        if (log.navs) fail(rule, `${what}: the page reloaded`)
+      }
+
+      // 1. Nine minutes away: no check at all.
+      await away(page, 9)
+      await quiet('RELOAD-AWAY', 'back after 9 min', 0)
+
+      // 2. Hid right after opening a story (its thumbnail): left alone.
+      await tap(page, page.locator(`${MOBILE_MAIN} [role="button"][aria-label^="open "][aria-label$=" in new tab"]`).first())
+      if ((await harnessLog(page)).opened.length !== 1) return fail('RELOAD-OPEN', 'the thumbnail opened no story')
+      await away(page, 11)
+      await quiet('RELOAD-OPEN', 'back 11 min after opening a story', 0)
+
+      // 3. A key pressed while the check is under way calls it off.
+      let release
+      page._hold = new Promise((r) => (release = r))
+      await away(page, 11)
+      if (!(await waitFor(() => log.checks === 1, 3000))) return fail('RELOAD-INPUT', `back after 11 min ran ${log.checks} checks, expected 1`)
+      await page.keyboard.press('Shift')
+      release()
+      page._hold = null
+      await sleep(1200)
+      if (log.heads.length || log.navs) fail('RELOAD-INPUT', `a key during the check still went on: ${JSON.stringify(log)}`)
+
+      // 4. The new entry script isn't served: no reload.
+      page._nextScript = '/static/index-gone.js'
+      await away(page, 11)
+      if (!(await waitFor(() => log.heads.length === 1, 3000))) return fail('RELOAD-HEAD', `no HEAD of the new entry script: ${JSON.stringify(log)}`)
+      await sleep(1200)
+      if (log.navs) fail('RELOAD-HEAD', 'reloaded onto a build whose entry script is a 404')
+      page._nextScript = '/static/index-next.js'
+
+      // 5. The Menu is open: no reload (it stops before the HEAD).
+      await tap(page, page.locator('button[aria-label="open menu"]'))
+      await menuOpened(page)
+      await away(page, 11)
+      if (!(await waitFor(() => log.checks === 3, 3000))) return fail('RELOAD-BUSY', `back with the Menu open ran ${log.checks} checks, expected 3`)
+      await sleep(1200)
+      if (log.heads.length !== 1 || log.navs) fail('RELOAD-BUSY', `reloading went on with the Menu open: ${JSON.stringify(log)}`)
+      await tap(page, page.locator(`${MENU} button[aria-label="close menu"]`))
+      await page.locator(`${MENU}[inert]`).waitFor({ state: 'attached', timeout: 5000 })
+
+      // 6. A save waits in the debounce (the clock is paused) while the
+      // page is away. Coming back sends it, the server refuses it, and
+      // the page stays.
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="save for later"]`).first())
+      await sleep(400)
+      if (page._savePuts) return fail('RELOAD-FLUSH', 'the save went out before the page hid; nothing was pending')
+      page._refuse = 1
+      await away(page, 11)
+      if (!(await waitFor(() => page._savePuts >= 1, 3000))) return fail('RELOAD-FLUSH', `coming back did not send the pending save: ${JSON.stringify(log)}`)
+      await sleep(1200)
+      if (log.navs) return fail('RELOAD-SAVED', 'reloaded although the pending save was refused')
+
+      // 6b. Back again: the flush sends it once more (its retry timer is
+      // paused) and the server refuses it a second time. Given up on, it
+      // still keeps the page.
+      page._refuse = 1
+      await away(page, 11)
+      if (!(await waitFor(() => page._savePuts >= 2, 3000))) return fail('RELOAD-FLUSH', `coming back did not resend the refused save: ${page._savePuts} PUTs`)
+      await sleep(1200)
+      if (log.navs) return fail('RELOAD-SAVED', 'reloaded although the save was refused twice')
+
+      // 7. Back again: the flush sends it a third time, and the page
+      // reloads only once it is saved.
+      await away(page, 11)
+      if (!(await waitFor(() => log.navs > 0, 6000))) return fail('RELOAD-FLUSH', `back after 11 min with a new build: no reload: ${JSON.stringify(log)}`)
+      if (log.events[0] !== 'put-done') fail('RELOAD-FLUSH', `the reload started before the pending save was done: ${log.events.join(', ')}`)
+      if (page._savePuts !== 3) fail('RELOAD-FLUSH', `${page._savePuts} PUTs of the save, expected 3 (refused twice, then saved)`)
+      await page.clock.resume()
+      await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible', timeout: 20000 })
+      await sleep(500)
+      if (log.navs !== 1) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 1`)
+
+      // 8. The reloaded page still runs the old build (vite preview), and
+      // the server still names the new one: it checks, but doesn't reload
+      // again for the same build.
+      const checks = log.checks
+      await away(page, 11)
+      if (!(await waitFor(() => log.checks === checks + 1, 3000))) return fail('RELOAD-ONCE', 'the reloaded page ran no check')
+      await sleep(1200)
+      if (log.navs !== 1) fail('RELOAD-ONCE', `reloaded again for the same build (${log.navs} reloads)`)
+    },
+  }),
+
+  // The desktop never reloads by itself: back after 11 min with a new
+  // build it shows "New version · Reload" (input during the check doesn't
+  // stop it), which reloads when clicked.
+  dashFlow('flow-reload-desktop-button', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page }) => {
+      await installClock(page)
+      page._reload = await newBuild(page)
+    },
+    run: async ({ page, fail, shot }) => {
+      const log = page._reload
+      const button = page.getByRole('button', { name: 'New version · Reload', exact: true })
+      if (await button.count()) return fail('RELOAD-DESKTOP', 'the Reload button shows before any check')
+      let release
+      page._hold = new Promise((r) => (release = r))
+      await away(page, 11)
+      if (!(await waitFor(() => log.checks === 1, 3000))) return fail('RELOAD-DESKTOP', `back after 11 min ran ${log.checks} checks, expected 1`)
+      await page.mouse.wheel(0, 40)
+      await page.keyboard.press('Shift')
+      release()
+      page._hold = null
+      if (!(await waitFor(() => button.isVisible(), 3000))) return fail('RELOAD-DESKTOP', `no Reload button after 11 min away: ${JSON.stringify(log)}`)
+      await shot('button')
+      await sleep(1200)
+      if (log.navs) return fail('RELOAD-DESKTOP', 'the desktop reloaded by itself')
+      await button.click()
+      if (!(await waitFor(() => log.navs === 1, 5000))) return fail('RELOAD-DESKTOP', `clicking Reload did not reload: ${JSON.stringify(log)}`)
+      // The flow ends on the loaded page: closing the context while the
+      // reload is still being fetched would throw in smoke's CSP route.
+      await page.locator('main.grid article[data-card-id]').first().waitFor({ state: 'visible', timeout: 20000 })
+      if (await button.count()) fail('RELOAD-DESKTOP', 'the Reload button is still there after the reload')
     },
   }),
 ]

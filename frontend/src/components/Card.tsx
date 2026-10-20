@@ -22,7 +22,7 @@
 
 import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } from 'react'
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
-import { recordBatched, recordImmediate } from '../lib/interactions'
+import { noteStoryOpened, recordBatched, recordImmediate } from '../lib/interactions'
 import { sourceLabel } from '../lib/labels'
 import { useSourceLabels } from '../lib/useSourceLabels'
 import { SourceIcon } from './SourceIcon'
@@ -817,6 +817,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
         // ``safeExternalUrl`` rewrites reddit.com -> old.reddit.com
         // so the popped-out tab doesn't show the "Get the App"
         // overlay (see api.ts for the full rationale).
+        noteStoryOpened()
         window.open(safeExternalUrl(entry.url), '_blank', 'noopener,noreferrer')
       },
     })
@@ -1197,6 +1198,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                   e.stopPropagation()
                   // ``safeExternalUrl`` rewrites reddit.com -> old.reddit.com so
                   // the popped-out tab doesn't show the "Get the App" overlay.
+                  noteStoryOpened()
                   window.open(safeExternalUrl(a.url), '_blank', 'noopener,noreferrer')
                 }}
                 className="flex items-start gap-2 group"

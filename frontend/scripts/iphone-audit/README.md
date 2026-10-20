@@ -111,7 +111,7 @@ wait looks for a phone card in the hidden `main.md:hidden`. Then:
 | `settings-add-headers` | Add, Advanced open: a browser identity and a refused `Cookie` header |
 | `settings-suggested` | Feeds → the second feed-manager tab (Suggested) |
 | `settings-llm` | the AI tab |
-| `settings-notifications`, `settings-history`, `settings-hidden`, `settings-starred` (Saved), `settings-voted` (Downvoted), `settings-reset` | one per tab via `?view=settings&tab=` |
+| `settings-notifications`, `settings-history`, `settings-hidden`, `settings-starred` (Saved), `settings-voted` (Downvoted), `settings-reset` | one per tab via `?view=settings&tab=`; `settings-reset` also holds the build line (PR1r), which passes C14 at 320 |
 | `brief-empty` | 320 only: the phone Brief tab with `/api/brief/latest` returning `[]` |
 
 Selectors avoid visible labels that the redesign changes: feed-manager tabs are
@@ -222,6 +222,8 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-h1-keepalive` | the harness: the fetch log shows the load-time `GET /api/preferences` without keepalive, and the views still queued when the page hides (beacon refused) sent with it |
 | `flow-h1-pref-store` | the mock: a preference PUT reads back in the list, with `since` and by key; DELETE removes it; a reload loads it once and still sees it |
 | `flow-h1-desktop` | the harness at 1280: a mouse desktop with the desktop grid; a card's Copy link and Open in new tab land in the clipboard and `window.open` stubs |
+| `flow-reload-on-new-build` | PR1r, the phone, with a new build served (`newBuild`): back after 9 min nothing is checked; back after 11 min it is not checked when the page hid right after opening a story; a key pressed during the check, a 404 for the new entry script, or the Menu being open stops the reload; a pending save the server refuses keeps the page, and so does the same save refused again on the next return; the return after that sends it a third time and reloads only once it is saved; the reloaded page checks again but doesn't reload for the same build |
+| `flow-reload-desktop-button` | PR1r at 1280: back after 11 min with a new build, the desktop shows "New version · Reload" (a scroll and a key during the check don't stop it) and doesn't reload by itself; clicking it reloads, and the button is gone after |
 
 Run one with `--only <name>`; PR6 and PR8 add the PATCH and PUT counting flows.
 
@@ -263,6 +265,17 @@ milliseconds late in real time, so real pauses have no margin over a short
 delay. `runFor` also fires the regular visible poll, so GET counts allow for
 it. Where real time is kept (for example "a fling marks nothing"), pause at
 least twice the delay under test.
+
+Time away (PR1r): `away(page, minutes)` hides the page, moves the page's
+`Date.now` on with `page.clock.setSystemTime` (no timers fire) and shows it
+again. `newBuild(page)` makes the update check's fetches of `/` (fetch-type
+requests only, so page loads still get the real build) return `index.html`
+with its entry script renamed to `page._nextScript`, answers that script's
+HEAD (a 404 when its name says `gone`), and counts the checks, the HEADs and
+the reloads. Under `vite preview` the live and served ids match, so no other
+flow sees a reload. A flow that makes the page reload waits for the reloaded
+page before it ends: closing the context while the reload is still being
+fetched throws in smoke's CSP route.
 
 ### The mutation check
 

@@ -57,6 +57,21 @@ const seen = new Set<number>()
 let flushScheduled = false
 const uninstalled = false
 
+// When a story last opened from this page (Date.now()), 0 for never.
+// The update check (useUpdateCheck.ts) leaves alone a page that hid
+// right after opening one, so the story's card is still there when the
+// user comes back to vote on or save it.
+let storyOpenedAt = 0
+
+// POSTs on the way (batches and immediate events), so the flush before
+// a reload can let them land instead of cutting them off.
+const inFlight = new Set<Promise<unknown>>()
+
+function track(p: Promise<unknown>): void {
+  inFlight.add(p)
+  void p.finally(() => inFlight.delete(p))
+}
+
 // Cap matches the backend's _BATCH_MAX so a queued flush never 422s.
 const MAX_QUEUE = 50
 
@@ -68,14 +83,14 @@ async function flush(): Promise<void> {
   // Drain atomically. Anything appended during the request goes into
   // a fresh buffer the next flush picks up.
   const batch = queue.splice(0, queue.length)
-  try {
-    await api.recordInteractionBatch(batch)
-  } catch (err) {
+  const sent = api.recordInteractionBatch(batch).catch((err) => {
     // Best-effort; the events are advisory. Log in dev so a developer
     // debugging "why isn't the ranking changing" can see the network
     // issue but don't toast the user — engagement is in the background.
     if (import.meta.env.DEV) console.warn('interactions: batch flush failed', err)
-  }
+  })
+  track(sent)
+  await sent
 }
 
 function scheduleFlush(): void {
@@ -177,22 +192,38 @@ export function recordBatched(event: InteractionEvent): void {
  * synchronously) and for one-off preference changes (thumb_up /
  * thumb_down / never) where latency matters. */
 export function recordImmediate(event: InteractionEvent): void {
+  // Every way a card opens its story records a ``click``.
+  if (event.type === 'click') noteStoryOpened()
   // Drop in-page dedup for non-view events — a thumb_down click on
   // an already-voted card could legitimately mean "double down" in
   // a future UI even if it doesn't today.
-  void api
+  const sent = api
     .recordInteraction(event)
     .catch((err) => {
       if (import.meta.env.DEV)
         console.warn('interactions: immediate flush failed', err)
     })
+  track(sent)
 }
 
-/** For tests / dev tools: drain the queue right now without waiting
- * for rIC. Returns a promise that resolves when the in-flight POST
- * settles. */
-export function flushNow(): Promise<void> {
-  return flush()
+/** Records that a story opened. ``recordImmediate`` does it for every
+ * ``click``; the paths that open a story without one (the alternatives
+ * under a card, the context menu's "Open in new tab") call it. */
+export function noteStoryOpened(): void {
+  storyOpenedAt = Date.now()
+}
+
+/** When a story last opened from this page, 0 for never. */
+export function lastStoryOpenAt(): number {
+  return storyOpenedAt
+}
+
+/** Drain the queue right now without waiting for rIC (tests, dev
+ * tools, and the flush before a reload onto a new build). Resolves when
+ * that POST and every one already on the way have settled. */
+export async function flushNow(): Promise<void> {
+  await flush()
+  await Promise.allSettled(Array.from(inFlight))
 }
 
 /** For tests: number of events currently buffered. */

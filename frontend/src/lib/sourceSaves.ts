@@ -210,6 +210,12 @@ export function whenIdle(id: number): Promise<void> {
   return new Promise((resolve) => f.idleWaiters.push(resolve))
 }
 
+/** The same for every feed: before a reload onto a new build (PR1r),
+ *  so the reload doesn't cut a save off. */
+export function whenAllIdle(): Promise<void> {
+  return Promise.all(Array.from(feeds.keys(), whenIdle)).then(() => undefined)
+}
+
 /** Forget a deleted feed: nothing more is sent for it, and results
  *  still on the way are ignored. Its last states stay readable. */
 export function dropSource(id: number): void {

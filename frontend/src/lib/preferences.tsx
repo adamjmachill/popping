@@ -431,6 +431,12 @@ export interface PreferencesContextValue {
 
   /** Set the History tab's group-by mode. */
   setHistoryGroupBy: (mode: HistoryGroupByValue) => void
+
+  /** Send every write still waiting for its debounce, and every value
+   *  the server refused, now; wait for those and the writes already on
+   *  the way. True when all of them were saved. The reload onto a new
+   *  build runs it first and doesn't reload on false (PR1r). */
+  flushPending: () => Promise<boolean>
 }
 
 const PreferencesContext = createContext<PreferencesContextValue | null>(null)
@@ -518,26 +524,64 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   const timerRef = useRef<number | null>(null)
   // When the last "couldn't save" toast showed: one per burst.
   const failureToastAt = useRef(0)
+  // Writes on the way, so the flush before a reload can wait for them
+  // (``flushPending``). Each resolves, true when it was saved, once its
+  // error handling has run.
+  const inFlightRef = useRef<Set<Promise<boolean>>>(new Set())
+  // Values the server refused and nothing newer has replaced: waiting 2 s
+  // for their retry (``retry`` names that timer), or given up on after
+  // it. The flush before a reload and the tab-close flush send them again.
+  const unsavedRef = useRef<Map<string, { value: unknown; retry: number | null }>>(new Map())
+  // Per key, the latest write sent; an older one that fails afterwards
+  // is out of date and is dropped.
+  const writeSeqRef = useRef<Map<string, number>>(new Map())
+  const seqRef = useRef(0)
 
-  // One PUT, retried once after 2 s. A newer value for the key that is
-  // already queued replaces both the retry and the failure notice.
-  const put = useCallback((key: string, value: unknown, retried = false) => {
-    void api.setPreference(key, value).catch((err) => {
-      if (import.meta.env.DEV) console.warn(`preferences: PUT ${key} failed`, err)
-      if (pendingRef.current.has(key)) return
-      if (!retried) {
-        window.setTimeout(() => {
-          if (!pendingRef.current.has(key)) put(key, value, true)
-        }, 2000)
-        return
-      }
-      const now = Date.now()
-      if (now - failureToastAt.current > 30_000) {
-        failureToastAt.current = now
-        toast("Couldn't save your latest changes to Popping. They'll be lost when the app reloads.", 'error')
-      }
-    })
+  // A new write for `key` replaces anything older: its retry, its
+  // "unsaved" mark, and the failure of a write still on the way.
+  const supersede = useCallback((key: string): number => {
+    const seq = ++seqRef.current
+    writeSeqRef.current.set(key, seq)
+    const old = unsavedRef.current.get(key)
+    if (old?.retry != null) window.clearTimeout(old.retry)
+    unsavedRef.current.delete(key)
+    return seq
   }, [])
+
+  const track = useCallback((sent: Promise<boolean>) => {
+    inFlightRef.current.add(sent)
+    void sent.then(() => inFlightRef.current.delete(sent))
+  }, [])
+
+  // One PUT, retried once after 2 s. A newer value for the key, queued
+  // or sent, replaces both the retry and the failure notice.
+  const put = useCallback((key: string, value: unknown, retried = false): Promise<boolean> => {
+    const seq = supersede(key)
+    const sent = api.setPreference(key, value).then(
+      () => true,
+      (err) => {
+        if (import.meta.env.DEV) console.warn(`preferences: PUT ${key} failed`, err)
+        if (pendingRef.current.has(key) || writeSeqRef.current.get(key) !== seq) return false
+        if (!retried) {
+          const retry = window.setTimeout(() => {
+            // A newer value queued since goes out instead.
+            if (unsavedRef.current.get(key)?.retry === retry && !pendingRef.current.has(key)) void put(key, value, true)
+          }, 2000)
+          unsavedRef.current.set(key, { value, retry })
+          return false
+        }
+        unsavedRef.current.set(key, { value, retry: null })
+        const now = Date.now()
+        if (now - failureToastAt.current > 30_000) {
+          failureToastAt.current = now
+          toast("Couldn't save your latest changes to Popping. They'll be lost when the app reloads.", 'error')
+        }
+        return false
+      },
+    )
+    track(sent)
+    return sent
+  }, [supersede, track])
 
   const scheduleSync = useCallback(() => {
     if (timerRef.current !== null) return
@@ -545,17 +589,44 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       timerRef.current = null
       const batch = Array.from(pendingRef.current.entries())
       pendingRef.current.clear()
-      for (const [key, value] of batch) put(key, value)
+      for (const [key, value] of batch) void put(key, value)
     }, 250)
+  }, [put])
+
+  // Before a reload onto a new build (PR1r): everything still waiting
+  // for the debounce, and everything the server refused, goes now as
+  // ordinary PUTs (the page stays until they answer, and keepalive
+  // bodies share a 64 KB budget). True once all of it is saved and
+  // nothing is left unsaved; false means the reload should wait.
+  const flushPending = useCallback(async (): Promise<boolean> => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    const earlier = Array.from(inFlightRef.current)
+    // A refused value is on its second try; a queued one on its first.
+    const sends: Promise<boolean>[] = []
+    for (const [key, { value }] of Array.from(unsavedRef.current)) {
+      if (!pendingRef.current.has(key)) sends.push(put(key, value, true))
+    }
+    for (const [key, value] of pendingRef.current) sends.push(put(key, value))
+    pendingRef.current.clear()
+    const saved = await Promise.all(sends)
+    await Promise.all(earlier)
+    return saved.every(Boolean) && unsavedRef.current.size === 0 && pendingRef.current.size === 0
   }, [put])
 
   // Flush on tab close. ``fetch`` with ``keepalive`` survives the
   // page unloading. (``sendBeacon`` can't be used: it always POSTs,
-  // and the preferences endpoint is PUT-only.)
+  // and the preferences endpoint is PUT-only.) Values the server
+  // refused go too.
   useEffect(() => {
     const flush = () => {
-      if (pendingRef.current.size === 0) return
-      const batch = Array.from(pendingRef.current.entries())
+      if (pendingRef.current.size === 0 && unsavedRef.current.size === 0) return
+      const batch = new Map<string, unknown>()
+      for (const [key, { value }] of unsavedRef.current) batch.set(key, value)
+      for (const [key, value] of pendingRef.current) batch.set(key, value)
+      for (const key of batch.keys()) supersede(key)
       pendingRef.current.clear()
       if (timerRef.current !== null) {
         window.clearTimeout(timerRef.current)
@@ -584,7 +655,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('pagehide', flush)
       window.removeEventListener('beforeunload', flush)
     }
-  }, [])
+  }, [supersede])
 
   // ---- per-key setters ----
   //
@@ -633,15 +704,22 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       })
       const key = `${PREFERENCE_KEYS.lastViewed}:${columnId}`
       pendingRef.current.delete(key)
+      supersede(key)
       // Fire-and-forget. The DELETE endpoint returns 204; we
       // don't care about the body. Failure logs in dev.
-      void api.deletePreference(key).catch((err) => {
-        if (import.meta.env.DEV) {
-          console.warn(`preferences: DELETE ${key} failed`, err)
-        }
-      })
+      track(
+        api.deletePreference(key).then(
+          () => true,
+          (err) => {
+            if (import.meta.env.DEV) {
+              console.warn(`preferences: DELETE ${key} failed`, err)
+            }
+            return false
+          },
+        ),
+      )
     },
-    [],
+    [supersede, track],
   )
 
   const setColumnPrefs = useCallback(
@@ -744,6 +822,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setEntryVote,
       setFilterPresets,
       setHistoryGroupBy,
+      flushPending,
     }),
     [
       state,
@@ -759,6 +838,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setEntryVote,
       setFilterPresets,
       setHistoryGroupBy,
+      flushPending,
     ],
   )
 
