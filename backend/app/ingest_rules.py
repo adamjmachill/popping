@@ -77,7 +77,10 @@ _TUNABLES: dict[str, tuple[str, int, int, int]] = {
 TUNABLE_KEYS: tuple[str, ...] = tuple(_TUNABLES)
 
 
-def _parse_int(raw: Any, default: int, lo: int, hi: int) -> int:
+def parse_int_knob(raw: Any, default: int, lo: int, hi: int) -> int:
+    """One integer runtime knob: ``default`` when the value is missing,
+    not a whole number or outside ``[lo, hi]``. Also used for
+    ``refresh.cooldown_seconds`` (``scheduler.queue_check``)."""
     if raw is None or isinstance(raw, bool):
         return default
     try:
@@ -94,7 +97,7 @@ def parse_tunables(raw: Mapping[str, Any]) -> IngestTunables:
     A missing key, a non-number or a value out of range gives that
     knob's default."""
     values = {
-        field: _parse_int(raw.get(key), default, lo, hi)
+        field: parse_int_knob(raw.get(key), default, lo, hi)
         for key, (field, default, lo, hi) in _TUNABLES.items()
     }
     return IngestTunables(**values)

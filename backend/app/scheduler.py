@@ -29,6 +29,9 @@ The scheduler owns:
     - Daily Brief generation (phase 4)
     - Periodic convergence-check + alert Brief (phase 4)
     - Post-ingest CVE notifications for high-CVSS entries (phase 4)
+    - Check now (``queue_check``): pull to refresh moves a tab's feed
+      jobs up, with a per-feed cooldown, without pushing a failing
+      feed past its backoff
 """
 
 from __future__ import annotations
@@ -40,7 +43,9 @@ import math
 import json
 import logging
 import re
-from typing import Any, Optional
+import time
+from collections import Counter
+from typing import Any, Callable, Optional, Sequence
 
 import httpx
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -59,6 +64,7 @@ from app.db import SessionLocal
 from app.embeddings import embedder
 from app.models import AppSetting, Entry, Interaction, NotificationDedup, Source, UserProfile
 from app.notify import Notifier
+from app.schemas import CHECK_NOW_MAX_IDS
 from app.scoring import composite as composite_scorer
 from app.scoring import convergence as convergence_helper
 from app.scoring import personal as personal_scorer
@@ -378,13 +384,68 @@ def _should_retry_favicon(last_fetch_at: dt.datetime | None) -> bool:
     return (dt.datetime.now(dt.timezone.utc) - last_fetch_at) >= _FAVICON_RETRY_INTERVAL
 
 
+# Ingest runs in progress, by job id (``_ingest_job_id``).
+# ``_ingest_running`` counts runs until they return.
+# ``_ingest_unrecorded`` counts the runs that haven't yet stamped their
+# result (``last_fetch_at``, or ``last_error`` on a failure); a run
+# stays in ``_ingest_running`` after that while its thumbnail and
+# og:image passes finish. ``queue_check`` reads both: APScheduler drops
+# a run that comes due while one is still executing
+# (``max_instances=1``), so a running job can't be moved up.
+# ``_ingest_finished`` counts the runs that have returned, and is
+# never counted down: ``queue_check`` reads its rows across awaits, so
+# it snapshots this first, and a job whose count moved while it was
+# reading has a run that finished after the row was read (its
+# ``error_count`` and ``last_fetch_at`` may be stale).
+# Process-local (see ARCHITECTURE.md).
+_ingest_running: Counter[str] = Counter()
+_ingest_unrecorded: Counter[str] = Counter()
+_ingest_finished: Counter[str] = Counter()
+
+
+def _count_down(counter: Counter[str], key: str) -> None:
+    counter[key] -= 1
+    if counter[key] <= 0:
+        del counter[key]
+
+
 async def _ingest(plugin_cls: Any) -> dict:
     """Fetch from a plugin, write entries to DB, update source bookkeeping.
 
     Returns a small summary dict the manual /ingest endpoint surfaces.
     Catches all exceptions per-source so one broken source can't take
     the scheduler down.
+
+    Every run, scheduled or manual, is counted in ``_ingest_running``
+    and ``_ingest_unrecorded`` for ``queue_check``.
     """
+    job_id = _ingest_job_id(plugin_cls)
+    if job_id is None:
+        return await _ingest_once(plugin_cls, lambda: None)
+    _ingest_running[job_id] += 1
+    _ingest_unrecorded[job_id] += 1
+    recorded = False
+
+    def mark_recorded() -> None:
+        nonlocal recorded
+        if not recorded:
+            recorded = True
+            _count_down(_ingest_unrecorded, job_id)
+
+    try:
+        return await _ingest_once(plugin_cls, mark_recorded)
+    finally:
+        mark_recorded()
+        _count_down(_ingest_running, job_id)
+        _ingest_finished[job_id] += 1
+
+
+async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> dict:
+    """One ingest run (see ``_ingest``). A successful run calls
+    ``mark_recorded`` just before it stamps ``last_fetch_at``, so its
+    image passes run after it. Every other path returns soon after its
+    last write (a failure right after recording its error), and
+    ``_ingest`` marks it then."""
     summary = {
         "source": plugin_cls.name,
         "fetched": 0,
@@ -655,6 +716,11 @@ async def _ingest(plugin_cls: Any) -> dict:
                 # still gets a first fetch when it finally works.
                 source.created_at = func.now()
             was_backed_off = (source.error_count or 0) > 0
+            # Marked before the timestamp is taken: a ``queue_check``
+            # that still saw this run as unrecorded has a
+            # ``queued_at`` at or before this ``last_fetch_at``, so its
+            # caller sees the check land.
+            mark_recorded()
             source.last_fetch_at = dt.datetime.now(dt.timezone.utc)
             source.last_error = None
             source.error_count = 0
@@ -2214,6 +2280,226 @@ async def backfill_now() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Check now (pull to refresh)
+# ---------------------------------------------------------------------------
+#
+# ``queue_check`` moves feed jobs up instead of fetching in the request:
+# the fetch runs as the job itself, so APScheduler's ``max_instances=1``
+# and ``coalesce`` still keep one run per feed at a time, and the
+# backoff, auto-disable and ingest rules all apply as on a scheduled
+# tick.
+
+# At most this many feeds per call: the cap ``POST
+# /api/sources/check-now`` enforces with a 422 (``CheckNowRequest``).
+_CHECK_NOW_MAX_FEEDS = CHECK_NOW_MAX_IDS
+# Queued feeds start this many seconds apart, so a tab of 20 feeds
+# doesn't fetch (and embed) all in the same second.
+_CHECK_NOW_STAGGER_SECONDS = 3
+# Added to ``expected_done_s`` for the last fetch to finish and commit.
+_CHECK_NOW_SETTLE_SECONDS = 20
+# ``refresh.cooldown_seconds``: after a check, a feed isn't queued
+# again for this long. Read like the ``ingest.*`` knobs: a missing,
+# non-numeric or out-of-range value gives the default.
+_REFRESH_COOLDOWN_KEY = "refresh.cooldown_seconds"
+_REFRESH_COOLDOWN_DEFAULT = 600
+_REFRESH_COOLDOWN_MIN = 60
+_REFRESH_COOLDOWN_MAX = 24 * 3600
+# ``force`` (an explicit Check now on one feed) shortens the cooldown
+# to this, and also skips the backoff gate.
+_FORCE_COOLDOWN_SECONDS = 60
+
+# When check-now last queued each feed, by source id, as
+# ``time.monotonic()``. Entries older than the cooldown are dropped on
+# every call, so it holds at most the feeds queued in the last
+# cooldown. Process-local (see ARCHITECTURE.md): a restart forgets it,
+# and the ``last_fetch_at`` half of the cooldown still applies.
+_last_queued: dict[int, float] = {}
+
+# Reddit direct mode: when (``time.monotonic()``) the subreddits
+# check-now has queued so far will have had their calls, at one per
+# ``reddit_client.direct_call_interval_seconds()``. A pull soon after
+# another waits behind it in the token bucket, and ``expected_done_s``
+# says so. Process-local, like ``_last_queued``.
+_reddit_calls_done_at: float = 0.0
+
+
+async def _refresh_cooldown_seconds() -> int:
+    raw = await runtime_settings.get_many([_REFRESH_COOLDOWN_KEY])
+    return ingest_rules.parse_int_knob(
+        raw.get(_REFRESH_COOLDOWN_KEY),
+        _REFRESH_COOLDOWN_DEFAULT,
+        _REFRESH_COOLDOWN_MIN,
+        _REFRESH_COOLDOWN_MAX,
+    )
+
+
+def _source_job_id(name: str, source_id: int, *, builtin: bool) -> str:
+    """The ingest job id for a feed's row: ``ingest:<name>`` for a
+    built-in (class-driven) feed, ``ingest:dynamic:<id>`` otherwise.
+    Mirrors ``_ingest_job_id``, which derives it from the plugin."""
+    if builtin:
+        return f"ingest:{name}"
+    return _dynamic_job_id(source_id)
+
+
+async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
+    """Ask for these feeds to be checked soon (``POST
+    /api/sources/check-now``, pull to refresh).
+
+    Each of at most ``_CHECK_NOW_MAX_FEEDS`` feeds, in the order given,
+    lands in exactly one list:
+
+    - ``paused``: no row, an inactive row, or no scheduled job.
+    - ``queued_ids``: its job's next run moves to ``now + i × 3 s``
+      (``i`` counts the feeds queued so far). A job already due sooner
+      is never postponed. A run still fetching counts as queued and is
+      left alone: APScheduler would drop a run that comes due while it
+      executes.
+    - ``cooling_down``: checked within the cooldown
+      (``refresh.cooldown_seconds``, or ``_FORCE_COOLDOWN_SECONDS``
+      with ``force``), either queued here or with a successful fetch
+      (``last_fetch_at``) that recent. A run that has recorded its
+      result but is still finishing its image passes counts here too.
+      So does a feed whose run finished while its row was being read.
+      In Reddit direct mode (one call per 75 s across the process), a
+      subreddit fetched within its own refresh interval (``force``
+      included), and every subreddit after the first one this call
+      queues: Reddit's call budget is what is cooling down, so the
+      next pull takes the next one.
+    - ``backing_off``: without ``force``, a failing feed
+      (``error_count > 0``) whose backed-off job isn't due yet. Each
+      failure doubles the interval and the sixth disables the feed
+      (``_AUTO_DISABLE_THRESHOLD``), so pulling every few minutes
+      must not run it early.
+
+    ``queued_at`` is the server's clock before any job moved. A queued
+    feed is done once its ``last_fetch_at`` is at or after it, or its
+    ``last_error`` changes. A failure that repeats the same
+    ``last_error`` can't be told from no run yet: no column records
+    when a failed run happened. ``expected_done_s`` estimates when the
+    last one finishes, Reddit's token bucket included.
+    """
+    global _reddit_calls_done_at
+    from app import reddit_client
+
+    wanted = list(dict.fromkeys(ids))[:_CHECK_NOW_MAX_FEEDS]
+    # Taken before the first await: a run that finishes while the rows
+    # below are being read changes its count, and its row may predate
+    # its result.
+    finished_before = Counter(_ingest_finished)
+    configured_cooldown = await _refresh_cooldown_seconds()
+    cooldown = _FORCE_COOLDOWN_SECONDS if force else configured_cooldown
+    rows: dict[int, Source] = {}
+    if wanted:
+        async with SessionLocal() as session:
+            found = await session.scalars(select(Source).where(Source.id.in_(wanted)))
+            rows = {row.id: row for row in found.all()}
+    registered = set(list_sources())
+    reddit_direct = reddit_client.is_direct_mode()
+    reddit_call_seconds = reddit_client.direct_call_interval_seconds()
+
+    # No await from here on: the cooldown reads and writes below can't
+    # interleave with another call's.
+    now = dt.datetime.now(dt.timezone.utc)
+    mono = time.monotonic()
+    for sid, at in list(_last_queued.items()):
+        if mono - at >= configured_cooldown:
+            del _last_queued[sid]
+
+    queued_ids: list[int] = []
+    cooling_down: list[int] = []
+    paused: list[int] = []
+    backing_off: list[int] = []
+    reddit_running = 0
+    reddit_moved = 0
+    moved = 0
+    for sid in wanted:
+        row = rows.get(sid)
+        job = None
+        job_id = None
+        if row is not None and row.active and _scheduler is not None:
+            job_id = _source_job_id(row.name, row.id, builtin=row.name in registered)
+            job = _scheduler.get_job(job_id)
+        if job is None or job.next_run_time is None:
+            paused.append(sid)
+            continue
+        is_reddit = reddit_direct and row.type == "reddit"
+        if _ingest_unrecorded.get(job_id, 0) > 0:
+            queued_ids.append(sid)
+            _last_queued[sid] = mono
+            if is_reddit:
+                reddit_running += 1
+            continue
+        if _ingest_running.get(job_id, 0) > 0:
+            # Its result is stamped (or committing) on the row: it was
+            # checked just now.
+            cooling_down.append(sid)
+            continue
+        if _ingest_finished.get(job_id, 0) != finished_before.get(job_id, 0):
+            # A run finished while the row was being read, so the row
+            # can predate its result: a failure's ``error_count`` (its
+            # job already backed off) or a success's ``last_fetch_at``.
+            # It was checked just now; leave the job where that run put
+            # it.
+            cooling_down.append(sid)
+            continue
+        last_fetch = row.last_fetch_at
+        if last_fetch is not None and last_fetch.tzinfo is None:
+            last_fetch = last_fetch.replace(tzinfo=dt.timezone.utc)
+        since_fetch = (now - last_fetch).total_seconds() if last_fetch is not None else None
+        since_queued = mono - _last_queued[sid] if sid in _last_queued else None
+        if (since_queued is not None and since_queued < cooldown) or (
+            since_fetch is not None and since_fetch < cooldown
+        ):
+            cooling_down.append(sid)
+            continue
+        if not force and (row.error_count or 0) > 0 and job.next_run_time > now:
+            backing_off.append(sid)
+            continue
+        if is_reddit:
+            fetched_this_interval = (
+                since_fetch is not None and since_fetch < row.refresh_interval_seconds
+            )
+            if reddit_moved >= 1 or fetched_this_interval:
+                cooling_down.append(sid)
+                continue
+        run_at = now + dt.timedelta(seconds=moved * _CHECK_NOW_STAGGER_SECONDS)
+        if job.next_run_time > run_at:
+            _scheduler.modify_job(job_id, next_run_time=run_at)
+        moved += 1
+        if is_reddit:
+            reddit_moved += 1
+            _reddit_calls_done_at = max(_reddit_calls_done_at, mono) + reddit_call_seconds
+        queued_ids.append(sid)
+        _last_queued[sid] = mono
+
+    expected_done_s = 0
+    if queued_ids:
+        # A subreddit queued here waits for the calls queued before it;
+        # one still running is counted at one call.
+        reddit_s = reddit_running * reddit_call_seconds
+        if reddit_moved:
+            reddit_s += _reddit_calls_done_at - mono
+        others = len(queued_ids) - reddit_running - reddit_moved
+        expected_done_s = round(
+            reddit_s + others * _CHECK_NOW_STAGGER_SECONDS + _CHECK_NOW_SETTLE_SECONDS
+        )
+    logger.info(
+        "check-now: %d queued, %d cooling down, %d paused, %d backing off (force=%s)",
+        len(queued_ids), len(cooling_down), len(paused), len(backing_off), force,
+    )
+    return {
+        "queued": len(queued_ids),
+        "cooling_down": cooling_down,
+        "paused": paused,
+        "backing_off": backing_off,
+        "queued_ids": queued_ids,
+        "queued_at": now,
+        "expected_done_s": expected_done_s,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Phase 5: dynamic source rows
 # ---------------------------------------------------------------------------
 #
@@ -2733,7 +3019,7 @@ async def delete_source(session: AsyncSession, source_id: int) -> bool:
         # alone silently no-ops for a built-in, which is what let the
         # scheduler job keep firing (and recreating the row) after a
         # "successful" delete.
-        job_id = f"ingest:{source_name}" if is_builtin else _dynamic_job_id(source_id)
+        job_id = _source_job_id(source_name, source_id, builtin=is_builtin)
         try:
             _scheduler.remove_job(job_id)
             logger.info("scheduler: removed job %s for %s (id=%d)", job_id, source_name, source_id)

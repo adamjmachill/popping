@@ -16,6 +16,9 @@ will silently break if you run `uvicorn --workers > 1`:
 |---|---|---|
 | `app/scheduler.py` | `_scheduler` | The APScheduler instance — owns all cron/interval jobs |
 | `app/scheduler.py` | `_brief_generator` | The BriefGenerator singleton |
+| `app/scheduler.py` | `_last_queued` | Check now's per-feed cooldown: when `queue_check` last queued each feed (monotonic clock; entries older than `refresh.cooldown_seconds` are dropped on each call). A restart forgets it; the `last_fetch_at` half of the cooldown still applies |
+| `app/scheduler.py` | `_reddit_calls_done_at` | Reddit direct mode: when the subreddits check-now has queued will have had their calls (one per 75 s), for `expected_done_s` |
+| `app/scheduler.py` | `_ingest_running`, `_ingest_unrecorded`, `_ingest_finished` | Ingest runs in progress per job id, those that haven't written their result yet, and how many have returned (one count per job id that has run; never counted down). `queue_check` leaves a running job alone instead of moving it up (APScheduler would drop the run), and treats a job whose finished count moved while it read the rows as just checked |
 | `app/sources/github_releases.py` | `_etag_cache` | Per-repo ETag cache for GitHub API 304s |
 | `app/sources/dynamic_reddit.py` | `_warned_disabled` | One-shot warning dedup for disabled Reddit rows |
 | `app/sources/generic_scrape.py` | `GenericScrapePlugin._extracted_urls` | Per-source URL dedup (bounded FIFO, 5000 entries) |
@@ -37,6 +40,10 @@ With N workers:
 - **Convergence cache is per-worker**: N redundant SQL queries per
   30s window instead of 1.
 - **`_warned_disabled` is per-worker**: N× the warning log lines.
+- **Check now's state is per-worker**: a pull that lands on another
+  worker skips the cooldown in `_last_queued` (the `last_fetch_at`
+  check still holds), and that worker can't see a run in progress
+  elsewhere, so it can move up a job that another worker is running.
 
 ## How to Fix (Future)
 

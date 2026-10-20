@@ -6,7 +6,7 @@ import datetime as dt
 import enum
 from typing import Annotated, Literal, Optional
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StrictBool, StringConstraints, conlist
 
 
 class SourceOut(BaseModel):
@@ -266,6 +266,53 @@ class SourceTestResult(BaseModel):
     error_kind: Optional[str] = None
     error: Optional[str] = None
     resolved_url: Optional[str] = None
+
+
+# Source ids are INTEGER primary keys. ``strict`` so ``"5"``, ``5.0``
+# and ``true`` are refused rather than coerced; the bound keeps an
+# out-of-range id from reaching the database as a 500.
+CheckNowSourceId = Annotated[int, Field(strict=True, ge=1, le=2**31 - 1)]
+
+# Most feeds one check-now call takes. The scheduler caps
+# ``queue_check`` with the same constant (``_CHECK_NOW_MAX_FEEDS``).
+CHECK_NOW_MAX_IDS = 20
+
+
+class CheckNowRequest(BaseModel):
+    """Body of ``POST /api/sources/check-now`` (pull to refresh).
+
+    ``source_ids`` are the feeds to check soon, 1 to 20 of them (a
+    longer list is a 422). ``force`` is for an explicit Check now on
+    one feed: it skips the failure-backoff gate and shortens the
+    cooldown (see ``scheduler.queue_check``). Unknown fields are
+    refused.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    source_ids: conlist(CheckNowSourceId, min_length=1, max_length=CHECK_NOW_MAX_IDS)
+    force: StrictBool = False
+
+
+class CheckNowResult(BaseModel):
+    """Body of ``POST /api/sources/check-now``.
+
+    Every requested id lands in exactly one of ``queued_ids``,
+    ``cooling_down``, ``paused`` and ``backing_off``; ``queued`` is
+    ``len(queued_ids)``. ``queued_at`` is the server's clock when the
+    checks were queued: a queued feed is done once its
+    ``last_fetch_at`` is at or after it, or its ``last_error`` changes.
+    ``expected_done_s`` is about when the last queued check should be
+    done, in seconds from ``queued_at`` (0 when nothing was queued).
+    """
+
+    queued: int
+    cooling_down: list[int]
+    paused: list[int]
+    backing_off: list[int]
+    queued_ids: list[int]
+    queued_at: dt.datetime
+    expected_done_s: int
 
 
 class FeedRecommendation(BaseModel):

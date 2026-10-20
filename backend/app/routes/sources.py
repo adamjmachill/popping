@@ -41,6 +41,8 @@ from app.feed_recommendations import (
 )
 from app.models import Entry, Interaction, Source
 from app.schemas import (
+    CheckNowRequest,
+    CheckNowResult,
     FeedDiscoverRequest,
     FeedDiscoverResult,
     FeedRecommendation,
@@ -1265,6 +1267,27 @@ async def test_source_endpoint(
     without re-running with curl.
     """
     return await _test_source_impl(body, session)
+
+
+# --- Check now (pull to refresh) ------------------------------------------
+
+
+@router.post(
+    "/sources/check-now",
+    response_model=CheckNowResult,
+    dependencies=_write_deps,
+)
+async def check_now_endpoint(body: CheckNowRequest) -> CheckNowResult:
+    """Ask for up to 20 feeds to be checked in the next minute.
+
+    Nothing is fetched in the request: ``scheduler.queue_check`` moves
+    each feed's job up, unless the feed was checked within the
+    cooldown, is paused, or is failing and still inside its backoff
+    (``force`` skips that gate). The response says which feeds were
+    queued and when, so the caller can tell when they're done.
+    """
+    result = await scheduler.queue_check(body.source_ids, force=body.force)
+    return CheckNowResult(**result)
 
 
 # --- Recommendations (Phase 5) -------------------------------------------
