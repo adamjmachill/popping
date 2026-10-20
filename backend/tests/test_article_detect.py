@@ -141,6 +141,14 @@ def _page(
         # Jekyll pretty permalinks): the path has no ending.
         "https://www.example.com/blog/moving-to-fly.io/",
         "https://www.example.com/posts/notes-on-deno.land/",
+        # A slug that ends in a software name, before a trailing slash
+        # (Hugo, Eleventy) or under a page ending (Jekyll): a code
+        # word there is part of the slug, not a file's ending.
+        "https://www.example.com/posts/getting-started-with-three.js/",
+        "https://www.example.com/posts/understanding-package.json/",
+        "https://www.example.com/blog/why-i-moved-off-tailwind.css/",
+        "https://www.example.com/blog/reading-a-pom.xml/",
+        "https://www.example.com/2026/10/18/whats-new-in-vue.js.html",
     ],
 )
 def test_url_ok_keeps_articles(url):
@@ -155,6 +163,8 @@ def test_url_ok_keeps_articles(url):
         "https://www.example.com/library/home",
         "https://www.example.com/library/why-we-chose-deno.land",
         "https://www.example.com/library/flu-shots-available.page",
+        "https://www.example.com/library/getting-started-with-three.js/",
+        "https://www.example.com/library/whats-new-in-vue.js.html",
     ],
 )
 def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
@@ -173,8 +183,13 @@ def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
         ("/parks/trails/maps/trail-1.gpx", False),
         # ... but a path that ends in ``/`` has no ending ...
         ("/blog/why-we-chose-deno.land/", True),
-        # ... and a file ending is a file either way.
+        # ... and a document or media ending is a file either way ...
         ("/files/annual-report.pdf/", False),
+        ("/files/annual-report.pdf.html", False),
+        # ... while a code word names a file only at the very end.
+        ("/blog/whats-new-in-vue.js", False),
+        ("/blog/whats-new-in-vue.js/", True),
+        ("/blog/whats-new-in-vue.js.html", True),
     ],
 )
 def test_url_ok_reads_an_ending_only_at_the_end_of_the_path(path, ok):

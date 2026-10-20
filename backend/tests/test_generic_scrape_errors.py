@@ -1120,6 +1120,33 @@ async def test_an_astro_style_post_in_a_sitemap_is_an_article(site):
     assert [i["url"] for i in items] == [post]
 
 
+@pytest.mark.parametrize("read", ["sitemap", "sitemap under the link pattern", "listing page"])
+async def test_a_slug_that_ends_in_a_software_name_is_an_article(site, read):
+    """Hugo and Eleventy keep a slug's dots before the trailing slash,
+    and Jekyll keeps them under its ``.html``: ``vue.js`` there is a word
+    of the slug, not a file. main stored these pages from a sitemap and
+    under a link pattern."""
+    posts = [
+        f"{SITE}/posts/getting-started-with-three.js/",
+        f"{SITE}/posts/understanding-package.json/",
+        f"{SITE}/posts/why-i-moved-off-tailwind.css/",
+        f"{SITE}/posts/2026/10/18/whats-new-in-vue.js.html",
+    ]
+    astro = "https://www.example.com/blog/rebuilding-the-river-trail-bridge/"
+    for post in posts:
+        site.routes[post] = _html(_fixture("astro-post.html").replace(astro, post))
+    if read == "listing page":
+        links = "".join(f'<li><a href="{p}">Post</a></li>' for p in posts)
+        site.routes[f"{SITE}/posts/"] = _html(f"<html><body><main><ul>{links}</ul></main></body></html>")
+        plugin = _plugin(f"{SITE}/posts/", link_pattern="/posts/")
+    else:
+        site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*posts))
+        pattern = "/posts/" if read == "sitemap under the link pattern" else None
+        plugin = _plugin(f"{SITE}/", link_pattern=pattern)
+    items = await plugin.fetch()
+    assert sorted(i["url"] for i in items) == sorted(posts)
+
+
 async def test_links_under_the_link_pattern_are_the_owners_choice(site):
     """A one-word page name courlan reads as an index page (``home``) is
     still a candidate under the owner's link pattern; without one,

@@ -261,29 +261,14 @@ async def test_an_undated_sitemap_page_with_no_lastmod_is_judged_by_its_place(mo
     assert [i["url"] for i in await GenericScrapePlugin(_row()).fetch()] == [new, old]
 
 
-@pytest.mark.no_db
-@pytest.mark.asyncio
-@pytest.mark.parametrize("dated_by", ["lastmod", "url"])
-async def test_an_undated_page_is_judged_by_its_place_in_the_sitemap_not_the_date_order(
-    monkeypatch, fake_dns, dated_by
-):
-    """Through the real crawl: the stored stories carry a date the crawl
-    sorts by (a ``<lastmod>``, or a ``/YYYY/MM/DD/`` URL), and two undated
-    pages with neither are listed first and last. The candidates are in
-    date order, which puts both after every stored story; the sitemap
-    lists the first above them, so it is new and comes in, and the last
-    is backlog."""
-    site = "https://example.com"
-    if dated_by == "lastmod":
-        stored = [f"{site}/notes/river-trail-{n}/" for n in range(2)]
-        lastmod = "<lastmod>2026-10-18</lastmod>"
-    else:
-        stored = [f"{site}/2026/10/18/river-trail-{n}/" for n in range(2)]
-        lastmod = ""
-    new, old = f"{site}/guides/harvest-market-plans/", f"{site}/guides/winter-road-closures/"
-    entries = "".join(
-        f"<url><loc>{u}</loc>{lastmod if u in stored else ''}</url>" for u in [new, *stored, old]
-    )
+async def _crawl_undated(
+    monkeypatch, site: str, urls: list[str], lastmods: dict[str, str], stored: list[str]
+) -> tuple[list[str], list[dict]]:
+    """Run a later poll of ``site`` through the real crawl and sort: its
+    sitemap lists ``urls`` in that order, each with its ``<lastmod>``
+    element from ``lastmods``, ``stored`` are stored, and every page
+    extracts with no date. Returns the pages fetched and the items."""
+    entries = "".join(f"<url><loc>{u}</loc>{lastmods.get(u, '')}</url>" for u in urls)
     sitemap = (
         '<?xml version="1.0" encoding="UTF-8"?>'
         f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>'
@@ -304,7 +289,55 @@ async def test_an_undated_page_is_judged_by_its_place_in_the_sitemap_not_the_dat
     items = await plugin.fetch(
         known_urls=_known(set(stored)), max_undated=5, backlog_before=NOW - dt.timedelta(days=2)
     )
+    return calls, items
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dated_by", ["lastmod", "url"])
+async def test_an_undated_page_is_judged_by_its_place_in_the_sitemap_not_the_date_order(
+    monkeypatch, fake_dns, dated_by
+):
+    """Through the real crawl: the stored stories carry a date the crawl
+    sorts by (a ``<lastmod>``, or a ``/YYYY/MM/DD/`` URL), and two undated
+    pages with neither are listed first and last. The candidates are in
+    date order, which puts both after every stored story; the sitemap
+    lists the first above them, so it is new and comes in, and the last
+    is backlog."""
+    site = "https://example.com"
+    if dated_by == "lastmod":
+        stored = [f"{site}/notes/river-trail-{n}/" for n in range(2)]
+        lastmod = "<lastmod>2026-10-18</lastmod>"
+    else:
+        stored = [f"{site}/2026/10/18/river-trail-{n}/" for n in range(2)]
+        lastmod = ""
+    new, old = f"{site}/guides/harvest-market-plans/", f"{site}/guides/winter-road-closures/"
+    lastmods = {u: lastmod for u in stored}
+    calls, items = await _crawl_undated(monkeypatch, site, [new, *stored, old], lastmods, stored)
     assert calls == [new, old]
+    assert [i["url"] for i in items] == [new]
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dated_by", ["lastmod", "url"])
+async def test_an_undated_page_below_any_stored_story_is_backlog(monkeypatch, fake_dns, dated_by):
+    """The stored stories' dates run against the sitemap's order (an
+    edit moved a ``<lastmod>``, or the sitemap lists oldest first), so
+    the newest-dated stored story is listed below the older one. An
+    undated page between them is listed below a stored story, the older
+    one: backlog, though it sits above the newest-dated one."""
+    site = "https://example.com"
+    if dated_by == "lastmod":
+        older, newer = (f"{site}/notes/river-trail-{n}/" for n in ("a", "b"))
+        lastmods = {older: "<lastmod>2026-10-01</lastmod>", newer: "<lastmod>2026-10-18</lastmod>"}
+    else:
+        older, newer = f"{site}/2026/10/01/river-trail-a/", f"{site}/2026/10/18/river-trail-b/"
+        lastmods = {}
+    new, between = f"{site}/guides/harvest-market-plans/", f"{site}/guides/winter-road-closures/"
+    stored = [older, newer]
+    calls, items = await _crawl_undated(monkeypatch, site, [new, older, between, newer], lastmods, stored)
+    assert calls == [new, between]
     assert [i["url"] for i in items] == [new]
 
 

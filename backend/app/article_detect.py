@@ -202,6 +202,16 @@ _FILE_EXTENSIONS = frozenset({
     "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub",
     "woff", "woff2", "ttf", "otf", "eot",
 })
+# File endings that also end the names of software, which dev blogs keep
+# in their slugs (Hugo, Eleventy and Jekyll keep the dots): ``three.js``,
+# ``package.json``, ``tailwind.css``, ``pom.xml``. They name a file only
+# at the true end of a path (``/assets/app.js``, ``/feed.xml``). Before
+# a ``/`` (``/posts/whats-new-in-vue.js/``) or under a page ending
+# (``/2026/10/18/whats-new-in-vue.js.html``) they are a word of the
+# slug; a document or media ending there (``annual-report.pdf/``,
+# ``doc.pdf.html``) is still a file.
+_CODE_EXTENSIONS = frozenset({"js", "mjs", "json", "css", "xml"})
+_DOCUMENT_EXTENSIONS = _FILE_EXTENSIONS - _CODE_EXTENSIONS
 # Endings of web pages that courlan knows (its own whitelist, without
 # ``.txt`` and ``.xml``, which are files here).
 _PAGE_EXTENSIONS = frozenset({
@@ -248,21 +258,27 @@ def _courlan_page(page: str) -> str:
     return f"{name}.{extension}" if extension in _PAGE_EXTENSIONS else name
 
 
-def _is_file(page: str, *, any_ending: bool = True) -> bool:
+def _is_file(page: str, *, at_end: bool = True, any_ending: bool = True) -> bool:
     """Whether the page's own name (lower case) names a file: a file
     ending (``trail.jpg``, ``episode-12.mp3``), any other ending of 2 to
-    5 letters that is no web page's (``trail-3.gpx``; only with
-    ``any_ending``), a file ending under a page ending
-    (``doc.pdf.html``), or a camera's file name (``img_1234``)."""
+    5 letters that is no web page's (``trail-3.gpx``), a document or
+    media ending under a page ending (``doc.pdf.html``), or a camera's
+    file name (``img_1234``).
+
+    ``at_end``: nothing follows the name (the path doesn't end in
+    ``/``). Before a ``/`` only a document or media ending counts, not
+    a code word (``_CODE_EXTENSIONS``), and the 2-to-5-letter rule
+    needs ``at_end`` and ``any_ending`` both."""
     stem, extension = _split_extension(page)
     if extension in _PAGE_EXTENSIONS:
         stem, inner = _split_extension(stem)
-        if inner in _FILE_EXTENSIONS:
+        if inner in _DOCUMENT_EXTENSIONS:
             return True
-    elif extension in _FILE_EXTENSIONS:
+    elif extension in (_FILE_EXTENSIONS if at_end else _DOCUMENT_EXTENSIONS):
         return True
     elif (
-        any_ending
+        at_end
+        and any_ending
         and extension not in _ARTICLE_EXTENSIONS
         and _LETTERS_ENDING_RE.fullmatch(extension)
     ):
@@ -336,7 +352,10 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
       ``/press/flu-shots-available.page`` are articles; ``trail.jpg``,
       ``trail-3.gpx`` and ``img_1234`` are not. Only the end of the path
       has an ending, as courlan reads it: a path that ends in ``/``
-      (``/blog/moving-to-fly.io/``) is judged by the file endings alone.
+      (``/blog/moving-to-fly.io/``) and the name under a page ending
+      are judged by the document and media endings alone, so a slug
+      that ends in a software name (``/posts/whats-new-in-vue.js/``,
+      ``vue.js.html``) is an article and ``annual-report.pdf/`` a file.
     - **courlan judges the rest**: ``check_url(strict=True)`` on a
       one-word page name (contact, login, imprint and index pages,
       ``/feed``), the query (a file type hidden in it) and the host
@@ -355,7 +374,7 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     ``owner_configured``), so courlan isn't asked, and neither is the
     2-to-5-letter ending rule that reads like it
     (``/library/why-we-chose-deno.land``); our path rules and the file
-    endings still apply.
+    endings (as read above) still apply.
     """
     try:
         parts = urlsplit(url.strip())
@@ -379,7 +398,7 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
     page = segments[-1] if segments else ""
-    if _is_file(page, any_ending=not owner_pattern and not parts.path.endswith("/")):
+    if _is_file(page, at_end=not parts.path.endswith("/"), any_ending=not owner_pattern):
         return False
     # Blogspot's date archives (/2026_10_01_archive.html).
     if page.endswith("_archive.html"):

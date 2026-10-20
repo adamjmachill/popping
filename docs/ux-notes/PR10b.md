@@ -259,7 +259,8 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   per poll that it had passed over before. Which pages are backlog depends on the list's order
   (review fix; the first cut used position everywhere): listed below a stored story on a
   listing page, and in a sitemap for a page with no `<lastmod>` (round 2), by its place in the
-  sitemap's own order, not the candidates' date order (round 3); in a sitemap, last modified
+  sitemap's own order, not the candidates' date order (round 3), below any stored story whatever
+  the stored stories' own dates (round 4's test); in a sitemap, last modified
   before the poll's backlog line. A page a poll left for later (refused, failed in a way that
   passes, read without the owner's word) while it was new is still new when it is read, even
   below a story stored in between (round 3). Pages the cap drops stay marked. PR4a's notes
@@ -269,7 +270,9 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   without courlan (review fix) or its 2-to-5-letter ending rule (round 3): the pattern is the
   owner's article signal. The prefix filter itself is unchanged, and our own path rules and file
   endings still apply, so an owner pattern that targets record pages such as `/products/<x>` is
-  still filtered out (see Open items).
+  still filtered out (see Open items). A code word that ends a software name (`.js`, `.json`,
+  `.css`, `.xml`) is a file's ending only at the very end of the path, not before a `/` or under
+  `.html` (round 4).
 - **Article pages that fail in a way that passes are asked for again.** The first cut marked a
   page that timed out or answered 5xx, so a transient failure lost the story (review fix). Now
   only a page that was read (gone, not HTML, not an article, kept) is marked. A failed page is
@@ -591,7 +594,8 @@ reverted in place (Verification below). None was skipped.
    cases in `test_article_detect.py`, and
    `test_listing_links_takes_the_post_cards_over_a_larger_table_of_downloads`. (Round 3, fix 2:
    the rule reads only the end of a path, not under the owner's pattern, and `.page`, `.jsf`
-   and `.cfml` are page endings.)
+   and `.cfml` are page endings. Round 4, fix 1: before a `/` and under a page ending only a
+   document or media ending is a file, not `.js`, `.json`, `.css` or `.xml`.)
 7. **The upper-case ending case passed without the ending rule** (minor). Its URL sat under
    `wp-content/uploads`, which the path rules reject first. New cases outside any rejected
    section: `/files/Trail-Map.JPG`, and `/news/Episode-12.MP3`, which only `_FILE_EXTENSIONS`
@@ -668,7 +672,8 @@ tests that couldn't fail. Each fix has a test that fails when the fix is reverte
    `test_url_ok_reads_an_ending_only_at_the_end_of_the_path`. Round 2's
    `/library/riverlm3.gguf` reject case under the owner's pattern is a candidate again, as in
    round 1 and on main (fetched once, it reads as no page), so it left that list, which gained
-   `/library/riverlm3.zip/` (a file ending before a trailing slash).
+   `/library/riverlm3.zip/` (a file ending before a trailing slash). (Round 4, fix 1: before a
+   `/`, and under a page ending, a code word such as `.js` is part of the slug.)
 3. **A new undated page listed first in a sitemap of dated stories was dropped as backlog**
    (minor; from round-2 fix 4). The position rule for a sitemap page with no `<lastmod>` used
    the candidates' date order, which puts every undated entry after every dated one (a
@@ -677,7 +682,8 @@ tests that couldn't fail. Each fix has a test that fails when the fix is reverte
    in the site's own order (the documents as the crawl read them, each top to bottom), and the
    rule (`_backlog_rule`, moved out of `_cap_undated`) compares places. Test:
    `test_an_undated_page_is_judged_by_its_place_in_the_sitemap_not_the_date_order` (stored
-   stories dated by `<lastmod>`, and by their URLs), through the real crawl and sort.
+   stories dated by `<lastmod>`, and by their URLs), through the real crawl and sort. (Round 4,
+   fix 2: a test whose stored stories are dated against the sitemap's order.)
 4. **A page left for a later poll was dropped as backlog when a story listed above it was
    stored meanwhile** (minor; the `sitemap_url` outage half was a regression from round-2 fix 3,
    the 503 half was lost on main too). A poll that leaves a page for later while it is new
@@ -759,6 +765,74 @@ ARCHITECTURE.md gains a row and a multi-worker note for `_deferred_new`. `schedu
 - **`ruff check --select F,E9,B`** on every changed app file and test: clean, except the 5
   findings in `scheduler.py` that are on main (619000f gives the same 5).
 
+## Review fixes (round 4)
+
+The fourth review's two confirmed findings: one regression against main and one test that
+couldn't fail. Each has a test that fails when the fix is reverted in place (Verification
+below). Neither was skipped.
+
+1. **Slugs that end in a software name were read as files** (minor; from round-2 fix 6 and
+   round-3 fix 2, a regression against main). `_is_file` checked `_FILE_EXTENSIONS` on the
+   page name even when the path ends in `/` (Hugo and Eleventy: `/posts/whats-new-in-vue.js/`,
+   `/posts/understanding-package.json/`), under the owner's link pattern, and on the name under
+   a page ending (Jekyll: `/2026/10/18/whats-new-in-vue.js.html`). Those pages were never
+   fetched; main stored them from a sitemap and under a link pattern, because it never ran
+   `url_ok` there. `_CODE_EXTENSIONS` (`js`, `mjs`, `json`, `css`, `xml`) now name a file only at
+   the very end of the path: before a `/` and under a page ending only a document or media
+   ending counts (`_DOCUMENT_EXTENSIONS`, the rest of `_FILE_EXTENSIONS`), so
+   `/files/annual-report.pdf/`, `/library/riverlm3.zip/` and `doc.pdf.html` are still files.
+   `_is_file` takes `at_end` (nothing follows the name) beside `any_ending` (not under the
+   owner's pattern); the 2-to-5-letter rule needs both, as before. At the very end of a path
+   nothing changes: `/assets/app.js` and `/blog/hello-node.js` are files (Open items). The
+   finding also offered a broader fix, no file ending at all before a `/` (and none under the
+   owner's pattern on such a path); that would make `/files/annual-report.pdf/` and
+   `/library/riverlm3.zip/` candidates again, which round 3 rejects on purpose, so only the code
+   words changed, as the verdict suggested. Tests:
+   the new keep cases (five without the owner's pattern, two under it) and the code-word and
+   `.pdf.html` cases of `test_url_ok_reads_an_ending_only_at_the_end_of_the_path` in
+   `test_article_detect.py`; `test_a_slug_that_ends_in_a_software_name_is_an_article` in
+   `test_generic_scrape_errors.py` (Hugo, Eleventy and Jekyll slugs through the real fetch path,
+   from a sitemap, from a sitemap under the link pattern and from a listing page under it; all
+   four stored on poll 1).
+2. **The sitemap-place test couldn't tell "below any stored story" from "below the
+   newest-dated one"** (minor; test only). Its two stored stories shared one date, so their
+   date order was their sitemap order and `next()` over the candidates found the same stored
+   story as `_backlog_rule`'s `min()` over places. The rule's code is unchanged.
+   `test_an_undated_page_below_any_stored_story_is_backlog` lists, through the real crawl and
+   sort, a new undated page, a stored story dated 2026-10-01, an undated page, and a stored story
+   dated 2026-10-18 (by `<lastmod>`, and by `/YYYY/MM/DD/` URL). The page between them is
+   fetched and dropped as backlog: it is listed below the older-dated stored story. Under the
+   `next()` rule it came in. The crawl and fakes of the place test moved into `_crawl_undated`,
+   which both tests use.
+
+### Verification of the round-4 fixes
+
+- **Revert in place.** A script applied each mutant, ran the tests that guard it
+  (`test_article_detect.py` and `test_generic_scrape_errors.py` for fix 1,
+  `test_generic_scrape_skips_stored.py` for fix 2), required a failure, and restored the
+  file byte for byte (SHA-256 of the file, and of `git diff` before and after). All 8 were
+  caught:
+  - fix 1: HEAD 1ed421d's `_is_file` and its call: 12 fail (9 `url_ok` cases and the 3 crawl
+    cases); code words under a page ending only: 6; code words before a `/` only: 9; no file
+    ending at all before a `/` (the finding's broader fix): 2 (`annual-report.pdf/`,
+    `riverlm3.zip/`); no ending check under a page ending: 2; the 2-to-5-letter rule before a
+    `/`: 9; the 2-to-5-letter rule under the owner's pattern: 1;
+  - fix 2: the reviewer's mutant (`next()` over the candidates in date order): 2 (both
+    datings).
+- **The reviewers' probes**, run against this tree: the dotted-slug probe (s2) stores hugo 4/4,
+  jekyll 2/2 and the link-pattern feed 2/2 on poll 1, as on main. The three-poll probe (s2b)
+  asks for `/posts/getting-started-with-three.js/` once and stores it, from a sitemap, from the
+  home page's links and under the link pattern. `url_ok` accepts all six URLs the verdict
+  listed, with and without the owner's pattern, and still rejects `/files/annual-report.pdf/`,
+  `/files/doc.pdf.html` and `/blog/hello-node.js`.
+- **PR10b test files** (the 12, `test_slice27_deferred_perf.py`, `test_feed_autodiscovery.py`
+  and `test_b1_b8_coverage_gaps.py`): 434 passed, 4 failed, the 4 DNS-only `/auto`
+  route tests in the baseline (418 before this round, plus the 16 new cases).
+- **Backend pytest** (database `popping_test_b`, worktree `PYTHONPATH`): **13 failed, 1440
+  passed**. The 13 are exactly the DNS-only baseline (`/root/popping-env/baseline.txt`).
+- **`ruff check --select F,E9,B`** on the changed files: clean (`article_detect.py` and the three
+  test files).
+
 ## Risks and data-compatibility notes
 
 - **Some website feeds will pull fewer stories or show a new state.** This is the intended
@@ -777,8 +851,9 @@ ARCHITECTURE.md gains a row and a multi-worker note for `_deferred_new`. `schedu
   was just updated is dropped as backlog. The review asked to keep position for listing pages;
   a `sitemap_url` or a dated listing avoids it.
 - **A sitemap with no `<lastmod>` and pages with no date** uses the listing page's position rule
-  (round 2) on the sitemap's own order (round 3): a new undated page listed above a stored one
-  comes in; one listed below is dropped as backlog. A sitemap that lists its newest pages last
+  (round 2) on the sitemap's own order (round 3): a new undated page listed above every stored
+  one comes in; one listed below any of them is dropped as backlog, whatever the stored stories'
+  own dates. A sitemap that lists its newest pages last
   (oldest first, with no `<lastmod>`) therefore brings no undated page after its first fetch,
   where main kept draining 2 a poll. A dated page, or a `<lastmod>`, avoids it. Across several
   sitemap documents the order is the crawl's (best class first, newest first within a class).
@@ -817,11 +892,17 @@ ARCHITECTURE.md gains a row and a multi-worker note for `_deferred_new`. `schedu
 - **A date written only as text** ("Posted on October 14, 2026") with no `<time>`, no metadata
   and no listing card date still leaves an `og:type=website` page undated (−3), and such a page
   is rejected without a link pattern. Reading dates from text is a heuristic of its own.
-- **A slug that ends in a file type** (`/blog/getting-started-with-vue.js`) is read as a file.
-  So is one that ends in any other ending of 2 to 5 letters that is no web page's or known
-  CMS's (`/blog/announcing-socket.io`), unless its path ends in `/` or it is under the owner's
-  link pattern (rounds 2 and 3; courlan's own ending test, which main's `url_ok` used, reads
-  them the same). A link pattern brings such a feed in.
+- **A slug that ends in a file type at the very end of its path**
+  (`/blog/getting-started-with-vue.js`, `/blog/my-annual-report.pdf`) is read as a file, under
+  the owner's link pattern too, and a link pattern doesn't bring it in. main fetched such a page
+  from a sitemap or under a link pattern, because it ran `url_ok` only on listing links. Before
+  a `/` or under a page ending only a document or media ending is a file (round 4), so the
+  generators that keep a slug's dots (Hugo, Eleventy, Jekyll: `/posts/whats-new-in-vue.js/`,
+  `/2026/10/18/whats-new-in-vue.js.html`) are read. Any other ending of 2 to 5 letters that is
+  no web page's or known CMS's (`/blog/announcing-socket.io`) is a file only at the very end of
+  the path and without the owner's link pattern, which brings such a feed in (rounds 2 and 3).
+  courlan's own ending test, which main's `url_ok` used for listing links, reads all of these as
+  files.
 - **The plan's frontend-only rollback command** still lacks `--no-deps` (PR9a's open item).
 
 ## Device checks
