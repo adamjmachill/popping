@@ -204,14 +204,66 @@ For You leaves out paused feeds, and both list routes leave out the caller's hid
       148 ms at 168 h and 411 ms at 720 h. It would make the hot 48 h poll 3× slower, so it
       wasn't used. See Open items.
 
-- **VPS (read-only, optional).** The flat All-tab shape against production, through the
-  compose `postgres` service (default user and database `popping`):
+- **VPS (read-only, optional).** Two `EXPLAIN (ANALYZE, BUFFERS)` runs against production,
+  through the compose `postgres` service (default user and database `popping`):
+  - **Per-category main poll, 48 h:** what PR4d will send every minute from every device
+    (`per_category_limit=100, max_age_hours=48, per_source_cap=25, active_only=true`).
+  - **Wide tab, window All (8760 h):** one category, `limit=200`, the same cap and
+    `active_only`. The flat path's `LATERAL` form exists for this shape. For a wide tab at 48 h,
+    change `'8760 hours'` to `'48 hours'`.
+  - The two `SELECT`s are the route's own SQL. A script ran `list_entries` with a capturing
+    session, compiled the statement it built, and inlined the values: the full card projection
+    with its `meta ->>` extractions, the casts the driver sends, the per-feed and per-category
+    `row_number`s or the `LATERAL`, and `id <> ALL(...)`.
+  - Two values come from the database instead, through psql variables. `:'hidden'` is the
+    most recently written `hidden_entries` row, read as the route reads it (whole-number ids
+    from 1 to 2^63-1, no duplicates, the newest 1000). `:'cat'` is the category with the most
+    active feeds. The window is `now() - interval` (the route binds the same instant as a
+    parameter), so the command works on any day. An empty hidden list gives `'{}'`, where the
+    route would leave the filter out; the plan is the same apart from that one filter.
+  - Checked on a scratch database migrated to head (16 feeds, 3000 stories, a malformed
+    hidden row next to an older one): without `EXPLAIN`, both `SELECT`s returned the same ids
+    in the same order as `list_entries` (275 and 150 rows).
 
   ```
-  cd /opt/popping && docker compose exec -T postgres psql -U popping -d popping -c "EXPLAIN (ANALYZE, BUFFERS) SELECT e.id FROM sources s CROSS JOIN LATERAL (SELECT id, fetched_at, published_at FROM entries e WHERE e.source_id = s.id AND e.fetched_at >= now() - interval '8760 hours' ORDER BY e.composite_score DESC, e.fetched_at DESC, e.id DESC LIMIT 25) e WHERE s.category = 'news' AND s.active ORDER BY e.fetched_at DESC, e.published_at DESC NULLS LAST, e.id DESC LIMIT 200"
+  cd /opt/popping && docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -U popping -d popping <<'SQL'
+  -- The hidden ids, read the way the route reads them: the most recently
+  -- written hidden_entries row, whole-number ids from 1 to 2^63-1, no
+  -- duplicates, the newest 1000.
+  SELECT coalesce(array_agg(id), '{}') AS hidden FROM (
+    SELECT DISTINCT x::text::numeric AS id
+    FROM (SELECT value FROM user_preferences
+          WHERE key = 'hidden_entries' AND jsonb_typeof(value) = 'array'
+          ORDER BY updated_at DESC LIMIT 1) p
+    CROSS JOIN jsonb_array_elements(p.value) AS x
+    WHERE jsonb_typeof(x) = 'number' AND x::text ~ '^[0-9]+$'
+      AND x::text::numeric BETWEEN 1 AND 9223372036854775807
+    ORDER BY id DESC LIMIT 1000) h \gset
+  -- The category with the most active feeds, for the wide-tab shape.
+  SELECT category AS cat FROM sources WHERE active IS TRUE
+  GROUP BY category ORDER BY count(*) DESC, category LIMIT 1 \gset
+  -- Per-category main poll, 48 h.
+  EXPLAIN (ANALYZE, BUFFERS) SELECT ranked.id, ranked.source_id, ranked.title, ranked.url, ranked.published_at, ranked.fetched_at, ranked.composite_score, ranked.personal_score, ranked.raw_score, ranked.cached_summary, ranked.image_url, ranked.image_path, ranked.story_cluster_id, ranked.reddit_thread_url, ranked.reddit_comment_count_text, ranked.audio_url, ranked.duration_seconds_text, ranked.transcript_url
+  FROM (SELECT pool.id AS id, pool.source_id AS source_id, pool.title AS title, pool.url AS url, pool.published_at AS published_at, pool.fetched_at AS fetched_at, pool.composite_score AS composite_score, pool.personal_score AS personal_score, pool.raw_score AS raw_score, pool.cached_summary AS cached_summary, pool.image_url AS image_url, pool.image_path AS image_path, pool.story_cluster_id AS story_cluster_id, pool.reddit_thread_url AS reddit_thread_url, pool.reddit_comment_count_text AS reddit_comment_count_text, pool.audio_url AS audio_url, pool.duration_seconds_text AS duration_seconds_text, pool.transcript_url AS transcript_url, row_number() OVER (PARTITION BY pool.source_category ORDER BY pool.fetched_at DESC, pool.published_at DESC NULLS LAST, pool.id DESC) AS rn
+  FROM (SELECT capped.id AS id, capped.source_id AS source_id, capped.title AS title, capped.url AS url, capped.published_at AS published_at, capped.fetched_at AS fetched_at, capped.composite_score AS composite_score, capped.personal_score AS personal_score, capped.raw_score AS raw_score, capped.cached_summary AS cached_summary, capped.image_url AS image_url, capped.image_path AS image_path, capped.story_cluster_id AS story_cluster_id, capped.reddit_thread_url AS reddit_thread_url, capped.reddit_comment_count_text AS reddit_comment_count_text, capped.audio_url AS audio_url, capped.duration_seconds_text AS duration_seconds_text, capped.transcript_url AS transcript_url, capped.source_category AS source_category
+  FROM (SELECT entries.id AS id, entries.source_id AS source_id, entries.title AS title, entries.url AS url, entries.published_at AS published_at, entries.fetched_at AS fetched_at, entries.composite_score AS composite_score, entries.personal_score AS personal_score, entries.raw_score AS raw_score, entries.cached_summary AS cached_summary, entries.image_url AS image_url, entries.image_path AS image_path, entries.story_cluster_id AS story_cluster_id, entries.meta ->> 'reddit_thread_url'::VARCHAR AS reddit_thread_url, entries.meta ->> 'reddit_comment_count'::VARCHAR AS reddit_comment_count_text, entries.meta ->> 'audio_url'::VARCHAR AS audio_url, entries.meta ->> 'duration_seconds'::VARCHAR AS duration_seconds_text, entries.meta ->> 'transcript_url'::VARCHAR AS transcript_url, sources.category AS source_category, row_number() OVER (PARTITION BY entries.source_id ORDER BY entries.composite_score DESC, entries.fetched_at DESC, entries.id DESC) AS rn_src
+  FROM entries JOIN sources ON entries.source_id = sources.id
+  WHERE sources.active IS true AND entries.fetched_at >= (now() - interval '48 hours')::TIMESTAMP WITH TIME ZONE AND entries.id != ALL (:'hidden'::BIGINT[])) AS capped
+  WHERE capped.rn_src <= 25::INTEGER) AS pool) AS ranked
+  WHERE ranked.rn <= 100::INTEGER ORDER BY ranked.fetched_at DESC, ranked.published_at DESC NULLS LAST, ranked.id DESC;
+  -- Wide tab (one category), window All (8760 h).
+  EXPLAIN (ANALYZE, BUFFERS) SELECT best.id, best.source_id, best.title, best.url, best.published_at, best.fetched_at, best.composite_score, best.personal_score, best.raw_score, best.cached_summary, best.image_url, best.image_path, best.story_cluster_id, best.reddit_thread_url, best.reddit_comment_count_text, best.audio_url, best.duration_seconds_text, best.transcript_url
+  FROM sources JOIN LATERAL (SELECT entries.id AS id, entries.source_id AS source_id, entries.title AS title, entries.url AS url, entries.published_at AS published_at, entries.fetched_at AS fetched_at, entries.composite_score AS composite_score, entries.personal_score AS personal_score, entries.raw_score AS raw_score, entries.cached_summary AS cached_summary, entries.image_url AS image_url, entries.image_path AS image_path, entries.story_cluster_id AS story_cluster_id, entries.meta ->> 'reddit_thread_url'::VARCHAR AS reddit_thread_url, entries.meta ->> 'reddit_comment_count'::VARCHAR AS reddit_comment_count_text, entries.meta ->> 'audio_url'::VARCHAR AS audio_url, entries.meta ->> 'duration_seconds'::VARCHAR AS duration_seconds_text, entries.meta ->> 'transcript_url'::VARCHAR AS transcript_url
+  FROM entries
+  WHERE entries.source_id = sources.id AND entries.fetched_at >= (now() - interval '8760 hours')::TIMESTAMP WITH TIME ZONE AND entries.id != ALL (:'hidden'::BIGINT[]) ORDER BY entries.composite_score DESC, entries.fetched_at DESC, entries.id DESC
+   LIMIT 25::INTEGER) AS best ON true
+  WHERE sources.category = :'cat'::VARCHAR AND sources.active IS true ORDER BY best.fetched_at DESC, best.published_at DESC NULLS LAST, best.id DESC
+   LIMIT 200::INTEGER;
+  SQL
   ```
 
-  `EXPLAIN ANALYZE` of a `SELECT` runs it but writes nothing.
+  `EXPLAIN ANALYZE` of a `SELECT` runs it but writes nothing. The target is under 150 ms for
+  each; locally on 400k rows they took 24 ms and 3.6 ms (the table above).
 
 ## Deviations from the spec
 
@@ -312,3 +364,20 @@ Added under Pending in `docs/DEVICE_CHECKS.md`:
 
 `/security-review` could not run in this worktree (no `origin` remote); the Rules checklist
 above was done by hand instead, with no findings.
+
+### Review fixes (second commit)
+
+One confirmed finding, fixed:
+
+- **The VPS command covered only the flat path, and not as the route sends it.** It selected
+  only `e.id`, so it skipped the card projection and the `meta ->>` extractions. It had no
+  `id <> ALL(...)` filter, and it left out the per-category main poll, which every device will
+  send each minute after PR4d. The VPS section now has one read-only psql run with two `EXPLAIN
+  (ANALYZE, BUFFERS)`s, the per-category main poll at 48 h and a wide tab at 8760 h. Both are
+  the SQL that `list_entries` compiles. The real hidden ids and the busiest category come from
+  psql variables. The old flat command's "All-tab" label is gone: a category filter makes it a
+  wide tab.
+- **Checks:** the pasted command ran unchanged against a scratch database migrated to head,
+  except for the psql connection: it ran with a hidden row, and again with no rows. Without
+  `EXPLAIN`, its two `SELECT`s returned the same ids in the same order as the route. The four
+  window and projection test files still pass (56 passed). No code or test changed.
