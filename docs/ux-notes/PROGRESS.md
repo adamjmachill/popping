@@ -33,7 +33,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR8b Remove chips, presets and the old Sources UI | F | not started | |
 | PR9a Migration 0031 and feed health backend | B | in progress (owner merges) | |
 | PR9b Feed health UI | F | not started | |
-| PR10a article_detect library | B | in review | #PR10A |
+| PR10a article_detect library | B | in review | #34 |
 | PR10b Website crawl wiring and errors | B | not started (merges after the owner's VPS probe) | |
 | PR11a Preview endpoint, browser headers, PATCH type | B | not started | |
 | PR11b Add flow and 409 | F | not started | |
