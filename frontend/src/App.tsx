@@ -22,7 +22,8 @@ import { flushSync } from 'react-dom'
 import { api, type Brief, type CurrentUser, type Entry, type Health, type Source } from './api'
 import { BriefCard } from './components/BriefCard'
 import { Card } from './components/Card'
-import { Column, DEFAULT_PREFS, type ColumnPrefs } from './components/Column'
+import { Column, type ColumnPrefs } from './components/Column'
+import { normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
 import { Drawer } from './components/Drawer'
 import { FramingWatch } from './components/FramingWatch'
 import { Hamburger } from './components/Hamburger'
@@ -590,6 +591,13 @@ export function App() {
   const [activeSources, setActiveSources] = useState<Set<string>>(() => new Set())
   const [brief, setBrief] = useState<Brief | null>(null)
   const [generatingBrief, setGeneratingBrief] = useState(false)
+  // Whether an AI provider is set up (``/api/llm/status``). Null while
+  // loading or when the check failed: the Brief buttons then stay as
+  // they are. False turns them into "Brief needs an AI provider · Set
+  // up". Held here, not in BriefCard: the header Brief button needs
+  // it too, and it is read again when Settings closes, so Set up →
+  // pick a provider → Done brings Generate back without a reload.
+  const [llmConfigured, setLlmConfigured] = useState<boolean | null>(null)
   // Brief tone — lifted from BriefCard so the header Brief button,
   // the Drawer "Generate brief now" button, and the BriefCard pills
   // all stay in sync.
@@ -1078,17 +1086,22 @@ export function App() {
 
   const baseColumns = viewKind === 'multisub' ? multisubColumn : allSubsColumns
 
-  // Apply per-column prefs. For You skips the sort filter (backend
-  // pre-sorts by composite_score) but still respects min-score +
-  // max-age.
+  // A tab's prefs: its stored row over the tab's defaults (For You
+  // defaults to Best, every other tab to Newest), with an older
+  // build's ``top`` or ``oldest`` read as that default. Module
+  // constants or one cached object per row, so Column's memo holds.
+  const prefsFor = useCallback(
+    (col: { key: ColKey; name: string }) => tabPrefsFor(columnPrefs, col),
+    [columnPrefs],
+  )
+
+  // Apply per-column prefs: the age filter, then the tab's sort, once
+  // (the sections below keep this order). Saved is never sorted.
   const columns = useMemo<Array<{ key: ColKey; name: string; entries: Entry[]; totalCount: number }>>(() => {
     const now = Date.now()
     return baseColumns.map((col) => {
-      const prefs = columnPrefs[col.name] ?? DEFAULT_PREFS
+      const prefs = prefsFor(col)
       let filtered = col.entries
-      if (prefs.minScore > 0) {
-        filtered = filtered.filter((e) => e.composite_score >= prefs.minScore)
-      }
       if (prefs.maxAgeHours != null) {
         const cutoff = now - prefs.maxAgeHours * 60 * 60 * 1000
         filtered = filtered.filter((e) => {
@@ -1096,16 +1109,10 @@ export function App() {
           return new Date(e.fetched_at).getTime() >= cutoff
         })
       }
-      if (col.name !== 'For You' && prefs.sort !== 'top') {
-        filtered = [...filtered].sort((a, b) => {
-          const ta = a.published_at ? new Date(a.published_at).getTime() : 0
-          const tb = b.published_at ? new Date(b.published_at).getTime() : 0
-          return prefs.sort === 'newest' ? tb - ta : ta - tb
-        })
-      }
+      filtered = sortEntries(filtered, normalizeSort(prefs.sort, col.key), col.key)
       return { key: col.key, name: col.name, entries: filtered, totalCount: col.entries.length }
     })
-  }, [baseColumns, columnPrefs])
+  }, [baseColumns, prefsFor])
 
   // Read state is stored per-column (``readEntries[columnName]``)
   // because "mark all read" and its Undo are column-scoped
@@ -1182,39 +1189,15 @@ export function App() {
   }, [columns, globalReadIds])
 
   // New / History split per column. The split happens AFTER the
-  // per-column sort/filter (the previous useMemo), so the per-
-  // column ``sort: 'top' | 'newest' | 'oldest'`` preference still
-  // gates which entries appear — and within each section we always
-  // sort newest-first (the user's "newest in each section" choice
-  // supersedes the per-column ``sort`` for the visual order).
+  // per-column sort/filter (the ``columns`` memo), and each section
+  // keeps that order: the tab's Newest | Best is the order shown.
   //
   // Membership rule (matches ``unreadIdsByColumn``): an entry is
-  // "new" if it isn't in the manual ``readEntries`` set AND its
-  // ``fetched_at`` is after the column's ``lastViewed`` timestamp.
-  // Everything else is "history". The Card's ``unread`` prop is
-  // derived from section membership in Column, so we don't need
-  // to pass the Set down anymore.
+  // "new" if it isn't in the manual ``readEntries`` set. Everything
+  // else is "history". The Card's ``unread`` prop is derived from
+  // section membership in Column, so we don't need to pass the Set
+  // down anymore.
   const sectionsByColumn = useMemo(() => {
-    // Reused comparator. ``published_at`` is the user-facing
-    // "when was this posted" — what readers want. ``fetched_at``
-    // is the fallback for entries whose publisher didn't include
-    // a clean published timestamp (some RSS feeds). ``id`` is the
-    // final tiebreaker so equal-timestamp entries have a stable
-    // order across renders.
-    const byNewest = (a: Entry, b: Entry): number => {
-      const ta = a.published_at
-        ? new Date(a.published_at).getTime()
-        : a.fetched_at
-          ? new Date(a.fetched_at).getTime()
-          : 0
-      const tb = b.published_at
-        ? new Date(b.published_at).getTime()
-        : b.fetched_at
-          ? new Date(b.fetched_at).getTime()
-          : 0
-      if (tb !== ta) return tb - ta
-      return b.id - a.id
-    }
     const out = new Map<string, { new: Entry[]; history: Entry[] }>()
     for (const col of columns) {
       const unread = unreadIdsByColumn.get(col.name) ?? new Set<number>()
@@ -1224,12 +1207,6 @@ export function App() {
         if (unread.has(e.id)) fresh.push(e)
         else past.push(e)
       }
-      // Sort each slice. ``[...arr].sort`` so we don't mutate the
-      // upstream ``columns[].entries`` array (which would also
-      // affect ``unreadIdsByColumn``'s iteration order on the
-      // next render).
-      fresh.sort(byNewest)
-      past.sort(byNewest)
       out.set(col.name, { new: fresh, history: past })
     }
     return out
@@ -1362,8 +1339,8 @@ export function App() {
     }
   }, [])
 
-  // Wipe every namespaced localStorage key and reload. Wired
-  // through to the Drawer's "Clear local state" button. A full
+  // Wipe every namespaced localStorage key and the reading-state
+  // preferences, then reload. Settings → Reset's button. A full
   // page reload (rather than local state reset + re-render)
   // because every component has its own state mirrors; rebuilding
   // them inline is more code than ``location.reload()`` and
@@ -1387,21 +1364,17 @@ export function App() {
       // Quota / private-mode — best effort; the reload still
       // happens and re-fetches everything.
     }
-    // Server-backed preferences need an explicit reset too --
+    // Server-backed reading state needs an explicit reset too --
     // the localStorage wipe above only affects what's still
-    // on this device. We DELETE every per-user preference
-    // key, then reload. The next mount's GET will see an
-    // empty server and the provider initializes to defaults.
-    // The eight singleton + per-column keys cover every
-    // preference the provider exposes. ``Promise.allSettled``
-    // so a single failure doesn't block the rest of the
-    // reset (the reload happens regardless).
-    const allKeys: string[] = [
-      PREFERENCE_KEYS.hiddenEntries,
-      PREFERENCE_KEYS.starredEntries,
-      PREFERENCE_KEYS.filterPresets,
-      PREFERENCE_KEYS.historyGroupBy,
-    ]
+    // on this device. We DELETE the read marks, last-viewed
+    // times, column prefs and section folds (every per-column
+    // row), plus the History grouping, then reload; the next
+    // mount's GET reads what is left. Saves, hides, votes and
+    // saved views are kept: they are the user's choices, not
+    // state, and a Reset that took them could not be undone.
+    // ``Promise.allSettled`` so a single failure doesn't block
+    // the rest of the reset (the reload happens regardless).
+    const allKeys: string[] = [PREFERENCE_KEYS.historyGroupBy]
     // Per-column keys: the keys we know about from the
     // current state plus the four per-column kinds.
     const perColumnKinds = [
@@ -1454,6 +1427,39 @@ export function App() {
       cancelled = true
     }
   }, [])
+
+  // The AI status: once signed in, again whenever Settings closes (the
+  // AI tab may have just set a provider up) and when the app comes back
+  // to the front. Only the latest answer counts. A failed check is null,
+  // which shows the normal buttons; Generate then reports the problem.
+  const llmStatusSeqRef = useRef(0)
+  const loadLlmStatus = useCallback(() => {
+    const seq = ++llmStatusSeqRef.current
+    api
+      .llmStatus()
+      .then((s) => {
+        if (seq === llmStatusSeqRef.current) setLlmConfigured(s.configured)
+      })
+      .catch(() => {
+        if (seq === llmStatusSeqRef.current) setLlmConfigured(null)
+      })
+  }, [])
+  const signedIn = authProbed && (oidcDisabled || user !== null)
+  useEffect(() => {
+    if (!signedIn) return
+    loadLlmStatus()
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') loadLlmStatus()
+    }
+    document.addEventListener('visibilitychange', onVisibility)
+    return () => document.removeEventListener('visibilitychange', onVisibility)
+  }, [signedIn, loadLlmStatus])
+  const settingsWasOpenRef = useRef(settingsOpen)
+  useEffect(() => {
+    const was = settingsWasOpenRef.current
+    settingsWasOpenRef.current = settingsOpen
+    if (was && !settingsOpen && signedIn) loadLlmStatus()
+  }, [settingsOpen, signedIn, loadLlmStatus])
 
   // Visibility-aware polling. The interval only runs while the tab
   // is visible; on return we force a refresh so the user sees fresh
@@ -1950,29 +1956,15 @@ export function App() {
     }
   }, [setStarredEntries])
 
-  // Apply a saved preset: replace the active sources filter and
-  // per-column prefs with the preset's values. A no-op when the
-  // preset's data is empty (matches "all sources" / "default
-  // prefs" semantically).
-  //
-  // ``columnPrefs`` is a per-column map keyed by source id; the
-  // provider's setter is per-column, so we apply each one. (The
-  // number of columns a preset touches is small -- typically
-  // 1-5 -- so the per-column PUTs are a non-issue.)
+  // Apply a saved preset: replace the active sources filter. The
+  // per-column prefs a preset captured are no longer applied: they
+  // would overwrite the tabs' Newest | Best (and, later, their time
+  // window) every time a chip is tapped. ``savePreset`` and
+  // ``updatePreset`` still capture them, so the stored presets keep
+  // their shape for an older build, until custom tabs replace presets.
   const applyPreset = useCallback((preset: FilterPreset) => {
     setActiveSources(new Set(preset.activeSources))
-    // ``preset.columnPrefs`` round-trips through JSON; the
-    // object is structurally a ``ColumnPrefs`` but the
-    // server can't enforce that. Cast through ``unknown``
-    // so the structural shape lands in
-    // ``ColumnPrefsValue`` without an extra validator
-    // (the values are still validated by ``applyPreset``'s
-    // own consumer -- the Column component's prefs popover
-    // -- and a malformed value just becomes a no-op).
-    for (const [columnId, prefs] of Object.entries(preset.columnPrefs)) {
-      setColumnPrefs(columnId, prefs as unknown as ColumnPrefsValue)
-    }
-  }, [setColumnPrefs])
+  }, [])
 
   // Save the current view as a preset. Returns the new preset
   // id so the caller can show a "Saved" toast.
@@ -2153,7 +2145,8 @@ export function App() {
         // Mirrors the star button's onClick (Card.tsx) — the ranker
         // needs this event regardless of input path, or the
         // preference vector never learns from keyboard-driven saves.
-        recordImmediate({ entry_id: selectedCardId, type: 'bookmark' })
+        // Only a save records it: unsaving is not a save.
+        if (!wasStarred) recordImmediate({ entry_id: selectedCardId, type: 'bookmark' })
         toggleStarEntry(selectedCardId)
         toast(
                           wasStarred
@@ -2791,14 +2784,25 @@ export function App() {
             >
               {refreshing ? '…' : 'Refresh'}
             </button>
-            <button
-              onClick={() => void triggerBriefGenerate(briefTone, setError)}
-              disabled={generatingBrief}
-              className="min-h-[44px] -my-1.5 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
-              title="Generate today's brief now"
-            >
-              {generatingBrief ? '…' : 'Brief'}
-            </button>
+            {llmConfigured === false ? (
+              <button
+                type="button"
+                data-brief-action="set-up-ai"
+                onClick={() => openSettings('llm')}
+                className="min-h-[44px] -my-1.5 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated whitespace-nowrap"
+              >
+                Brief needs an AI provider · Set up
+              </button>
+            ) : (
+              <button
+                onClick={() => void triggerBriefGenerate(briefTone, setError)}
+                disabled={generatingBrief}
+                className="min-h-[44px] -my-1.5 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated disabled:opacity-40"
+                title="Generate today's brief now"
+              >
+                {generatingBrief ? '…' : 'Brief'}
+              </button>
+            )}
             {user && <UserBadge user={user} onSignedOut={() => window.location.reload()} />}
           </div>
         </div>
@@ -2866,6 +2870,8 @@ export function App() {
             tone={briefTone}
             onToneChange={setBriefTone}
             triggerGenerate={triggerBriefGenerate}
+            llmConfigured={llmConfigured}
+            onOpenSettings={openSettings}
           />
         </div>
       )}
@@ -3043,6 +3049,7 @@ export function App() {
                   <div key={col.name} ref={setColumnRef(col.name)} className="contents">
                     <Column
                       name={col.name}
+                      tabKey={col.key}
                       sections={sectionsByColumn.get(col.name) ?? { new: [], history: [] }}
                       sourcesById={sourcesById}
                       sourcesByName={sourcesByName}
@@ -3084,7 +3091,7 @@ export function App() {
                       starredSet={starredSet}
                       onVoteEntry={setEntryVote}
                       votedMap={votedMap}
-                      prefs={columnPrefs[col.name] ?? DEFAULT_PREFS}
+                      prefs={prefsFor(col)}
                       onPrefsChange={(next) => setPrefsFor(col.name, next)}
                       totalCount={col.totalCount}
                       categoriesBySourceId={categoriesBySourceId}
@@ -3187,6 +3194,8 @@ export function App() {
                   tone={briefTone}
                   onToneChange={setBriefTone}
                   triggerGenerate={triggerBriefGenerate}
+                  llmConfigured={llmConfigured}
+                  onOpenSettings={openSettings}
                   startExpanded
                 />
               ) : (
@@ -3196,6 +3205,7 @@ export function App() {
                   key={phoneCol.key}
                   scrollerRef={setPhoneScroller}
                   name={phoneCol.name}
+                  tabKey={phoneCol.key}
                   sections={sectionsByColumn.get(phoneCol.name) ?? { new: [], history: [] }}
                   sourcesById={sourcesById}
                   sourcesByName={sourcesByName}
@@ -3239,7 +3249,7 @@ export function App() {
                   starredSet={starredSet}
                   onVoteEntry={setEntryVote}
                   votedMap={votedMap}
-                  prefs={columnPrefs[phoneCol.name] ?? DEFAULT_PREFS}
+                  prefs={prefsFor(phoneCol)}
                   onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
                   totalCount={phoneCol.totalCount}
                   categoriesBySourceId={categoriesBySourceId}

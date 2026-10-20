@@ -141,6 +141,34 @@ const settingsState = (tab, name = `settings-${tab}`) => ({
   setup: async ({ page }) => waitForSettingsTab(page),
 })
 
+function briefNeedsAiState(name, { brief, collapse }) {
+  return {
+    name,
+    widths: [390, 320, 312],
+    before: async ({ page }) => {
+      const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+      await page.route((u) => new URL(u).pathname === '/api/llm/status', (route) =>
+        route.fulfill(json({ configured: false, backend: null, model: null })),
+      )
+      const rows = brief
+        ? [{ id: 1, generated_at: new Date(F.NOW - 2 * 3600000).toISOString(), tone: 'terse', content: 'TODAY IN ONE SENTENCE\nA quiet day.\nHIGHLIGHTS\n- Nothing much happened.', delivered_at: null, meta: null }]
+        : []
+      await page.route((u) => new URL(u).pathname === '/api/brief/latest', (route) => route.fulfill(json(rows)))
+    },
+    setup: async ({ page }) => {
+      await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').first().click()
+      const setUp = page.locator(`${MOBILE_MAIN} [data-brief-action="set-up-ai"]`)
+      if (brief) await page.locator(`${MOBILE_MAIN} header[role="button"]`).waitFor({ state: 'visible' })
+      await setUp.waitFor({ state: 'visible' })
+      if (collapse) {
+        await page.locator(`${MOBILE_MAIN} [aria-expanded="true"][role="button"] > span[aria-hidden="true"]`).first().click()
+        await page.locator(`${MOBILE_MAIN} [aria-expanded="false"][role="button"]`).waitFor({ state: 'visible' })
+        await setUp.waitFor({ state: 'visible' })
+      }
+    },
+  }
+}
+
 const STATES = [
   {
     name: 'dashboard',
@@ -322,7 +350,7 @@ const STATES = [
     },
   }),
   {
-    // PR7: a column's ⋯ popover on the phone (sort, minimum score, age).
+    // PR7: a column's ⋯ popover on the phone (Newest | Best from PR1c, age).
     name: 'column-popover',
     setup: async ({ page }) => {
       await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').filter({ hasText: /^News/ }).first().click()
@@ -391,6 +419,11 @@ const STATES = [
       await page.locator(`${MOBILE_MAIN} [data-brief-action="generate"]`).waitFor({ state: 'visible' })
     },
   },
+  // PR1c: no AI provider. The phone's Brief opens expanded with no
+  // brief; the second state has a brief and is collapsed. The 44px
+  // "Brief needs an AI provider · Set up" must stay on one line.
+  briefNeedsAiState('brief-needs-ai', { brief: false, collapse: false }),
+  briefNeedsAiState('brief-needs-ai-compact', { brief: true, collapse: true }),
 ]
 
 // Behaviour flows (flows.cjs, from PR4) use the same shape as STATES, usually

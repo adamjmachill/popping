@@ -432,6 +432,54 @@ async function away(page, minutes) {
   await setHidden(page, false)
 }
 
+// --- PR1c: preferences and the brief -----------------------------------------
+
+// A brief the mock's /api/brief/latest can answer with.
+const BRIEF = {
+  id: 1,
+  generated_at: new Date(F.NOW - 2 * 3600000).toISOString(),
+  tone: 'terse',
+  content: 'TODAY IN ONE SENTENCE\nA quiet day.\nHIGHLIGHTS\n- Nothing much happened.',
+  delivered_at: null,
+  meta: null,
+}
+
+// Writes `rows` ({ key: value }) into the mock's preference store
+// through the page, then reloads, so the app reads them the way it
+// would from the server.
+async function putPrefs(page, rows) {
+  await page.evaluate(async (r) => {
+    for (const [key, value] of Object.entries(r)) {
+      await fetch(`/api/preferences/${encodeURIComponent(key)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value }),
+      })
+    }
+  }, rows)
+  await page.reload()
+  await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
+}
+
+// Every PUT and DELETE to /api/preferences/<key> from now on, as
+// { method, key, value }; they go on to the mock.
+async function prefWrites(page) {
+  const out = []
+  await page.route(
+    (u) => new URL(u).pathname.startsWith('/api/preferences/'),
+    (route) => {
+      const req = route.request()
+      const method = req.method()
+      if (method === 'PUT' || method === 'DELETE') {
+        const key = decodeURIComponent(new URL(req.url()).pathname.slice('/api/preferences/'.length))
+        out.push({ method, key, value: method === 'PUT' ? (req.postDataJSON() || {}).value : undefined })
+      }
+      return route.fallback()
+    },
+  )
+  return out
+}
+
 module.exports = [
   flow('flow-fj-youtube-handle', {
     before: async ({ page }) => {
@@ -1362,6 +1410,229 @@ module.exports = [
     },
   }),
 
+  // --- PR1c: Newest | Best, Reset scope, Brief needs an AI provider ------------
+
+  // Newest | Best reorders the tab, is stored as the tab's row, and a
+  // saved view's chip no longer overwrites it. For You opens on Best,
+  // which is the order the server sent.
+  dashFlow('flow-sort-best', {
+    run: async ({ page, fail, shot }) => {
+      // A saved view that captured News as Newest (what an older build's
+      // chip would have put back) and no source filter.
+      await putPrefs(page, {
+        filter_presets: [{ id: 'p-1', name: 'Morning', activeSources: [], columnPrefs: { news: { sort: 'newest', minScore: 0, maxAgeHours: null } } }],
+      })
+      const writes = await prefWrites(page)
+      const ids = () => page.locator(`${MOBILE_MAIN} article[data-card-id]`).evaluateAll((els) => els.map((el) => Number(el.getAttribute('data-card-id'))))
+      const entry = (id) => F.ENTRIES.find((e) => e.id === id)
+      const byTime = (list) => [...list].sort((a, b) => Date.parse(entry(b).published_at) - Date.parse(entry(a).published_at))
+      const byScore = (list) => [...list].sort((a, b) => entry(b).composite_score - entry(a).composite_score)
+
+      // For You opens on Best: the server's order, untouched.
+      if (!/^for you/i.test(await selectedTab(page))) return fail('SORT', `the phone opened on ${JSON.stringify(await selectedTab(page))}`)
+      const fy = await ids()
+      const fyServer = F.FOR_YOU.map((e) => e.id).filter((id) => fy.includes(id))
+      if (JSON.stringify(fy) !== JSON.stringify(fyServer)) fail('SORT', `For You shows ${fy}, the server sent ${fyServer}`)
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      const pressed = (v) => page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-sort="${v}"]`).getAttribute('aria-pressed')
+      if ((await pressed('best')) !== 'true') fail('SORT', 'For You does not show Best as its sort')
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+
+      await tap(page, phoneTab(page, /^news/i))
+      const before = await ids()
+      if (before.length < 5) return fail('SORT', `News shows ${before.length} stories`)
+      if (JSON.stringify(before) !== JSON.stringify(byTime(before))) fail('SORT', `News opens as ${before}, not newest first`)
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      if ((await pressed('newest')) !== 'true') fail('SORT', 'News does not show Newest as its sort')
+      if (await page.locator(`${MOBILE_MAIN} [data-column-popover] input[type="range"]`).count()) fail('SORT', 'the minimum score slider is still there')
+      await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-sort="best"]`))
+      if (!(await waitFor(async () => JSON.stringify(await ids()) === JSON.stringify(byScore(before)), 3000))) {
+        return fail('SORT', `after Best, News shows ${await ids()}, expected ${byScore(before)}`)
+      }
+      if ((await pressed('best')) !== 'true') fail('SORT', 'Best is not shown as chosen')
+      await shot('best')
+      if (!(await waitFor(() => writes.some((w) => w.key === 'column_prefs:news'), 3000))) return fail('SORT', 'Best sent no column_prefs PUT')
+      const row = writes.find((w) => w.key === 'column_prefs:news')
+      if (row.method !== 'PUT' || !row.value || row.value.sort !== 'best') fail('SORT', `the News row was written as ${JSON.stringify(row)}`)
+
+      // The chip changes the filter only.
+      writes.length = 0
+      await tap(page, page.locator('[role="toolbar"][aria-label="saved filter presets"] button', { hasText: 'Morning' }).first())
+      await sleep(1200)
+      const prefsPuts = writes.filter((w) => w.key.startsWith('column_prefs:'))
+      if (prefsPuts.length) fail('SORT', `the chip wrote ${JSON.stringify(prefsPuts)}`)
+      const after = await ids()
+      if (JSON.stringify(after) !== JSON.stringify(byScore(before))) fail('SORT', `after the chip, News shows ${after}, not Best`)
+
+      // Saved has no sort to pick.
+      await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().locator('button[aria-label="save for later"]'))
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('SORT', 'no Saved tab after saving')
+      await tap(page, phoneTab(page, /^saved/i))
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      if (await page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-sort]`).count()) fail('SORT', 'Saved offers Newest | Best')
+    },
+  }),
+
+  // With no AI provider, every Generate and Regenerate (and the desktop
+  // header's Brief) reads "Brief needs an AI provider · Set up"; Set up
+  // opens Settings › AI, and closing Settings after setting one up
+  // brings the buttons back without a reload. A save records `bookmark`,
+  // an unsave doesn't.
+  dashFlow('flow-brief-needs-ai', {
+    before: async ({ page }) => {
+      page._llm = { configured: false, brief: false, statusGets: 0 }
+      const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+      await page.route(
+        (u) => new URL(u).pathname === '/api/llm/status',
+        (route) => {
+          page._llm.statusGets++
+          return route.fulfill(json({ configured: page._llm.configured, backend: null, model: null }))
+        },
+      )
+      await page.route(
+        (u) => new URL(u).pathname === '/api/brief/latest',
+        (route) => route.fulfill(json(page._llm.brief ? [BRIEF] : [])),
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      const setUp = page.locator(`${MOBILE_MAIN} [data-brief-action="set-up-ai"]`)
+      const action = (name) => page.locator(`${MOBILE_MAIN} [data-brief-action="${name}"]`)
+      const label = 'Brief needs an AI provider · Set up'
+      const check = async (state, gone) => {
+        if (!(await waitFor(() => setUp.isVisible(), 3000))) {
+          fail('BRIEF-AI', `${state}: no Set up button`)
+          return false
+        }
+        const text = ((await setUp.textContent()) || '').trim()
+        if (text !== label) fail('BRIEF-AI', `${state}: the button reads ${JSON.stringify(text)}`)
+        const h = (await setUp.boundingBox())?.height ?? 0
+        if (h < 43.5) fail('BRIEF-AI', `${state}: the button is ${h}px tall`)
+        if (await action(gone).count()) fail('BRIEF-AI', `${state}: ${gone} is still there`)
+        return true
+      }
+      // The chevron: the middle of the header may be a button of its own.
+      const collapse = () => tap(page, page.locator(`${MOBILE_MAIN} [aria-expanded="true"][role="button"] > span[aria-hidden="true"]`).first())
+
+      // 1. No brief: the phone's Brief starts expanded, then collapsed.
+      await tap(page, phoneTab(page, /^brief/i))
+      if (!(await check('no brief, expanded', 'generate'))) return
+      await shot('no-brief')
+      await collapse()
+      if (!(await check('no brief, collapsed', 'generate-compact'))) return
+
+      // 2. One brief: both Regenerate states.
+      page._llm.brief = true
+      await tap(page, phoneTab(page, /^for you/i))
+      await tap(page, phoneTab(page, /^brief/i))
+      if (!(await waitFor(() => page.locator(`${MOBILE_MAIN} header[role="button"]`).isVisible(), 3000))) return fail('BRIEF-AI', 'the brief did not load')
+      if (!(await check('a brief, expanded', 'regenerate'))) return
+      await collapse()
+      if (!(await check('a brief, collapsed', 'regenerate-compact'))) return
+
+      // 3. Set up opens Settings › AI; a provider is set up there; Done.
+      await tap(page, setUp)
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      const tab = await page.evaluate(() => new URL(location.href).searchParams.get('tab'))
+      if (tab !== 'llm') fail('BRIEF-AI', `Set up opened Settings on ${JSON.stringify(tab)}`)
+      page._llm.configured = true
+      await closeSettings(page)
+      if (!(await waitFor(() => action('regenerate-compact').isVisible(), 3000))) return fail('BRIEF-AI', 'Regenerate did not come back after closing Settings')
+      if (await setUp.count()) fail('BRIEF-AI', 'Set up stayed after closing Settings')
+
+      // 4. Desktop: the header's Brief, after the app comes back to the
+      // front with the provider gone again.
+      page._llm.configured = false
+      const gets = page._llm.statusGets
+      await setHidden(page, true)
+      await setHidden(page, false)
+      if (!(await waitFor(() => page._llm.statusGets > gets, 3000))) return fail('BRIEF-AI', 'coming back did not read the AI status again')
+      await page.setViewportSize({ width: 1280, height: 800 })
+      const header = page.locator('header[data-app-header] [data-brief-action="set-up-ai"]')
+      if (!(await waitFor(() => header.isVisible(), 5000))) return fail('BRIEF-AI', 'the desktop header has no Set up')
+      if (((await header.textContent()) || '').trim() !== label) fail('BRIEF-AI', `the header reads ${JSON.stringify(await header.textContent())}`)
+      if (await page.locator('header[data-app-header]').getByRole('button', { name: 'Brief', exact: true }).count()) fail('BRIEF-AI', 'the header still offers Brief')
+      await header.click()
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      if ((await page.evaluate(() => new URL(location.href).searchParams.get('tab'))) !== 'llm') fail('BRIEF-AI', 'the header Set up did not open Settings › AI')
+      page._llm.configured = true
+      await closeSettings(page)
+      if (!(await waitFor(() => page.locator('header[data-app-header]').getByRole('button', { name: 'Brief', exact: true }).isVisible(), 3000))) fail('BRIEF-AI', 'the header Brief did not come back')
+    },
+  }),
+
+  // A save records `bookmark`; an unsave (☆ again, or the menu's Unsave)
+  // doesn't.
+  dashFlow('flow-bookmark-on-save', {
+    before: async ({ page }) => {
+      page._events = []
+      await page.route(
+        (u) => /^\/api\/interactions(\/batch)?$/.test(new URL(u).pathname),
+        (route) => {
+          const req = route.request()
+          if (req.method() === 'POST') {
+            const b = req.postDataJSON() || {}
+            for (const e of b.events || [b]) page._events.push(e)
+          }
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, fail }) => {
+      await tap(page, phoneTab(page, /^news/i))
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      const bookmarks = () => page._events.filter((e) => e.type === 'bookmark' && e.entry_id === id).length
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      if (!(await waitFor(() => bookmarks() === 1, 3000))) return fail('BOOKMARK', `a save sent ${bookmarks()} bookmark events, expected 1`)
+      await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="remove from saved"]`))
+      await sleep(800)
+      if (bookmarks() !== 1) fail('BOOKMARK', `an unsave sent a bookmark (${bookmarks()} in all)`)
+    },
+  }),
+
+  // Reset takes the reading state (read marks, last visits, tab prefs,
+  // section folds, History grouping) and keeps saves, hides, votes and
+  // saved views.
+  dashFlow('flow-reset-keeps-saves', {
+    run: async ({ page, fail }) => {
+      await putPrefs(page, {
+        starred_entries: [103],
+        hidden_entries: [104],
+        voted_entries: { 105: 'up' },
+        filter_presets: [{ id: 'p-1', name: 'Morning', activeSources: [], columnPrefs: {} }],
+        history_group_by: 'none',
+        'read_entries:news': [101],
+        'last_viewed:news': new Date(F.NOW).toISOString(),
+        'column_prefs:news': { sort: 'best', minScore: 0, maxAgeHours: null },
+        'column_sections:news': { newCollapsed: false, historyCollapsed: true },
+      })
+      const writes = await prefWrites(page)
+      await page.evaluate((u) => {
+        history.pushState({ popping: 'settings' }, '', u)
+        dispatchEvent(new PopStateEvent('popstate'))
+      }, '/?view=settings&tab=reset')
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      await page.locator(SETTINGS).getByRole('button', { name: 'Reset reading state', exact: true }).click()
+      const loaded = page.waitForEvent('load')
+      await page.locator(SETTINGS).getByRole('button', { name: 'Reset', exact: true }).click()
+      await loaded
+      await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
+      const deleted = writes.filter((w) => w.method === 'DELETE').map((w) => w.key)
+      for (const k of ['starred_entries', 'hidden_entries', 'filter_presets', 'voted_entries']) {
+        if (deleted.includes(k)) fail('RESET', `Reset deleted ${k}`)
+      }
+      for (const k of ['read_entries:news', 'last_viewed:news', 'column_prefs:news', 'column_sections:news', 'history_group_by']) {
+        if (!deleted.includes(k)) fail('RESET', `Reset kept ${k} (deleted: ${JSON.stringify(deleted)})`)
+      }
+      const left = await page.evaluate(async () => ((await (await fetch('/api/preferences')).json()).items || []).map((r) => r.key).sort())
+      const kept = ['filter_presets', 'hidden_entries', 'starred_entries', 'voted_entries']
+      if (JSON.stringify(left) !== JSON.stringify(kept)) fail('RESET', `after Reset the server holds ${JSON.stringify(left)}`)
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) fail('RESET', 'no Saved tab after Reset')
+    },
+  }),
+
   dashFlow('flow-fn-quiet-poll', {
     before: async ({ page }) => {
       await installClock(page)
@@ -1583,10 +1854,10 @@ module.exports = [
     run: async ({ page, fail }) => {
       let dialogs = 0
       page.on('dialog', () => dialogs++)
-      await page.locator(SETTINGS).getByRole('button', { name: 'Clear local state', exact: true }).click()
+      await page.locator(SETTINGS).getByRole('button', { name: 'Reset reading state', exact: true }).click()
       const keep = page.locator(SETTINGS).getByRole('button', { name: 'Keep', exact: true })
-      if (!(await keep.isVisible())) return fail('FZ', 'no inline confirm after Clear local state')
-      if (!(await page.locator(SETTINGS).getByRole('button', { name: 'Clear', exact: true }).isVisible())) fail('FZ', 'the confirm has no Clear')
+      if (!(await keep.isVisible())) return fail('FZ', 'no inline confirm after Reset reading state')
+      if (!(await page.locator(SETTINGS).getByRole('button', { name: 'Reset', exact: true }).isVisible())) fail('FZ', 'the confirm has no Reset')
       await keep.click()
       if (await keep.count()) fail('FZ', 'Keep did not close the confirm')
       if (dialogs) fail('FZ', `a browser dialog opened ${dialogs} time(s)`)

@@ -780,8 +780,9 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
         onClick: () => {
           // Same engagement type as the star button — keeps
           // the ranker signal consistent regardless of input
-          // path (button vs. context menu vs. keyboard ``s``).
-          recordImmediate({ entry_id: entry.id, type: 'bookmark' })
+          // path (button vs. context menu vs. keyboard ``b``).
+          // Only a save records it: unsaving is not a save.
+          if (!starred) recordImmediate({ entry_id: entry.id, type: 'bookmark' })
           onStar()
         },
       })
@@ -1426,8 +1427,9 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                   e.preventDefault()
                   e.stopPropagation()
                   // ``bookmark`` is the engagement_events type that
-                  // matches the ranker's existing "save" signal.
-                  recordImmediate({ entry_id: entry.id, type: 'bookmark' })
+                  // matches the ranker's existing "save" signal, so
+                  // only a save records it, never an unsave.
+                  if (!starred) recordImmediate({ entry_id: entry.id, type: 'bookmark' })
                   onStar()
                 }}
                 aria-label={starred ? 'remove from saved' : 'save for later'}
