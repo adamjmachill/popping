@@ -47,13 +47,13 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #40 · Hide a story on the phone and, within a few seconds, save a different story on the laptop; then force-quit and reopen the phone app and reload the laptop. Pass: on both, the hidden story stays hidden and the saved one stays saved.
 - [ ] #40 · Save a story on the phone and switch to another app straight away; force-quit Popping from the app switcher and reopen it. Pass: the story is still in Saved, on the laptop too.
 - [ ] #40 · In the Settings app, turn on airplane mode. Come back to Popping and save a story, then switch to the Settings app, turn airplane mode off, wait for Wi-Fi to reconnect, and switch back to Popping. Pass: after a reload of the laptop tab, or its next poll (up to a minute), the story shows as saved.
-- [ ] #<pr> · On the phone, tap Edit at the end of the tab strip, tap ↑ on News, then Done. Pass: News moves one place left in the strip; after a force-quit and reopen, and on the laptop after a reload, the strip and the desktop columns keep the new order.
-- [ ] #<pr> · Tap Edit, then Move to top on the last tab, then Done. Pass: that tab is now right after Brief.
-- [ ] #<pr> · Tap Edit, turn off Show for one category, then Done. Pass: its tab is gone from the strip, from Menu → Jump to column and from the laptop's columns, and its stories still show in For You; turning Show back on puts the tab back where it was.
-- [ ] #<pr> · Open Saved and remove its only story. Pass: Saved stays in the strip and says "No stories yet", and the phone stays on it. This replaces #36's line about Saved moving the phone.
-- [ ] #<pr> · After moving any tab, give a feed a new category (Menu → Settings → Feeds, open the feed, New category). Pass: the new category's tab is last in the strip, and the feed's category list follows the tab order.
-- [ ] #<pr> · With VoiceOver on, open Edit and tap ↑ on a tab. Pass: VoiceOver reads the tab's name and new place, such as "News, 5 of 9", and focus stays on that ↑.
-- [ ] #<pr> · Turn on Airplane Mode, force-quit the home-screen app and open it again. Pass: the red error line shows, and no tab offers "Add your first feed".
+- [ ] #42 · On the phone, tap Edit at the end of the tab strip, tap ↑ on News, then Done. Pass: News moves one place left in the strip; after a force-quit and reopen, and on the laptop after a reload, the strip and the desktop columns keep the new order.
+- [ ] #42 · Tap Edit, then Move to top on the last tab, then Done. Pass: that tab is now right after Brief.
+- [ ] #42 · Tap Edit, turn off Show for one category, then Done. Pass: its tab is gone from the strip, from Menu → Jump to column and from the laptop's columns, and its stories still show in For You; turning Show back on puts the tab back where it was.
+- [ ] #42 · Open Saved and remove its only story. Pass: Saved stays in the strip and says "No stories yet", and the phone stays on it. This replaces #36's line about Saved moving the phone.
+- [ ] #42 · After moving any tab, give a feed a new category (Menu → Settings → Feeds, open the feed, New category). Pass: the new category's tab is last in the strip, and the feed's category list follows the tab order.
+- [ ] #42 · With VoiceOver on, open Edit and tap ↑ on a tab. Pass: VoiceOver reads the tab's name and new place, such as "News, 5 of 9", and focus stays on that ↑.
+- [ ] #42 · Turn on Airplane Mode, force-quit the home-screen app and open it again. Pass: the red error line shows, and no tab offers "Add your first feed".
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
