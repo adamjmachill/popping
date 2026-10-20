@@ -8,11 +8,16 @@ reimplementing "search a page for <link rel=alternate>" ourselves — well-teste
 dependency (added in ``app.article_extract`` for full-article LLM
 summaries).
 
+Which sitemaps are worth reading and which of their URLs could be
+articles is decided by ``app.article_detect`` (``order_sitemaps``,
+``url_ok``).
+
 Network access: every request goes through
-``app.article_extract.fetch_html``, which applies the SSRF guard to the
-URL and to every redirect hop. trafilatura is used only to parse what we
-fetched (``determine_feed``); it never fetches anything itself, because
-its own downloader has no hook for that guard.
+``app.article_extract.fetch_html`` (or ``fetch_html_checked``, its
+raising form for the sitemap crawl), which applies the SSRF guard to
+the URL and to every redirect hop. trafilatura is used only to parse
+what we fetched (``determine_feed``); it never fetches anything itself,
+because its own downloader has no hook for that guard.
 """
 
 from __future__ import annotations
@@ -23,10 +28,18 @@ import logging
 import re
 from urllib.parse import urlparse
 
+import httpx
 from defusedxml import DefusedXmlException
 from defusedxml import ElementTree as DefusedET
 
-from app.article_extract import fetch_html
+from app.article_detect import Candidate, order_sitemaps, same_site, url_ok
+from app.article_extract import (
+    NETWORK_ERRORS,
+    FetchRefusedError,
+    fetch_html,
+    fetch_html_checked,
+    most_telling_error,
+)
 from app.sources.rss import fetch_rss
 from app.url_safety import check_url_safe
 
@@ -196,44 +209,84 @@ async def discover_feed_url(page_url: str) -> str | None:
     return None
 
 
-async def discover_sitemap_urls(
-    page_url: str, limit: int = _MAX_SITEMAP_URLS, path_prefix: str | None = None,
-) -> list[str]:
-    """Return up to ``limit`` article-page URLs from ``page_url``'s
-    sitemap, or an empty list if none is found or discovery fails.
+async def discover_sitemap_entries(
+    page_url: str,
+    limit: int = _MAX_SITEMAP_URLS,
+    path_prefix: str | None = None,
+    *,
+    headers: dict | None = None,
+    raise_errors: bool = False,
+) -> list[Candidate]:
+    """Return up to ``limit`` article candidates from ``page_url``'s
+    sitemap, newest first, as ``Candidate(url, published, title)``.
 
-    URLs come back newest first, dated by each entry's ``<lastmod>``
-    or, failing that, a ``/YYYY/MM/`` style date in the URL itself;
-    undated URLs follow in sitemap order. ``path_prefix`` (e.g.
-    ``/news/``) keeps only URLs under that path, so a section of a
-    large site doesn't get buried by the rest of its sitemap.
-    Used as the "this site has no native feed" fallback when adding a
-    ``type="generic_scrape"`` source — see
-    ``app.sources.generic_scrape``.
+    ``published`` is the entry's best date: a news sitemap's
+    publication date, else its ``<lastmod>``, else a ``/YYYY/MM/`` style
+    date in the URL itself; undated URLs follow in sitemap order.
+    ``title`` is a news sitemap's title, else None.
 
-    Subject to the same ``_TRAFILATURA_BUDGET`` as the feed
-    discovery path: a hung sitemap host returns ``[]``, not
-    an unbounded wait, so the Add Custom endpoint can't hang on
-    this hop either.
+    Only entries that could be articles are kept
+    (``article_detect.url_ok``), and only the sitemaps worth reading
+    are fetched, best first (``article_detect.order_sitemaps``: news,
+    then posts; never tag, author, product or media sitemaps, and a page
+    sitemap only when there is nothing else). ``path_prefix`` (e.g.
+    ``/news/``) keeps only URLs under that path, so a section of a large
+    site doesn't get buried by the rest of its sitemap. ``headers`` are
+    sent with every request (a feed's ``custom_headers``).
+
+    Used by the ``type="generic_scrape"`` plugin (see
+    ``app.sources.generic_scrape.plan_candidates``) and, through
+    ``discover_sitemap_urls``, by ``/auto``.
+
+    Subject to the same ``_TRAFILATURA_BUDGET`` as the feed discovery
+    path. By default nothing raises: a hung sitemap host, a refusal or
+    any other failure returns ``[]``, so the Add Custom endpoint can't
+    hang or fail on this hop. With ``raise_errors`` (only a website
+    feed's own fetch sets it), an empty crawl raises the failure that
+    explains it (see ``_crawl_sitemaps``), and running out of budget
+    raises ``asyncio.TimeoutError``, which the scheduler records as
+    ``[network]``.
     """
     safe, reason = check_url_safe(page_url)
     if not safe:
         logger.info("feed_autodiscovery: %s rejected by URL safety check (%s)", page_url, reason)
         return []
     try:
-        urls = await asyncio.wait_for(
-            _crawl_sitemaps(page_url, limit, path_prefix), _TRAFILATURA_BUDGET
+        entries = await asyncio.wait_for(
+            _crawl_sitemaps(
+                page_url, limit, path_prefix, headers=headers, raise_errors=raise_errors
+            ),
+            _TRAFILATURA_BUDGET,
         )
     except asyncio.TimeoutError:
         logger.info(
             "feed_autodiscovery: sitemap crawl for %s hit the %ss budget",
             page_url, _TRAFILATURA_BUDGET,
         )
+        if raise_errors:
+            raise
         return []
     except Exception as exc:  # noqa: BLE001
+        if raise_errors:
+            raise
         logger.info("feed_autodiscovery: sitemap crawl failed for %s: %s", page_url, exc)
         return []
-    return urls[:limit]
+    return entries[:limit]
+
+
+async def discover_sitemap_urls(
+    page_url: str,
+    limit: int = _MAX_SITEMAP_URLS,
+    path_prefix: str | None = None,
+    *,
+    headers: dict | None = None,
+) -> list[str]:
+    """``discover_sitemap_entries`` as plain URLs. Never raises: an
+    empty list means no usable sitemap was found. ``/auto`` uses it to
+    decide whether a site with no feed can be added as a
+    ``type="generic_scrape"`` source."""
+    entries = await discover_sitemap_entries(page_url, limit, path_prefix, headers=headers)
+    return [entry.url for entry in entries]
 
 
 # Sitemap crawl limits: how many sitemap documents one discovery may
@@ -246,35 +299,10 @@ _MAX_SITEMAP_COLLECT = 5000
 _GUESSED_SITEMAP_PATHS = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 
 
-def _looks_like_sitemap(url: str) -> bool:
+def looks_like_sitemap(url: str) -> bool:
+    """Whether ``url`` names a sitemap document rather than a page."""
     path = urlparse(url).path.lower()
     return path.endswith((".xml", ".xml.gz", ".txt")) or "sitemap" in path
-
-
-def _site_key(host: str) -> str:
-    """Approximate registrable domain: news.example.com -> example.com,
-    www.bbc.co.uk -> bbc.co.uk. Good enough to keep a site's own
-    subdomains together without a public-suffix list."""
-    host = host.lower().rstrip(".")
-    if host.replace(".", "").isdigit() or ":" in host:  # IP literal
-        return host
-    labels = host.split(".")
-    if len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in {
-        "co", "com", "org", "net", "gov", "ac", "edu"
-    }:
-        return ".".join(labels[-3:])
-    return ".".join(labels[-2:])
-
-
-def _same_site(url: str, host: str) -> bool:
-    return _site_key(urlparse(url).hostname or "") == _site_key(host)
-
-
-def _parse_sitemap(text: str) -> tuple[list[str], list[str]]:
-    """Return (page URLs, nested sitemap URLs) from a sitemap document:
-    an XML urlset, an XML sitemapindex, or a plain-text list."""
-    pages, nested = _parse_sitemap_entries(text)
-    return [loc for loc, _ in pages], [loc for loc, _ in nested]
 
 
 def _local(tag: str) -> str:
@@ -283,27 +311,63 @@ def _local(tag: str) -> str:
 
 def _parse_sitemap_entries(
     text: str,
-) -> tuple[list[tuple[str, str | None]], list[tuple[str, str | None]]]:
-    """Like ``_parse_sitemap`` but keeps each entry's ``<lastmod>``
-    (None when absent): ([(page, lastmod)], [(nested sitemap, lastmod)])."""
+) -> tuple[list[tuple[str, str | None, str | None]], list[tuple[str, str | None]]]:
+    """Read a sitemap document: an XML urlset, an XML sitemapindex, or
+    a plain-text list. Returns ``([(page, date, title)], [(nested
+    sitemap, lastmod)])``.
+
+    A page's ``date`` is a news sitemap's ``<news:publication_date>``,
+    else its ``<lastmod>``; ``title`` is ``<news:title>``. Either is
+    None when absent."""
     try:
         root = DefusedET.fromstring(text.lstrip())
     except (DefusedET.ParseError, ValueError, DefusedXmlException):
         lines = [ln.strip() for ln in text.splitlines()]
-        return [(ln, None) for ln in lines if ln.startswith(("http://", "https://"))], []
-    pages: list[tuple[str, str | None]] = []
+        return [(ln, None, None) for ln in lines if ln.startswith(("http://", "https://"))], []
+    pages: list[tuple[str, str | None, str | None]] = []
     nested: list[tuple[str, str | None]] = []
     is_index = _local(root.tag) == "sitemapindex"
     for entry in root:
-        loc = lastmod = None
+        loc = lastmod = published = title = None
         for child in entry:
             name = _local(child.tag)
             if name == "loc" and child.text:
                 loc = child.text.strip()
             elif name == "lastmod" and child.text:
                 lastmod = child.text.strip()
-        if loc:
-            (nested if is_index else pages).append((loc, lastmod))
+            elif name == "news":
+                for item in child:
+                    item_name = _local(item.tag)
+                    if item_name == "publication_date" and item.text:
+                        published = item.text.strip()
+                    elif item_name == "title" and item.text:
+                        title = item.text.strip()
+        if not loc:
+            continue
+        if is_index:
+            nested.append((loc, lastmod))
+        else:
+            pages.append((loc, published or lastmod, title))
+    return pages, nested
+
+
+def _read_sitemap(
+    text: str, site: str, path_prefix: str | None, room: int,
+) -> tuple[list[tuple[str, str | None, str | None]], list[tuple[str, str | None]]]:
+    """Parse one sitemap document and keep the pages that could be
+    articles on ``site``: under ``path_prefix`` when there is one, and
+    passing ``url_ok``. At most ``room`` pages. Pure and CPU-bound
+    (an XML parse, then a URL test per entry), so ``_crawl_sitemaps``
+    runs it in a thread."""
+    found, nested = _parse_sitemap_entries(text)
+    pages: list[tuple[str, str | None, str | None]] = []
+    for entry in found:
+        if len(pages) >= room:
+            break
+        if path_prefix and not _under_prefix(entry[0], path_prefix):
+            continue
+        if url_ok(entry[0], site):
+            pages.append(entry)
     return pages, nested
 
 
@@ -345,7 +409,9 @@ def _entry_date(url: str, lastmod: str | None) -> dt.datetime | None:
 
 
 def _newest_first(entries: list[tuple[str, str | None]]) -> list[str]:
-    """URLs ordered newest first; undated ones keep their order, last."""
+    """URLs ordered newest first; undated ones keep their order, last.
+    Takes ``(url, lastmod)`` pairs: sitemap pages are projected to them
+    before sorting."""
     dated = [(url, _entry_date(url, lastmod)) for url, lastmod in entries]
     ordered = sorted(
         dated,
@@ -360,49 +426,119 @@ def _under_prefix(url: str, prefix: str) -> bool:
     return path.startswith(prefix) and path.rstrip("/") != prefix.rstrip("/")
 
 
-async def _crawl_sitemaps(page_url: str, limit: int, path_prefix: str | None = None) -> list[str]:
-    """Find article URLs for ``page_url`` from its sitemap(s), using only
-    SSRF-guarded fetches. ``page_url`` may be a sitemap itself or a site
-    URL; for a site URL, robots.txt ``Sitemap:`` lines are tried first,
-    then a few common paths. Returns the newest ``limit`` (see
-    ``discover_sitemap_urls``)."""
+async def _crawl_sitemaps(
+    page_url: str,
+    limit: int,
+    path_prefix: str | None = None,
+    *,
+    headers: dict | None = None,
+    raise_errors: bool = False,
+) -> list[Candidate]:
+    """Find article candidates for ``page_url`` from its sitemap(s),
+    using only SSRF-guarded fetches. ``page_url`` may be a sitemap
+    itself or a site URL; for a site URL, robots.txt ``Sitemap:`` lines
+    are tried first, then a few common paths. Returns the newest
+    ``limit`` (see ``discover_sitemap_entries``).
+
+    A document that fails is skipped and the crawl moves on: robots.txt
+    and the guessed paths 404 on many sites, and a nested sitemap can be
+    gone. With ``raise_errors``, a crawl that found nothing raises the
+    failure that explains it, in this order:
+
+    - the input's own failure, when ``page_url`` is a sitemap: it is
+      the user's address (their ``sitemap_url``), so a 404 there is
+      ``[not found]``;
+    - a refusal, when every sitemap document fetched was refused. A
+      refused robots.txt alone doesn't count, because the guessed paths
+      are still tried;
+    - a network error, when a document couldn't be fetched at all.
+
+    Otherwise it returns ``[]``: the site has no sitemap with articles.
+    """
     parsed = urlparse(page_url)
     host = (parsed.hostname or "").lower()
     origin = f"{parsed.scheme}://{parsed.netloc}"
-    if _looks_like_sitemap(page_url):
+    input_doc: str | None = None
+    own_failure: BaseException | None = None
+    refused: list[FetchRefusedError] = []
+    network: list[BaseException] = []
+    if looks_like_sitemap(page_url):
+        input_doc = page_url
         queue = [page_url]
     else:
-        robots = await fetch_html(f"{origin}/robots.txt", content_types=None) or ""
+        robots = ""
+        try:
+            robots = await fetch_html_checked(
+                f"{origin}/robots.txt", custom_headers=headers, content_types=None
+            ) or ""
+        except FetchRefusedError:
+            # Read as no robots.txt: the guessed paths below still run,
+            # and a refusal counts only if they are refused too.
+            pass
+        except NETWORK_ERRORS as exc:
+            network.append(exc)
         listed = [
             line.split(":", 1)[1].strip()
             for line in robots.splitlines()
             if line.lower().startswith("sitemap:")
         ]
-        queue = listed or [origin + path for path in _GUESSED_SITEMAP_PATHS]
+        queue = order_sitemaps(listed) if listed else [origin + path for path in _GUESSED_SITEMAP_PATHS]
 
     seen: set[str] = set()
-    pages: list[tuple[str, str | None]] = []
+    pages: list[tuple[str, str | None, str | None]] = []
     page_set: set[str] = set()
     fetched = 0
     while queue and fetched < _MAX_SITEMAP_DOCS and len(pages) < _MAX_SITEMAP_COLLECT:
         url = queue.pop(0)
-        if url in seen or not _same_site(url, host):
+        if url in seen or not same_site(url, host):
             continue
         seen.add(url)
         fetched += 1
-        text = await fetch_html(url, content_types=None)
+        try:
+            text = await fetch_html_checked(
+                url,
+                custom_headers=headers,
+                content_types=None,
+                raise_for_status=url == input_doc,
+            )
+        except FetchRefusedError as exc:
+            refused.append(exc)
+            if url == input_doc:
+                own_failure = exc
+            continue
+        except httpx.HTTPStatusError as exc:
+            # Only the input sitemap raises for a status: it is the
+            # user's own address. Any other document that 404s reads as
+            # empty, and the crawl moves on.
+            own_failure = exc
+            continue
+        except NETWORK_ERRORS as exc:
+            network.append(exc)
+            if url == input_doc:
+                own_failure = exc
+            continue
         if not text:
             continue
-        found, nested = _parse_sitemap_entries(text)
-        for u, lastmod in found:
-            if len(pages) >= _MAX_SITEMAP_COLLECT:
-                break
-            if path_prefix and not _under_prefix(u, path_prefix):
-                continue
-            if u not in page_set and _same_site(u, host):
-                page_set.add(u)
-                pages.append((u, lastmod))
-        # Newest nested sitemaps first, so the document cap spends its
-        # fetches on recent content (e.g. post-sitemap12 before 1).
-        queue.extend(_newest_first(nested))
-    return _newest_first(pages)[:limit]
+        found, nested = await asyncio.to_thread(
+            _read_sitemap, text, page_url, path_prefix, _MAX_SITEMAP_COLLECT - len(pages)
+        )
+        for entry in found:
+            if entry[0] not in page_set:
+                page_set.add(entry[0])
+                pages.append(entry)
+        # The nested sitemaps worth reading, best class first, and
+        # within a class newest first, so the document cap spends its
+        # fetches on recent articles (e.g. post-sitemap12 before 1, and
+        # never the page or tag sitemaps beside them).
+        queue.extend(order_sitemaps(_newest_first(nested)))
+
+    if not pages and raise_errors:
+        if own_failure is not None:
+            raise own_failure
+        if refused and len(refused) == fetched:
+            raise most_telling_error(refused)
+        if network:
+            raise network[0]
+    by_url = {url: (date, title) for url, date, title in pages}
+    ordered = _newest_first([(url, date) for url, date, _ in pages])[:limit]
+    return [Candidate(url, _entry_date(url, by_url[url][0]), by_url[url][1]) for url in ordered]

@@ -17,8 +17,10 @@ misses a ``public.example.com -> 127.0.0.1`` redirect hop).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import zlib
+from collections.abc import Iterable
 
 import httpx
 import trafilatura
@@ -56,19 +58,78 @@ _MIN_USABLE_CHARS = 200
 # ``custom_headers`` parameter to ``fetch_html`` (B4 fix).
 _DEFAULT_HEADERS = {"User-Agent": settings.user_agent}
 
+# Statuses that mean the site refused us, not that the page is gone:
+# 401, 402 and 403 (``scheduler._classify_error`` records them as
+# ``[blocked]``, whose fix is Read as Safari) and 429 (``[http error]``,
+# whose fix is Check now).
+REFUSED_STATUSES = frozenset({401, 402, 403, 429})
+
+# Transport failures ``fetch_html_checked`` passes on: connect errors,
+# timeouts of every stage, dropped connections, redirect loops. The
+# scheduler records them as ``[network]``. The SSRF hook's plain
+# ``httpx.RequestError`` is not one of them: a redirect to a denied
+# host still reads as no document.
+NETWORK_ERRORS: tuple[type[httpx.HTTPError], ...] = (
+    httpx.TransportError,
+    httpx.TooManyRedirects,
+)
+
+
+class FetchRefusedError(httpx.HTTPStatusError):
+    """The site answered 401, 402, 403 or 429 (``REFUSED_STATUSES``).
+
+    An ``httpx.HTTPStatusError``, so ``scheduler._classify_error``
+    records it from its status code like any other HTTP error, and the
+    Test route's ``except httpx.HTTPStatusError`` reads it the same
+    way."""
+
+
+def most_telling_error(errors: Iterable[BaseException]) -> BaseException | None:
+    """The failure that best explains why a website gave us nothing,
+    the first of its rank: a 401, 402 or 403 refusal, then a 429, then
+    any other HTTP status (the user's own page or sitemap is missing
+    or failing), then a network error, then anything else. None for no
+    errors.
+
+    A refusal comes first because its fix (Read as Safari) is the only
+    one the user can act on, and a WAF that refuses one request usually
+    refuses the next with a different code."""
+
+    def rank(exc: BaseException) -> int:
+        if isinstance(exc, FetchRefusedError):
+            return 0 if exc.response.status_code != 429 else 1
+        if isinstance(exc, httpx.HTTPStatusError):
+            return 2
+        if isinstance(exc, NETWORK_ERRORS) or isinstance(exc, asyncio.TimeoutError):
+            return 3
+        return 4
+
+    best: BaseException | None = None
+    for exc in errors:
+        if best is None or rank(exc) < rank(best):
+            best = exc
+    return best
+
 
 async def fetch_html(
     url: str,
     custom_headers: dict | None = None,
     *,
     content_types: tuple[str, ...] | None = ("html",),
-) -> str | None:
+    return_final_url: bool = False,
+    raise_errors: bool = False,
+    raise_for_status: bool = False,
+) -> str | tuple[str, str] | None:
     """SSRF-guarded HTML fetch, public so other callers that need raw
     HTML (rather than just extracted article text) can reuse the same
     guarded fetch instead of duplicating it — see
     ``app.sources.generic_scrape``, which needs the title trafilatura's
     metadata extraction gives it, not just the body text
     ``extract_text`` below returns.
+
+    Returns the decoded body, or None when there is nothing usable
+    (refused by the URL safety check, an HTTP error, a network error, a
+    content type outside ``content_types``, an empty body).
 
     Parameters
     ----------
@@ -85,6 +146,12 @@ async def fetch_html(
         Substrings, one of which the response Content-Type must contain.
         ``None`` accepts any type (sitemap discovery fetches XML, plain
         text and gzip).
+    return_final_url
+        Return ``(body, final_url)`` instead of the body, where
+        ``final_url`` is where the redirects ended (``score_page``
+        counts a redirect to another path against a page).
+    raise_errors, raise_for_status
+        Set by ``fetch_html_checked``; see there.
     """
     safe, reason = check_url_safe(url)
     if not safe:
@@ -117,6 +184,18 @@ async def fetch_html(
             async with client.stream("GET", url, headers=headers) as resp:
                 if resp.status_code >= 400:
                     logger.info("article_extract: %s -> HTTP %s", url, resp.status_code)
+                    if raise_errors and resp.status_code in REFUSED_STATUSES:
+                        raise FetchRefusedError(
+                            f"HTTP {resp.status_code} for {url}",
+                            request=resp.request,
+                            response=resp,
+                        )
+                    if raise_errors and raise_for_status:
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {resp.status_code} for {url}",
+                            request=resp.request,
+                            response=resp,
+                        )
                     return None
                 final_url = str(resp.url)
                 if final_url != url:
@@ -143,8 +222,13 @@ async def fetch_html(
                         break
                     chunks.append(chunk)
                 body = b"".join(chunks)
+    except httpx.HTTPStatusError:
+        # Raised above, only when the caller asked for it.
+        raise
     except httpx.HTTPError as exc:
         logger.info("article_extract: %s fetch failed: %s", url, exc)
+        if raise_errors and isinstance(exc, NETWORK_ERRORS):
+            raise
         return None
     if not body:
         return None
@@ -155,7 +239,43 @@ async def fetch_html(
             body = zlib.decompressobj(wbits=31).decompress(body, _MAX_HTML_BYTES)
         except zlib.error:
             return None
-    return body.decode("utf-8", errors="replace")
+    text = body.decode("utf-8", errors="replace")
+    return (text, final_url) if return_final_url else text
+
+
+async def fetch_html_checked(
+    url: str,
+    custom_headers: dict | None = None,
+    *,
+    content_types: tuple[str, ...] | None = ("html",),
+    return_final_url: bool = False,
+    raise_for_status: bool = False,
+) -> str | tuple[str, str] | None:
+    """``fetch_html`` for callers that need to know why a fetch gave
+    nothing (website feeds: ``app.sources.generic_scrape`` and the
+    sitemap crawl in ``app.feed_autodiscovery``).
+
+    - 401, 402, 403 and 429 raise ``FetchRefusedError``, so a site
+      that refuses us reads as ``[blocked]`` (or ``[http error]`` for a
+      rate limit), not as a site with no articles.
+    - Connect errors, timeouts and other transport failures
+      (``NETWORK_ERRORS``) raise as the httpx error (``[network]``).
+    - Any other 4xx or 5xx raises ``httpx.HTTPStatusError`` only with
+      ``raise_for_status``, which callers set for the user's own
+      listing page or sitemap. Otherwise it returns None, as
+      ``fetch_html`` does: a missing robots.txt or a guessed sitemap
+      path that 404s is routine, and the crawl moves on.
+    - The URL safety check, a content type outside ``content_types``
+      and an empty body still return None.
+    """
+    return await fetch_html(
+        url,
+        custom_headers,
+        content_types=content_types,
+        return_final_url=return_final_url,
+        raise_errors=True,
+        raise_for_status=raise_for_status,
+    )
 
 
 def extract_text(html: str) -> str | None:

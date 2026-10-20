@@ -136,14 +136,14 @@ async def test_page_extraction_does_not_block_the_event_loop(monkeypatch):
     """``_extract_one`` parses in a thread, so the loop keeps serving
     other work (API requests, scheduler wakeups) during a parse."""
 
-    async def _fake_fetch_html(url, custom_headers=None):
-        return "<html><body>page</body></html>"
+    async def _fake_fetch_html_checked(url, custom_headers=None, **kwargs):
+        return "<html><body>page</body></html>", url
 
     def _slow_parse(*args, **kwargs):
         time.sleep(0.3)  # a CPU-bound parse, as far as the loop can tell
         return None
 
-    monkeypatch.setattr(generic_scrape, "fetch_html", _fake_fetch_html)
+    monkeypatch.setattr(generic_scrape, "fetch_html_checked", _fake_fetch_html_checked)
     import trafilatura
 
     monkeypatch.setattr(trafilatura, "bare_extraction", _slow_parse)

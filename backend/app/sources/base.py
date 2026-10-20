@@ -4,6 +4,13 @@ from __future__ import annotations
 
 import html
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
+
+# A stored-URL lookup ``scheduler._ingest`` hands to a plugin with
+# ``SourcePlugin.takes_ingest_hints``: given candidate URLs, returns the
+# ones already stored as entries. The scheduler runs the query, so the
+# plugin stays DB-free and can skip those pages before fetching them.
+KnownUrls = Callable[[list[str]], Awaitable[set[str]]]
 
 
 # Errors a plugin's ``fetch`` raises for the scheduler to record as
@@ -64,6 +71,15 @@ class SourcePlugin(ABC):
     # no longer has. None for class-driven built-ins, whose address
     # can't be edited; ``_ingest`` snapshots their row instead.
     fetch_target: tuple[str | None, str | None, str | None] | None = None
+    # True for a plugin whose ``fetch`` takes the keyword arguments
+    # ``known_urls`` (a ``KnownUrls`` lookup) and ``max_undated``
+    # (``ingest.max_undated_per_poll``), which ``scheduler._ingest``
+    # then passes. Only ``GenericScrapePlugin`` does: it fetches a page
+    # per candidate, so skipping stored ones before the fetch matters,
+    # and its items never include stored URLs, so the ingest rules'
+    # undated cap has to be applied inside it. Every other plugin's
+    # ``fetch`` takes no arguments.
+    takes_ingest_hints: bool = False
 
     @abstractmethod
     async def fetch(self) -> list[dict]:

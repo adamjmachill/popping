@@ -401,6 +401,25 @@ def _reschedule_ingest_job(plugin_cls: Any, interval_seconds: float) -> None:
         logger.debug("scheduler: could not reschedule %s", job_id, exc_info=True)
 
 
+async def _stored_urls(session: AsyncSession, urls: list[str]) -> set[str]:
+    """The ones of ``urls`` already stored as entries (by any feed).
+    ``_ingest`` runs it on every listing before the ingest rules, and
+    hands it to a website feed (``_known_urls_lookup``) so the plugin
+    skips stored pages before fetching them."""
+    if not urls:
+        return set()
+    return set((await session.scalars(select(Entry.url).where(Entry.url.in_(urls)))).all())
+
+
+async def _known_urls_lookup(urls: list[str]) -> set[str]:
+    """``_stored_urls`` in its own short session: the ``known_urls``
+    lookup ``_ingest`` passes to a plugin with ``takes_ingest_hints``
+    (``app.sources.base.KnownUrls``), called during its fetch, when no
+    ingest session is open."""
+    async with SessionLocal() as session:
+        return await _stored_urls(session, urls)
+
+
 async def _ingest_tunables() -> ingest_rules.IngestTunables:
     """The ``ingest.*`` knobs from runtime settings, parsed and range
     checked (see ``ingest_rules.parse_tunables``). There is no env
@@ -702,12 +721,22 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 "Reddit isn't set up on this server (no proxy, and direct mode is off)"
             )
 
+        rules = await _ingest_tunables()
         # Network fetch with no DB session open: some plugins (podcasts,
         # generic scrape) take minutes, and an idle transaction for that
         # long starves the connection pool.
-        raw_items = await plugin.fetch()
+        if getattr(plugin, "takes_ingest_hints", False):
+            # A website feed fetches one page per candidate, so it asks
+            # which candidates are already stored before fetching them
+            # (one short session per poll), and caps undated pages
+            # itself (``GenericScrapePlugin``).
+            raw_items = await plugin.fetch(
+                known_urls=_known_urls_lookup,
+                max_undated=rules.max_undated_per_poll,
+            )
+        else:
+            raw_items = await plugin.fetch()
         summary["fetched"] = len(raw_items)
-        rules = await _ingest_tunables()
 
         async with SessionLocal() as session:
             # Loaded first: it commits when it has to create the
@@ -745,11 +774,7 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             # before embedding, which is the expensive step; the INSERT's
             # ON CONFLICT still covers a concurrent writer.
             urls = [n["url"] for n in normalized if n.get("url")]
-            known: set[str] = set()
-            if urls:
-                known = set(
-                    (await session.scalars(select(Entry.url).where(Entry.url.in_(urls)))).all()
-                )
+            known = await _stored_urls(session, urls)
             # The ingest rules (``app.ingest_rules``): a first fetch
             # keeps the newest few plus the last couple of days, later
             # polls skip old and undated backlog, and one poll stores at
