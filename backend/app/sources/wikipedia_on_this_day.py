@@ -121,13 +121,16 @@ class WikipediaOnThisDay(SourcePlugin):
                                 f"{_MAX_RESPONSE_BYTES} cap"
                             )
         except (httpx.HTTPError, ValueError) as exc:
+            # Re-raised, not swallowed: the scheduler records the
+            # error kind (blocked, network, ...) on the feed, where an
+            # empty list would look like a day with nothing to post.
             logger.warning("wikipedia_on_this_day: fetch failed: %s", exc)
-            return []
+            raise
         try:
             data = json.loads(bytes(buf))
         except ValueError:
             logger.warning("wikipedia_on_this_day: non-JSON response")
-            return []
+            raise
         items: list[dict] = []
         # The feed splits content by type. Only ``selected`` (the
         # curated anniversaries) is used: ``events`` is ~60 a day, and

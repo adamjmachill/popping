@@ -10,14 +10,16 @@ it's on.
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import logging
 import re
+from typing import Sequence
 from urllib.parse import urlparse
 
 import httpx
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import case, func, select
+from sqlalchemy import case, exists, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -462,15 +464,98 @@ async def _net_vote_scores(session: AsyncSession) -> dict[int, int]:
     return {source_id: int(score or 0) for source_id, score in rows}
 
 
+# The windows ``_health_counts`` counts stories in.
+_STORIES_DAY = dt.timedelta(hours=24)
+_STORIES_WEEK = dt.timedelta(days=7)
+
+
+async def _health_counts(
+    session: AsyncSession, ids: Sequence[int] | None
+) -> dict[int, dict]:
+    """Story counts per source id: ``stories_24h``, ``stories_7d``,
+    ``newest_story_at`` and ``has_stories``, the computed half of
+    ``SourceOut``'s feed-health fields. Every endpoint that returns a
+    source fills them (``_source_out``), so a row read back after a
+    save carries the same counts as the list, and ``GET
+    /sources/{id}`` (polled while a Check now runs) stays one cheap
+    query. ``ids`` None counts every feed (the list); otherwise only
+    those ids, which are absent from the result when they have no row.
+
+    One round trip. The counts are one ``GROUP BY`` over the last 7
+    days of ``fetched_at`` (``ix_entries_fetched_at``): the 24-hour
+    count is a ``FILTER`` on it and ``newest_story_at`` is its
+    ``max(fetched_at)``, so it is null when nothing arrived this week.
+    An all-time ``max`` would walk the whole index for a feed with no
+    rows at all. ``has_stories`` is a correlated ``EXISTS`` per source
+    on ``entries.source_id``.
+
+    The list passes None rather than every id: an ``IN`` of every feed
+    filters nothing, but the planner can still pair it with the week's
+    range as a bitmap over the whole ``ix_entries_source_id`` index,
+    which costs more than the week's scan itself once the week's rows
+    are spread across the table.
+    """
+    if ids is not None and not ids:
+        return {}
+    now = dt.datetime.now(dt.timezone.utc)
+    week = (
+        select(
+            Entry.source_id.label("source_id"),
+            func.count().filter(Entry.fetched_at >= now - _STORIES_DAY).label("stories_24h"),
+            func.count().label("stories_7d"),
+            func.max(Entry.fetched_at).label("newest_story_at"),
+        )
+        .where(Entry.fetched_at >= now - _STORIES_WEEK)
+        .group_by(Entry.source_id)
+    )
+    if ids is not None:
+        week = week.where(Entry.source_id.in_(ids))
+    counts = week.subquery()
+    stmt = select(
+        Source.id,
+        counts.c.stories_24h,
+        counts.c.stories_7d,
+        counts.c.newest_story_at,
+        exists().where(Entry.source_id == Source.id).label("has_stories"),
+    ).outerjoin(counts, counts.c.source_id == Source.id)
+    if ids is not None:
+        stmt = stmt.where(Source.id.in_(ids))
+    out: dict[int, dict] = {}
+    for source_id, day, seven, newest, has_stories in (await session.execute(stmt)).all():
+        out[source_id] = {
+            "stories_24h": int(day or 0),
+            "stories_7d": int(seven or 0),
+            "newest_story_at": newest,
+            "has_stories": bool(has_stories),
+        }
+    return out
+
+
+def _source_out(row: Source, health: dict[int, dict]) -> SourceOut:
+    """``SourceOut`` for ``row`` with its story counts from
+    ``_health_counts`` (the defaults when ``row`` isn't in it)."""
+    item = SourceOut.model_validate(row)
+    for key, value in health.get(row.id, {}).items():
+        setattr(item, key, value)
+    return item
+
+
+async def _one_source_out(session: AsyncSession, row: Source) -> SourceOut:
+    """``SourceOut`` for one row, story counts included: what GET,
+    POST, PATCH and ``/auto`` return."""
+    return _source_out(row, await _health_counts(session, [row.id]))
+
+
 @router.get("/sources", response_model=list[SourceOut])
 async def list_sources_endpoint(
     session: AsyncSession = Depends(get_session),
 ) -> list[SourceOut]:
     rows = (await session.scalars(select(Source).order_by(Source.category, Source.name))).all()
     scores = await _net_vote_scores(session)
+    health = await _health_counts(session, None)
     out: list[SourceOut] = []
     for r in rows:
-        item = SourceOut.model_validate(r)
+        item = _source_out(r, health)
         item.net_vote_score = scores.get(r.id, 0)
         out.append(item)
     return out
@@ -484,7 +569,7 @@ async def get_source_endpoint(
     row = await session.get(Source, source_id)
     if row is None:
         raise HTTPException(status_code=404, detail="source not found")
-    return SourceOut.model_validate(row)
+    return await _one_source_out(session, row)
 
 
 # --- POST / PATCH / DELETE (Phase 5) -------------------------------------
@@ -635,7 +720,7 @@ async def create_source_endpoint(
             )
         )
         _DISCOVERY_TASKS.add(task)
-    return SourceOut.model_validate(row)
+    return await _one_source_out(session, row)
 
 
 def _slugify_hostname(url: str) -> str:
@@ -720,7 +805,7 @@ async def source_auto_endpoint(
         existing = await session.scalar(select(Source).where(Source.url == yt_feed))
         if existing is not None:
             return SourceAutoResult(
-                found=True, kind="youtube_channel", source=SourceOut.model_validate(existing)
+                found=True, kind="youtube_channel", source=await _one_source_out(session, existing)
             )
         name = await _free_source_name(session, youtube_source_slug(youtube_input, yt_feed))
         row = await scheduler.add_source(
@@ -731,7 +816,7 @@ async def source_auto_endpoint(
             url=yt_feed,
             refresh=_YOUTUBE_DEFAULT_REFRESH,
         )
-        return SourceAutoResult(found=True, kind="youtube_channel", source=SourceOut.model_validate(row))
+        return SourceAutoResult(found=True, kind="youtube_channel", source=await _one_source_out(session, row))
 
     _validate_url(body.url)
     category = _validate_category(body.category)
@@ -755,7 +840,7 @@ async def source_auto_endpoint(
             )
         )
         _DISCOVERY_TASKS.add(task)
-        return SourceAutoResult(found=True, kind="rss", source=SourceOut.model_validate(row))
+        return SourceAutoResult(found=True, kind="rss", source=await _one_source_out(session, row))
 
     sitemap_urls = await discover_sitemap_urls(body.url, limit=1)
     if sitemap_urls:
@@ -768,7 +853,7 @@ async def source_auto_endpoint(
             url=body.url,
             refresh=_GENERIC_SCRAPE_DEFAULT_REFRESH,
         )
-        return SourceAutoResult(found=True, kind="generic_scrape", source=SourceOut.model_validate(row))
+        return SourceAutoResult(found=True, kind="generic_scrape", source=await _one_source_out(session, row))
 
     return SourceAutoResult(found=False)
 
@@ -932,7 +1017,7 @@ async def update_source_endpoint(
         row.display_name = _clean_display_name(body.display_name)
         await session.commit()
         await session.refresh(row)
-    return SourceOut.model_validate(row)
+    return await _one_source_out(session, row)
 
 
 @router.delete(

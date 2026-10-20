@@ -6,6 +6,28 @@ import html
 from abc import ABC, abstractmethod
 
 
+# Errors a plugin's ``fetch`` raises for the scheduler to record as
+# their own kind (``scheduler._classify_error``), so a feed's
+# ``last_error`` says what is wrong and which fix applies, instead of a
+# bare ``[error]`` or a silently empty success.
+
+
+class NotAFeedError(ValueError):
+    """The address answered, but with something that isn't a feed (an
+    HTML page, JSON, an empty body). Recorded as ``[not a feed]``.
+
+    A ``ValueError`` whose message says "parse", so the Test route
+    (``routes/sources._test_source_impl``) still reports it as
+    ``parse_error``."""
+
+
+class NoArticleListError(Exception):
+    """A website feed found no list of articles to read: no sitemap,
+    no matching links on the page. Recorded as ``[no list]``, a setup
+    state: it never counts toward ``error_count`` and never stops the
+    feed, because the fix is to point the feed at a section."""
+
+
 class SourcePlugin(ABC):
     """Contract every Popping source plugin implements.
 

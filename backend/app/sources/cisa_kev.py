@@ -93,13 +93,16 @@ class CisaKev(SourcePlugin):
                                 f"{_MAX_RESPONSE_BYTES} cap"
                             )
         except (httpx.HTTPError, ValueError) as exc:
+            # Re-raised, not swallowed: the scheduler records the
+            # error kind (blocked, network, ...) on the feed, where an
+            # empty list would look like a quiet week.
             logger.warning("cisa_kev: fetch failed: %s", exc)
-            return []
+            raise
         try:
             data = json.loads(bytes(buf))
         except ValueError:
             logger.warning("cisa_kev: non-JSON response")
-            return []
+            raise
         items: list[dict] = []
         for entry in (data.get("vulnerabilities") or []):
             cve_id = entry.get("cveID") or ""

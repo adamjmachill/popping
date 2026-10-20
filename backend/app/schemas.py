@@ -62,6 +62,28 @@ class SourceOut(BaseModel):
     # directly without a null check.
     net_vote_score: int = 0
 
+    # Feed health (migration 0031), read off the row. NULL until the
+    # feed's first check after the migration; the frontend then falls
+    # back to ``last_fetch_at``. ``last_attempt_at`` is when the last
+    # check finished, whatever came of it (``last_error`` says what went
+    # wrong). The counts are the last successful check's: items listed
+    # before the ingest rules cut them, and new stories stored.
+    last_attempt_at: Optional[dt.datetime] = None
+    last_item_count: Optional[int] = None
+    last_new_count: Optional[int] = None
+
+    # Story counts. Not ORM attributes: ``routes.sources._health_counts``
+    # computes them for every endpoint that returns a source and
+    # assigns them after ``model_validate``. ``stories_24h`` /
+    # ``stories_7d`` count stories that arrived (``fetched_at``) in the
+    # last 24 hours / 7 days; ``newest_story_at`` is the newest arrival
+    # in those 7 days (null when nothing arrived this week);
+    # ``has_stories`` is whether the feed has ever stored one.
+    stories_24h: int = 0
+    stories_7d: int = 0
+    newest_story_at: Optional[dt.datetime] = None
+    has_stories: bool = False
+
     model_config = ConfigDict(from_attributes=True)
 
 
@@ -301,9 +323,11 @@ class CheckNowResult(BaseModel):
     ``cooling_down``, ``paused`` and ``backing_off``; ``queued`` is
     ``len(queued_ids)``. ``queued_at`` is the server's clock when the
     checks were queued: a queued feed is done once its
-    ``last_fetch_at`` is at or after it, or its ``last_error`` changes.
-    ``expected_done_s`` is about when the last queued check should be
-    done, in seconds from ``queued_at`` (0 when nothing was queued).
+    ``last_attempt_at`` is at or after it, whatever the check found
+    (``last_error`` says what went wrong; a success also moves
+    ``last_fetch_at``). ``expected_done_s`` is about when the last
+    queued check should be done, in seconds from ``queued_at`` (0 when
+    nothing was queued).
     """
 
     queued: int
@@ -521,6 +545,10 @@ class IngestResult(BaseModel):
     # per-poll cap's overflow, which a later poll picks up.
     skipped: int = 0
     error: Optional[str] = None
+    # "paused" when the feed is paused and nothing was fetched; None
+    # otherwise. Declared so ``IngestResult(**summary)`` keeps it
+    # (unknown keys are dropped).
+    status: Optional[str] = None
 
 
 class BriefOut(BaseModel):

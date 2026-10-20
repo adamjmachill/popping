@@ -74,6 +74,16 @@ class Source(Base):
     last_fetch_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     error_count: Mapped[int] = mapped_column(Integer, default=0)
+    # Feed health (migration 0031). ``last_attempt_at`` is when the last
+    # check finished, whatever came of it: a success (then it equals
+    # ``last_fetch_at``), a failure or a setup state (``last_error``).
+    # ``last_item_count`` is how many items the last successful check
+    # listed, before the ingest rules cut them; ``last_new_count`` is
+    # how many of those it stored. All NULL until the row's first check
+    # after the migration (no backfill).
+    last_attempt_at: Mapped[Optional[dt.datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_item_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_new_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     # Multiplier on the source's contribution to composite score (phase 2).
     # Default 1.0; the UI for tuning this lands in phase 3.

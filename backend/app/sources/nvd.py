@@ -125,13 +125,16 @@ class NvdRecent(SourcePlugin):
                                 f"{_MAX_RESPONSE_BYTES} cap"
                             )
         except (httpx.HTTPError, ValueError) as exc:
+            # Re-raised, not swallowed: the scheduler records the
+            # error kind (blocked, network, ...) on the feed, where an
+            # empty list would look like a quiet week.
             logger.warning("nvd: fetch failed: %s", exc)
-            return []
+            raise
         try:
             data = json.loads(bytes(buf))
         except ValueError:
             logger.warning("nvd: non-JSON response (likely 404 / captcha)")
-            return []
+            raise
         items: list[dict] = []
         for cve in (data.get("vulnerabilities") or []):
             cve_inner = cve.get("cve") or {}
