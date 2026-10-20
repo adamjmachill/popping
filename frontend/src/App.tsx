@@ -1590,6 +1590,13 @@ export function App() {
   // stored tab never seen (its category went while the phone was away)
   // gets the fresh-device tab, not Brief.
   const [lastTabIndex, setLastTabIndex] = useState<number | null>(null)
+  // The tab shown in place of the stored one while nothing can be
+  // stored (``tabsLoaded`` false, or under the filter): a neighbour, a
+  // fresh device's first tab, or an old index's tab. In memory only.
+  // ``resolveTab`` keeps showing it by key until the list settles, so a
+  // save that adds Saved in front of it can't move the phone, however
+  // long For You or the preferences stay down.
+  const [standIn, setStandIn] = useState<ColKey | null>(null)
   // The tab the phone shows. It follows the stored key, so Saved or
   // For You appearing or emptying around it, or a feed moving between
   // categories, never moves the phone. Nothing is migrated or settled
@@ -1602,20 +1609,26 @@ export function App() {
   // stored For You, a fresh device's first tab (For You first), and an
   // old index (counted with For You in its place). Any other tab still
   // settles, so a For You that stays down can't bring back the jump.
+  // When it is back, they resolve as they would have (a fresh device
+  // opens For You), as a stored For You does.
+  //
+  // The preferences must have loaded, not only answered: when their
+  // GET fails, Saved (built from them) is missing only because it
+  // wasn't read, and settling would replace a stored Saved for good or
+  // migrate an old index one place off. The phone then shows a
+  // stand-in and stores nothing until a tap.
   const storedKey = mobileTab && 'key' in mobileTab ? mobileTab.key : null
   const activeScope = useMemo(() => filterScope(activeSources), [activeSources])
+  const filterActive = viewKind === 'multisub'
   const tabsLoaded =
     !prefs.loading &&
+    prefs.loaded &&
     firstRefreshDone &&
     tabsLoadedFor === activeScope &&
     (forYouLoaded || (storedKey != null && storedKey !== FORYOU_KEY))
   const tabChoice = useMemo(
-    () =>
-      resolveTab(phoneTabs, mobileTab, lastTabIndex, {
-        loaded: tabsLoaded,
-        filterActive: viewKind === 'multisub',
-      }),
-    [phoneTabs, mobileTab, lastTabIndex, tabsLoaded, viewKind],
+    () => resolveTab(phoneTabs, mobileTab, lastTabIndex, { loaded: tabsLoaded, filterActive, standIn }),
+    [phoneTabs, mobileTab, lastTabIndex, tabsLoaded, filterActive, standIn],
   )
   const shownTab: ColKey = tabChoice.key ?? BRIEF_KEY
   // The shown column (-1 and undefined on Brief).
@@ -1623,11 +1636,17 @@ export function App() {
   const phoneCol = phoneColIndex >= 0 ? columns[phoneColIndex] : undefined
   useEffect(() => {
     if (storedKey != null && tabChoice.key === storedKey) setLastTabIndex(tabChoice.index)
+    // Hold the stand-in once the phone has shown it (after the first
+    // refresh; the skeleton covers the strip before that). Brief is
+    // never held, and nothing is held once the list settles.
+    const unsettled = !tabsLoaded || filterActive
+    const shownInstead = tabChoice.key != null && tabChoice.key !== storedKey && tabChoice.key !== BRIEF_KEY
+    setStandIn(unsettled && firstRefreshDone && shownInstead ? tabChoice.key : null)
     // A tab that went, a fresh device's first tab, or an old index:
     // the tab shown becomes the stored one. Only on the phone: the
     // desktop never shows the strip, so it leaves the phone's tab alone.
     if (tabChoice.store && !isDesktop) selectTab(tabChoice.store)
-  }, [tabChoice, storedKey, isDesktop, selectTab])
+  }, [tabChoice, storedKey, tabsLoaded, filterActive, firstRefreshDone, isDesktop, selectTab])
   // A tap on another tab selects it. A tap on the tab shown scrolls it
   // to the top (at once under reduced motion), and selects it when it
   // only stands in for the stored tab (while loading), except the

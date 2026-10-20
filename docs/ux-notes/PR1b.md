@@ -16,9 +16,14 @@ Tapping the tab you are on scrolls it back to the top.
     (`mobileCol.last`, -1 = Brief) is read only when no key is stored.
   - `freshTabIndex(tabs)`: For You when it has stories, else the first tab
     after Brief with stories, else the first tab after Brief.
-  - `resolveTab(tabs, wanted, lastIndex, {loaded, filterActive})` returns
-    the tab to show and the key to store (or null to keep what is stored):
+  - `resolveTab(tabs, wanted, lastIndex, {loaded, filterActive, standIn})`
+    returns the tab to show and the key to store (or null to keep what is
+    stored):
     - the wanted key is in the strip: show it;
+    - until the list settles (loaded, no filter), a stand-in shown earlier
+      (`standIn`) stays shown while it is in the strip, so it is followed
+      by key like a stored tab; the rules below pick places, and places
+      shift when Saved appears in front. Brief is never held;
     - it is missing: show the tab now at `lastIndex` (its neighbour), or the
       fresh-device tab when it never stood anywhere this session or was the
       filter's column. Once loaded and with no filter on, that tab becomes
@@ -45,13 +50,19 @@ Tapping the tab you are on scrolls it back to the top.
     error. The first-load skeleton shows while it is false (and, as
     before, while an empty dashboard refreshes).
   - The resolve gate (`tabsLoaded`) is `!prefs.loading && firstRefreshDone`,
-    plus two conditions the spec doesn't name (see Deviations):
+    plus three conditions the spec doesn't name (see Deviations):
+    - `prefs.loaded`: the first preferences GET succeeded, not only
+      answered (a new flag on the provider, below);
     - `tabsLoadedFor === filterScope(activeSources)`: the last applied
       refresh loaded the tabs for the filter in force (compared by value);
     - For You: while its request fails, a stored For You, a fresh device
       and an old index wait; any other stored tab still settles.
   - `lastTabIndex` (state): where the stored tab last stood, set only when
     the stored tab itself is shown.
+  - `standIn` (state, in memory only): the tab shown instead of the stored
+    one while the gate is closed or the filter is on, set after the first
+    refresh (the skeleton covers the strip before that), never Brief,
+    cleared once the list settles. Passed to `resolveTab`.
   - The resolve effect stores `tabChoice.store`, on the phone only
     (`!isDesktop`); the desktop leaves the phone's tab alone.
   - Phone scroller: `const [phoneScroller, setPhoneScroller] =
@@ -69,6 +80,10 @@ Tapping the tab you are on scrolls it back to the top.
     one (while loading) also selects it; the filter's column never does.
   - `applyServerSource` no longer records a tab to follow: the phone
     follows its key.
+- `frontend/src/lib/preferences.tsx`: the provider's context gains
+  `loaded`, true only once the first GET's rows are applied. `loading`
+  still goes false when the GET fails; `loaded` then stays false for the
+  page's life (the GET isn't retried).
 - `frontend/src/components/Column.tsx`: optional `scrollerRef` prop,
   attached as a callback ref on the story list, which is then marked
   `data-scroller`. Only the phone Column gets it, so only the phone list
@@ -77,18 +92,26 @@ Tapping the tab you are on scrolls it back to the top.
 
 ## Tests
 
-- Unit `frontend/scripts/unit/columns.test.ts` (14 tests): key parsing and
+- Unit `frontend/scripts/unit/columns.test.ts` (16 tests): key parsing and
   the stored-tab read; Saved appearing in front of the shown tab; the
   neighbour fallback (kept while loading and under the filter, stored once
   loaded); a missing key with no last place; index migration and -1 →
   Brief; no migration before the first refresh, including with meta tabs
   present; a fresh device skipping an empty Saved and Brief; nothing
-  stored for an empty fresh pick; only Brief left; a stored filter column.
+  stored for an empty fresh pick; only Brief left; a stored filter column;
+  a held stand-in (stored For You down, fresh device, old index, filter)
+  staying put when Saved appears in front of it; a held stand-in giving
+  way to the stored tab, to a settled list, and when it goes itself.
 - Flows (`flows.cjs`, all at 390):
   - `flow-tab-stays-on-star` (News; the fixtures have no tech tab), with a
     reload at the end;
   - `flow-unsave-last-saved`;
   - `flow-tap-tab-scrolls-top`;
+  - `flow-foryou-down-holds-fresh` and `flow-foryou-down-holds-index`:
+    For You failing, nothing stored (or only an old index); saving on the
+    tab shown doesn't move the phone or store anything;
+  - `flow-prefs-fail-keeps-saved`: the preferences GET fails (500) with
+    `meta:saved` stored; it stays stored, also after a poll;
   - `flow-tab-migrates-index`: the old index with preferences 1.5 s late;
   - `flow-tab-gone-on-load`: a stored category that went opens For You;
   - `flow-filter-clear-keeps-tab`: clearing the filter while the unfiltered
@@ -132,6 +155,10 @@ Tapping the tab you are on scrolls it back to the top.
 | `flow-foryou-fails-keeps-tab` | `setForYouLoaded(forYouOk)` → `true` | FY-FAIL: stored `cat:deals`; stayed on Deals |
 | `flow-foryou-down-settles` | For You condition → `forYouLoaded` alone | FY-DOWN: Saved went but stays the stored tab |
 | `flow-foryou-down-settles` | For You condition without `storedKey != null` | FY-DOWN: a new phone stored `meta:saved` while For You is down |
+| `flow-foryou-down-holds-fresh`, `-index` | App passes `standIn: null` to `resolveTab` | FY-HOLD: saving moved the phone from "Deals" to "Saved" (fresh), from "News" to "Deals" (index) |
+| `flow-prefs-fail-keeps-saved` | gate without `prefs.loaded` | PREFS-FAIL: a failed preferences load stored "meta:foryou" (and again after a poll) |
+| `columns.test.ts` | stand-in held even once settled (`!settle &&` dropped) | "a held stand-in gives way to the stored tab, to a settled list, ..." |
+| `columns.test.ts` | the held stand-in not returned | "a stand-in is held by key until the list settles, ..." |
 | `flow-tap-tab-scrolls-top` | `scrollTo` removed | TAP-TOP: list left at 2133 (both taps) |
 | `flow-tap-tab-scrolls-top` | `behavior: 'smooth'` always | TAP-TOP: under reduced motion the list is at 2133 right after the tap |
 | `flow-tap-tab-scrolls-top` | `key={phoneCol.key}` removed | TAP-TOP: Deals opened at 1455 |
@@ -171,17 +198,60 @@ Each mutation was restored and checked by checksum (`md5sum -c`).
   after the tap); `flow-foryou-down-settles-moved` (no For You tab, Deals
   selected after Saved went).
 
+### Review fixes (second commit)
+
+Three confirmed findings, all fixed:
+
+- An unsettled stand-in was positional (two findings, one root cause).
+  While the gate is closed, `resolveTab` recomputed the tab shown from a
+  place (`lastIndex`, the fresh pick, or the old index), so a save adding
+  Saved at index 1 moved the phone: stored For You down showed News, then
+  Saved; a fresh phone with For You down showed Deals, then Saved; an old
+  index 1 showed News, then Deals. The same in the window after the filter
+  is cleared. Now App holds the tab shown as `standIn` and `resolveTab`
+  keeps it by key until the list settles. Once the gate opens the normal
+  rules apply: when For You is back, a fresh phone opens For You and an
+  old index migrates, as a stored For You comes back to For You (by
+  design since the first commit: those cases wait for For You).
+- A failed preferences GET opened the gate: `loading` goes false in a
+  `finally`, so Saved (built from the preferences) looked gone and a
+  stored `meta:saved` was replaced for good, or an old index migrated one
+  place off. The provider now exposes `loaded` (true only after the GET's
+  rows are applied), and the gate requires it. The phone then shows a
+  stand-in and stores nothing until a tap.
+  - Not done: retrying the preferences GET later in the session (the
+    finding's optional part). The provider's merge lets the server win on
+    every key, so a late GET could overwrite writes made meanwhile; that
+    is PR2b's sync-by-change work. Until then a session whose GET failed
+    keeps its stored tab and stores only what the user taps.
+  - Seen, not changed (PR2's job): with the GET failed, `state` is the
+    seed or the defaults, so a save PUTs a one-item `starred_entries`
+    over the server's list. That predates this unit.
+- Checks after the fixes: lint (0 errors, the same 6 warnings), build,
+  unit tests 88 of 88, full strict smoke 0 failures, the PR1b flows plus
+  FM and FU looped 5 times with 0 failures, the backend tests that pin
+  frontend source (138 passed, the 2 baseline DNS failures). Preview ran
+  on port 4174: 4173 was held by a preview from another copy of the tree,
+  which was left running.
+
 ## Deviations from the spec
 
-- The resolve gate has two more conditions than `!prefs.loading &&
+- The resolve gate has three more conditions than `!prefs.loading &&
   firstRefreshDone`:
+  - `prefs.loaded`: a failed preferences GET ends `loading` too, but
+    leaves Saved unread, so a stored Saved would look gone;
   - the filter scope: after the filter is cleared, until the unfiltered
     refresh lands the strip holds only the filtered feed's categories, so
     the stored tab looks gone and would be replaced;
   - For You: `refresh()` turns a failed For You request into `[]`, which
     takes the tab away for that refresh; a stored For You would otherwise
     be replaced by its neighbour, and a new phone would store another tab.
-  Both serve the spec's intent (only settle a tab that has really gone).
+  All three serve the spec's intent (only settle a tab that has really
+  gone).
+- While the gate is closed, the tab shown in place of the stored one is
+  held by key (`standIn`), not recomputed by place. The spec's neighbour
+  fallback names a place; without the hold, a save during that time moves
+  the phone.
 - `resolveTab` keeps the stored key when the neighbour would be Brief, and
   doesn't store an empty fresh pick. The spec doesn't say; both stop a
   phone being left on Brief or an empty tab.

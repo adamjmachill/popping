@@ -148,3 +148,52 @@ test('a stored filter column that went gets the fresh-device tab, not its old pl
   // While the filter is on, it is shown and nothing is stored.
   assert.deepEqual(resolveTab(strip(FILTER_KEY), { key: FILTER_KEY }, 1, FILTERED), { key: FILTER_KEY, index: 1, store: null })
 })
+
+// A save adds Saved at index 1, in front of whatever stands in.
+const held = (standIn: ColKey | null, loaded = false) => ({ loaded, filterActive: false, standIn })
+
+test('a stand-in is held by key until the list settles, so a save in front of it does not move it', () => {
+  // A stored For You that is down: its neighbour at index 1 stands in.
+  const first = resolveTab(strip(NEWS, DEALS), { key: FORYOU_KEY }, 1, LOADING)
+  assert.deepEqual(first, { key: NEWS, index: 1, store: null })
+  const starred = strip(SAVED_KEY, NEWS, DEALS)
+  assert.equal(resolveTab(starred, { key: FORYOU_KEY }, 1, LOADING).key, SAVED_KEY, 'by place it would move')
+  assert.deepEqual(resolveTab(starred, { key: FORYOU_KEY }, 1, held(first.key)), { key: NEWS, index: 2, store: null })
+
+  // A fresh device: the first tab with stories stands in.
+  const fresh = resolveTab(strip(DEALS, NEWS), null, null, LOADING)
+  assert.equal(fresh.key, DEALS)
+  assert.deepEqual(resolveTab(strip(SAVED_KEY, DEALS, NEWS), null, null, held(fresh.key)), { key: DEALS, index: 2, store: null })
+
+  // An old index: the tab at that place stands in.
+  const legacy = resolveTab(strip(DEALS, NEWS), { index: 1 }, null, LOADING)
+  assert.equal(legacy.key, NEWS)
+  assert.deepEqual(resolveTab(strip(SAVED_KEY, DEALS, NEWS), { index: 1 }, null, held(legacy.key)), { key: NEWS, index: 3, store: null })
+
+  // Under the filter too.
+  assert.deepEqual(resolveTab(strip(SAVED_KEY, FILTER_KEY), { key: NEWS }, 1, { ...FILTERED, standIn: FILTER_KEY }), {
+    key: FILTER_KEY,
+    index: 2,
+    store: null,
+  })
+})
+
+test('a held stand-in gives way to the stored tab, to a settled list, and when it goes', () => {
+  // The stored tab comes back (For You loads): it is shown.
+  assert.deepEqual(resolveTab(strip(FORYOU_KEY, NEWS), { key: FORYOU_KEY }, 1, held(NEWS)), { key: FORYOU_KEY, index: 1, store: null })
+  // Settled: the rules apply again and pick the tab to store.
+  assert.deepEqual(resolveTab(strip(SAVED_KEY, FORYOU_KEY, NEWS), null, null, held(NEWS, true)), {
+    key: FORYOU_KEY,
+    index: 2,
+    store: FORYOU_KEY,
+  })
+  assert.deepEqual(resolveTab(strip(SAVED_KEY, FORYOU_KEY, NEWS), { index: 0 }, null, held(NEWS, true)), {
+    key: SAVED_KEY,
+    index: 1,
+    store: SAVED_KEY,
+  })
+  // The stand-in itself went: back to the place-based pick.
+  assert.deepEqual(resolveTab(strip(DEALS, VIDEO), { key: FORYOU_KEY }, 1, held(NEWS)), { key: DEALS, index: 1, store: null })
+  // Brief is never held.
+  assert.deepEqual(resolveTab(strip(DEALS, NEWS), null, null, held(BRIEF_KEY)), { key: DEALS, index: 1, store: null })
+})

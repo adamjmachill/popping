@@ -222,6 +222,9 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-filter-clear-keeps-tab` | PR1b: on News, a source filter leaves `cat:news` stored; clearing it while the unfiltered stories are 1.5 s late stores nothing in between and lands back on News |
 | `flow-foryou-fails-keeps-tab` | PR1b: a new phone stores For You; a refresh whose For You request fails (503) takes the tab away but keeps `meta:foryou` stored, and the phone is back on For You when it loads again |
 | `flow-foryou-down-settles` | PR1b, For You failing (503) throughout: a new phone shows Saved but stores nothing; a tapped Saved that empties gives way to its neighbour, which is stored, and saving again doesn't move the phone |
+| `flow-foryou-down-holds-fresh` | PR1b, For You failing (503) and nothing stored: the phone shows a category without storing it; saving a story there adds Saved in front of it, and the phone stays on that category and still stores nothing |
+| `flow-foryou-down-holds-index` | PR1b: the same with only an old index stored (`mobileCol.last` = 1); the index isn't migrated while For You is down |
+| `flow-prefs-fail-keeps-saved` | PR1b: `GET /api/preferences` fails (500) with `meta:saved` stored; the phone shows another tab, and `meta:saved` stays stored, also after a poll |
 | `flow-tap-tab-scrolls-top` | PR1b: only the phone list carries `data-scroller`; tapping the shown tab scrolls that list to the top (at once under reduced motion) without moving the phone; another tab opens at its own top |
 | `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
 | `flow-h1-taps` | the harness: ≡ then Settings counts 2 taps, passes `taps(page, 2, …)` and fails `taps(page, 1, …)` |

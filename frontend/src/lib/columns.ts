@@ -70,6 +70,11 @@ export type ResolveOpts = {
   // The source filter has replaced the tabs with its one column; the
   // stored tab comes back when the filter is cleared.
   filterActive: boolean
+  // The tab last shown in place of the stored one while nothing could
+  // be stored (not loaded, or under the filter). Held by key until the
+  // list settles, so a tab appearing in front of it (a save adding
+  // Saved) can't move the phone the way it would move a place.
+  standIn?: ColKey | null
 }
 
 /** The tab a device opens on when it has none stored: the first tab
@@ -87,6 +92,12 @@ export function freshTabIndex(tabs: readonly Tab[]): number {
 /** Which tab the phone shows.
  *
  *  - The wanted key is in the strip: show it.
+ *  - Until the list settles (loaded, no filter), a stand-in shown
+ *    earlier for a stored tab that is missing, a legacy index or a
+ *    fresh device stays shown while it is in the strip. Every rule
+ *    below picks a place, and places shift when a tab appears in
+ *    front; the stand-in is followed by key, as a stored tab is. Once
+ *    settled the rules below apply, and the tab they pick is stored.
  *  - It is missing: show the tab now at ``lastIndex`` (the place the
  *    stored tab last stood, so the neighbour of a tab that just went),
  *    or the fresh-device tab when it was never shown here. Once the
@@ -106,7 +117,7 @@ export function resolveTab(
   tabs: readonly Tab[],
   wanted: StoredTab,
   lastIndex: number | null,
-  { loaded, filterActive }: ResolveOpts,
+  { loaded, filterActive, standIn = null }: ResolveOpts,
 ): TabChoice {
   if (tabs.length === 0) return { key: null, index: -1, store: null }
   const settle = loaded && !filterActive
@@ -119,9 +130,16 @@ export function resolveTab(
     const index = freshTabIndex(tabs)
     return tabs[index].size > 0 ? pick(index) : { ...pick(index), store: null }
   }
+  const shown = (key: ColKey | null): TabChoice | null => {
+    const at = key == null ? -1 : tabs.findIndex((t) => t.key === key)
+    return at >= 0 ? { key: tabs[at].key, index: at, store: null } : null
+  }
+  const stored = wanted && 'key' in wanted ? shown(wanted.key) : null
+  if (stored) return stored
+  // Brief never stands in by choice (see below), so it is never held.
+  const held = !settle && standIn !== BRIEF_KEY ? shown(standIn) : null
+  if (held) return held
   if (wanted && 'key' in wanted) {
-    const at = tabs.findIndex((t) => t.key === wanted.key)
-    if (at >= 0) return { key: wanted.key, index: at, store: null }
     // The filter's column has no place of its own once the filter is
     // cleared.
     if (lastIndex == null || wanted.key === FILTER_KEY) return fresh()
