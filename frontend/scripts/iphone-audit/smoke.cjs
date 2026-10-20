@@ -7,7 +7,8 @@
 //
 // Opens the built app (vite preview) at 390x844@3 and 320x568@2 with touch
 // emulation and a fully mocked API, drives it into each state in STATES, and
-// checks the layout rules C1-C15 in every state. Exit 1 on any failure.
+// checks the layout rules C1-C16 in every state (and C17, no whole-list PUT
+// of a preference set key, in every state and flow). Exit 1 on any failure.
 // --states-only skips the behaviour flows (the WebKit report-only run).
 //
 // The caller sets PLAYWRIGHT_BROWSERS_PATH (locally /opt/pw-browsers; CI uses
@@ -61,6 +62,7 @@ const RULES = {
   C14: { title: 'ellipsis floor: a truncated box keeps >= min(96px, its content)' },
   C15: { title: 'no native search field (input[type=search])' },
   C16: { title: 'title fits: the header h1 is not cut off' },
+  C17: { title: 'preferences: no whole-list PUT of a set key (saves, hides, votes, read and seen marks go as PATCH)' },
 }
 // Rules every state runs in the page. Per-state additions go in `extra`.
 const PAGE_RULES = ['C1', 'C2', 'C3', 'C4', 'C5', 'C6', 'C7', 'C10', 'C11', 'C12', 'C13', 'C14', 'C15']
@@ -982,6 +984,7 @@ async function runState(browser, state, width, opts) {
     await context.clock.setFixedTime(F.NOW)
     await mockApi(context, {
       onUnmocked: ({ method, path: p }) => push('C8', { detail: `unmocked request ${method} ${p}` }),
+      onSetKeyPut: ({ key }) => push('C17', { detail: `PUT /api/preferences/${key}: a set key is written as a change (PATCH), never as a whole list` }),
     })
     const page = await context.newPage()
     const settle = requestTracker(page)

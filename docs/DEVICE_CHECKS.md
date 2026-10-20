@@ -42,6 +42,11 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #38 · With a saved view chip showing, set News to Best and tap the chip. Pass: News stays on Best.
 - [ ] #38 · Save a story, then open Menu → Settings → Reset, tap Reset reading state, then Reset. Pass: after the reload the story is still in Saved, hidden stories stay hidden and the saved view chips are still there.
 - [ ] #38 · Only if no AI provider is set up: open the Brief tab. Pass: it shows "Brief needs an AI provider · Set up" on one line; Set up opens Settings › AI. (With a provider set up: Generate or Regenerate shows as before.)
+- [ ] #<pr> · After deploying, force-quit and reopen the home-screen app, reload the desktop tab, and open Menu → Settings → Reset on each. Pass: both show the same "Build …" line, with this deploy's time. PR2c merges only after this line is ticked.
+- [ ] #<pr> · With Popping open on the phone, save a story on the laptop, then wait a minute. Pass: the story shows as saved on the phone without a reload.
+- [ ] #<pr> · Hide a story on the phone and, within a few seconds, save a different story on the laptop; then force-quit and reopen the phone app and reload the laptop. Pass: on both, the hidden story stays hidden and the saved one stays saved.
+- [ ] #<pr> · Save a story on the phone and switch to another app straight away; force-quit Popping from the app switcher and reopen it. Pass: the story is still in Saved, on the laptop too.
+- [ ] #<pr> · Turn on airplane mode on the phone, save a story, turn airplane mode off and come back to Popping. Pass: within a few seconds the story shows as saved on the laptop (after its next poll or a reload).
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

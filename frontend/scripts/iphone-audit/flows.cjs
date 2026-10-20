@@ -20,8 +20,16 @@
 // Every flow also gets installHarness() before the page loads: window.open,
 // navigator.share and the clipboard are stubbed (nothing leaves the page),
 // and fetches to /api/preferences and /api/interactions are recorded with
-// their keepalive flag, which Playwright's Request does not expose
-// (harnessLog()).
+// their keepalive flag, which Playwright's Request does not expose, and
+// whether the app has read the answer (harnessLog(), answered()).
+//
+// Preferences. capture.cjs keeps a preference store per context; a flow
+// seeds it with prefMock(context).seed({ key: value }) (rows as if the
+// server had them) and queues faults with prefMock(context).fail(...).
+// Answering GET /api/preferences with a fixed body instead would bring
+// that body back on every poll and on every return to the front, which
+// now re-read the preferences. Any whole-list PUT of a set key fails
+// the flow under smoke rule C17.
 //
 // Time. Flows that assert dwell, batch, toast, poll or arrival timing call
 // installClock(page) in `before` and move time with page.clock.runFor (as
@@ -31,6 +39,7 @@
 'use strict'
 
 const F = require('./fixtures.cjs')
+const { prefMock } = require('./capture.cjs')
 
 const SETTINGS = '[role="dialog"][aria-label="settings"]'
 const FEED_TABS = `${SETTINGS} [role="tablist"][aria-label="feed manager tabs"]`
@@ -123,20 +132,47 @@ function harnessInit() {
   const h = (window.__harness = { fetches: [], opened: [], shared: [], copied: [] })
   const realFetch = window.fetch
   window.fetch = function (input, init) {
+    let rec = null
     try {
       const req = input instanceof Request ? input : null
       const url = new URL(req ? req.url : String(input), location.href)
       if (/^\/api\/(preferences|interactions)(\/|$)/.test(url.pathname)) {
-        h.fetches.push({
+        rec = {
           method: String((init && init.method) || (req && req.method) || 'GET').toUpperCase(),
           path: url.pathname,
           keepalive: !!(init && 'keepalive' in init ? init.keepalive : req && req.keepalive),
-        })
+          answered: false,
+        }
+        h.fetches.push(rec)
       }
     } catch {
       // A URL the wrapper can't read is still fetched as usual.
     }
-    return realFetch.apply(this, arguments)
+    const res = realFetch.apply(this, arguments)
+    if (rec) {
+      // `answered` turns true once the app has read the body (or the
+      // request failed). These callbacks run before the app's own, and
+      // everything the app does with the answer up to its next await on
+      // the network is microtasks, so a later evaluate that sees
+      // `answered` sees the app's handling of it too.
+      res.then(
+        (r) => {
+          const json = r.json
+          r.json = function () {
+            const body = json.apply(this, arguments)
+            const done = () => {
+              rec.answered = true
+            }
+            body.then(done, done)
+            return body
+          }
+        },
+        () => {
+          rec.answered = true
+        },
+      )
+    }
+    return res
   }
   window.open = (url, target) => {
     h.opened.push({ url: url == null ? '' : String(url), target: target == null ? '' : String(target) })
@@ -163,8 +199,16 @@ function harnessInit() {
 const installHarness = (page) => page.addInitScript(harnessInit)
 
 // What the stubs and the fetch wrapper recorded so far:
-// { fetches: [{ method, path, keepalive }], opened, shared, copied }.
+// { fetches: [{ method, path, keepalive, answered }], opened, shared, copied }.
 const harnessLog = (page) => page.evaluate(() => window.__harness)
+// The app has taken in the answer to its latest `method` request to `path`
+// (a flow waits for this before moving the clock or the page's
+// visibility, so a retry or a return doesn't race the answer).
+const answered = (page, method, path) =>
+  harnessLog(page).then((h) => {
+    const sent = h.fetches.filter((f) => f.method === method && f.path === path)
+    return sent.length > 0 && sent[sent.length - 1].answered
+  })
 
 const isChromium = (page) => page.context().browser().browserType().name() === 'chromium'
 
@@ -444,19 +488,10 @@ const BRIEF = {
   meta: null,
 }
 
-// Writes `rows` ({ key: value }) into the mock's preference store
-// through the page, then reloads, so the app reads them the way it
-// would from the server.
+// Writes `rows` ({ key: value }) into the mock's preference store, then
+// reloads, so the app reads them the way it would from the server.
 async function putPrefs(page, rows) {
-  await page.evaluate(async (r) => {
-    for (const [key, value] of Object.entries(r)) {
-      await fetch(`/api/preferences/${encodeURIComponent(key)}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ value }),
-      })
-    }
-  }, rows)
+  prefMock(page.context()).seed(rows)
   await page.reload()
   await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
 }
@@ -479,8 +514,9 @@ async function recordInteractions(page) {
 }
 const bookmarksFor = (page, id) => page._events.filter((e) => e.type === 'bookmark' && e.entry_id === id).length
 
-// Every PUT and DELETE to /api/preferences/<key> from now on, as
-// { method, key, value }; they go on to the mock.
+// Every PUT, PATCH and DELETE to /api/preferences/<key> from now on, in
+// the order sent, as { method, key, value, body } (`value` a PUT's,
+// `body` a PATCH's change); they go on to the mock.
 async function prefWrites(page) {
   const out = []
   await page.route(
@@ -488,15 +524,19 @@ async function prefWrites(page) {
     (route) => {
       const req = route.request()
       const method = req.method()
-      if (method === 'PUT' || method === 'DELETE') {
+      if (method === 'PUT' || method === 'PATCH' || method === 'DELETE') {
         const key = decodeURIComponent(new URL(req.url()).pathname.slice('/api/preferences/'.length))
-        out.push({ method, key, value: method === 'PUT' ? (req.postDataJSON() || {}).value : undefined })
+        const body = method === 'DELETE' ? undefined : req.postDataJSON() || {}
+        out.push({ method, key, value: method === 'PUT' ? body.value : undefined, body: method === 'PATCH' ? body : undefined })
       }
       return route.fallback()
     },
   )
   return out
 }
+
+// The ids a recorded PATCH body adds to (or removes from) its key.
+const patched = (writes, key, op) => writes.filter((w) => w.method === 'PATCH' && w.key === key).flatMap((w) => w.body[op] || [])
 
 module.exports = [
   flow('flow-fj-youtube-handle', {
@@ -1012,19 +1052,9 @@ module.exports = [
   }),
 
   dashFlow('flow-fl-rename-keeps-filter-and-view', {
-    before: async ({ page }) => {
+    before: async ({ page, context }) => {
       const preset = { id: 'p1', name: 'Deals view', activeSources: ['slickdeals_frontpage', 'rfd_hot_deals'], columnPrefs: {} }
-      await page.route(
-        (u) => new URL(u).pathname === '/api/preferences',
-        (route) =>
-          route.request().method() === 'GET'
-            ? route.fulfill({
-                status: 200,
-                contentType: 'application/json',
-                body: JSON.stringify({ items: [{ key: 'filter_presets', value: [preset], updated_at: new Date(F.NOW).toISOString() }] }),
-              })
-            : route.fallback(),
-      )
+      prefMock(context).seed({ filter_presets: [preset] })
       page._puts = await record(page, 'PUT', '/api/preferences/filter_presets')
       page._patches = await record(page, 'PATCH', '/api/sources/6')
     },
@@ -1109,8 +1139,8 @@ module.exports = [
       await shot('saved')
       if ((await storedTab(page)) !== 'cat:news') fail('TAB-STAR', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
       // The save is in the store before the reload.
-      const put = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PUT' && f.path === '/api/preferences/starred_entries'))
-      if (!(await waitFor(put, 3000))) return fail('TAB-STAR', 'the save sent no PUT')
+      const sent = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
+      if (!(await waitFor(sent, 3000))) return fail('TAB-STAR', 'the save sent no PATCH')
       await sleep(300)
       await page.reload()
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
@@ -1125,18 +1155,8 @@ module.exports = [
   // moves to the tab now in its place (For You), that becomes its tab,
   // and a save from there brings Saved back without moving the phone.
   dashFlow('flow-unsave-last-saved', {
-    before: async ({ page }) => {
-      await page.route(
-        (u) => new URL(u).pathname === '/api/preferences',
-        (route) =>
-          route.request().method() === 'GET'
-            ? route.fulfill({
-                status: 200,
-                contentType: 'application/json',
-                body: JSON.stringify({ items: [{ key: 'starred_entries', value: [103], updated_at: new Date(F.NOW).toISOString() }] }),
-              })
-            : route.fallback(),
-      )
+    before: async ({ context }) => {
+      prefMock(context).seed({ starred_entries: [103] })
     },
     run: async ({ page, fail, shot }) => {
       const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
@@ -1170,18 +1190,15 @@ module.exports = [
   dashFlow('flow-tab-migrates-index', {
     // The strip, not a card: a wrong migration can land on any tab.
     wait: `${STRIP} [aria-selected="true"]`,
-    before: async ({ page }) => {
+    before: async ({ page, context }) => {
       await page.addInitScript(() => localStorage.setItem('popping.v1.mobileCol.last', '0'))
+      prefMock(context).seed({ starred_entries: [103] })
       await page.route(
         (u) => new URL(u).pathname === '/api/preferences',
         async (route) => {
           if (route.request().method() !== 'GET') return route.fallback()
           await sleep(1500)
-          return route.fulfill({
-            status: 200,
-            contentType: 'application/json',
-            body: JSON.stringify({ items: [{ key: 'starred_entries', value: [103], updated_at: new Date(F.NOW).toISOString() }] }),
-          })
+          return route.fallback()
         },
       )
     },
@@ -1282,22 +1299,12 @@ module.exports = [
   // can't pull the phone to it.
   dashFlow('flow-foryou-down-settles', {
     expectedFailedLoads: ['/api/foryou'],
-    before: async ({ page }) => {
+    before: async ({ page, context }) => {
       await page.route(
         (u) => new URL(u).pathname === '/api/foryou',
         (route) => route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' }),
       )
-      await page.route(
-        (u) => new URL(u).pathname === '/api/preferences',
-        (route) =>
-          route.request().method() === 'GET'
-            ? route.fulfill({
-                status: 200,
-                contentType: 'application/json',
-                body: JSON.stringify({ items: [{ key: 'starred_entries', value: [103], updated_at: new Date(F.NOW).toISOString() }] }),
-              })
-            : route.fallback(),
-      )
+      prefMock(context).seed({ starred_entries: [103] })
     },
     run: async ({ page, fail, shot }) => {
       const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
@@ -1692,8 +1699,13 @@ module.exports = [
 
   // Reset takes the reading state (read marks, last visits, tab prefs,
   // section folds, History grouping) and keeps saves, hides, votes and
-  // saved views.
+  // saved views. A read mark and a save still queued when Reset is tapped
+  // are dropped: no PATCH or PUT goes after the DELETEs (the reload's
+  // leave flush would otherwise write the read marks back).
   dashFlow('flow-reset-keeps-saves', {
+    before: async ({ page }) => {
+      await installClock(page)
+    },
     run: async ({ page, fail }) => {
       await putPrefs(page, {
         starred_entries: [103],
@@ -1707,6 +1719,16 @@ module.exports = [
         'column_sections:news': { newCollapsed: false, historyCollapsed: true },
       })
       const writes = await prefWrites(page)
+      // A read mark and a save wait in the 1 s batch (the clock is held).
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      await tap(page, phoneTab(page, /^news/i))
+      const id = await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().getAttribute('data-card-id')
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"]`)
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      await tap(page, card.locator('button[aria-label="mark this card as read"]'))
+      await sleep(300)
+      if (writes.length) return fail('RESET', `the queued writes went before Reset: ${JSON.stringify(writes)}`)
       await page.evaluate((u) => {
         history.pushState({ popping: 'settings' }, '', u)
         dispatchEvent(new PopStateEvent('popstate'))
@@ -1716,7 +1738,11 @@ module.exports = [
       const loaded = page.waitForEvent('load')
       await page.locator(SETTINGS).getByRole('button', { name: 'Reset', exact: true }).click()
       await loaded
+      await page.clock.resume()
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
+      const firstDelete = writes.findIndex((w) => w.method === 'DELETE')
+      const after = writes.slice(firstDelete).filter((w) => w.method !== 'DELETE')
+      if (after.length) fail('RESET', `writes after the DELETEs: ${JSON.stringify(after)}`)
       const deleted = writes.filter((w) => w.method === 'DELETE').map((w) => w.key)
       for (const k of ['starred_entries', 'hidden_entries', 'filter_presets', 'voted_entries']) {
         if (deleted.includes(k)) fail('RESET', `Reset deleted ${k}`)
@@ -1728,6 +1754,229 @@ module.exports = [
       const kept = ['filter_presets', 'hidden_entries', 'starred_entries', 'voted_entries']
       if (JSON.stringify(left) !== JSON.stringify(kept)) fail('RESET', `after Reset the server holds ${JSON.stringify(left)}`)
       if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) fail('RESET', 'no Saved tab after Reset')
+    },
+  }),
+
+  // --- PR2b: preferences sync by change ------------------------------------
+
+  // A GET that can't know about a hide still on its way doesn't bring the
+  // story back: one answered while the hide's PATCH is held, and one sent
+  // while it was held but answered with the old set after the PATCH's
+  // answer (sync rule 5).
+  dashFlow('flow-prefs-resync', {
+    before: async ({ page, context }) => {
+      // A row for the hides already exists, without the story.
+      prefMock(context).seed({ hidden_entries: [999] })
+      page._held = []
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences/hidden_entries',
+        async (route) => {
+          if (route.request().method() !== 'PATCH') return route.fallback()
+          await new Promise((r) => page._held.push(r))
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, context, fail, shot }) => {
+      const gets = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'GET' && f.path === '/api/preferences').length)
+      await tap(page, phoneTab(page, /^news/i))
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      const shown = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"]`).count().then((n) => n > 0)
+      await tap(page, card.locator('button[aria-label="hide"]'))
+      if (!(await waitFor(async () => !(await shown()), 2000))) return fail('PREFS-RESYNC', `story ${id} still shows after Hide`)
+      if (!(await waitFor(() => page._held.length === 1, 3000))) return fail('PREFS-RESYNC', 'the hide sent no PATCH')
+
+      // 1. Back to the front (a full GET) while the PATCH is held: the
+      // store still has only 999.
+      let before = await gets()
+      await startPoll(page)
+      if (!(await waitFor(async () => (await gets()) > before, 3000))) return fail('PREFS-RESYNC', 'coming back sent no GET /api/preferences')
+      await sleep(500)
+      if (await shown()) return fail('PREFS-RESYNC', `a GET answered while the hide was on its way brought story ${id} back`)
+
+      // 2. A GET sent now, answered with the old set only after the
+      // PATCH's answer has been taken in.
+      let release
+      const stale = new Promise((r) => (release = r))
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences',
+        async (route) => {
+          if (route.request().method() !== 'GET') return route.fallback()
+          await stale
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ items: [{ key: 'hidden_entries', value: [999], updated_at: new Date(F.NOW).toISOString() }] }),
+          })
+        },
+        { times: 1 },
+      )
+      before = await gets()
+      await startPoll(page)
+      if (!(await waitFor(async () => (await gets()) > before, 3000))) return fail('PREFS-RESYNC', 'the second return sent no GET')
+      page._held[0]()
+      const stored = () => (prefMock(context).value('hidden_entries') || []).includes(id)
+      if (!(await waitFor(stored, 3000))) return fail('PREFS-RESYNC', 'the PATCH never reached the store')
+      await sleep(500)
+      release()
+      await sleep(800)
+      if (await shown()) return fail('PREFS-RESYNC', `a GET sent before the hide's answer, answered with the old set, brought story ${id} back`)
+      await shot('hidden')
+
+      // 3. A GET sent after the answer is taken in as it is.
+      before = await gets()
+      await startPoll(page)
+      if (!(await waitFor(async () => (await gets()) > before, 3000))) return fail('PREFS-RESYNC', 'the third return sent no GET')
+      await sleep(500)
+      if (await shown()) fail('PREFS-RESYNC', `story ${id} came back after the hide was saved`)
+    },
+  }),
+
+  // Leaving the app right after a save loses nothing: hiding the page
+  // sends the save at once, with keepalive, inside its 1 s batch.
+  dashFlow('flow-visibility-flush', {
+    before: async ({ page }) => {
+      await installClock(page)
+    },
+    run: async ({ page, context, fail }) => {
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      await sleep(400)
+      const patches = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
+      if ((await patches()).length) return fail('VIS-FLUSH', 'the save went out before its batch')
+      await setHidden(page, true)
+      if (!(await waitFor(async () => (await patches()).length === 1, 3000))) return fail('VIS-FLUSH', 'hiding the page sent no PATCH of the save')
+      const [sent] = await patches()
+      if (!sent.keepalive) fail('VIS-FLUSH', 'the PATCH sent when the page hid has no keepalive')
+      if (!(await waitFor(() => (prefMock(context).value('starred_entries') || []).includes(id), 3000))) fail('VIS-FLUSH', `story ${id} is not in the store`)
+      // Answered while hidden: coming back doesn't send it again.
+      if (!(await waitFor(() => answered(page, 'PATCH', '/api/preferences/starred_entries'), 3000))) return fail('VIS-FLUSH', 'the PATCH was never answered')
+      await setHidden(page, false)
+      await page.clock.runFor(5000)
+      await sleep(300)
+      if ((await patches()).length !== 1) fail('VIS-FLUSH', `${(await patches()).length} PATCHes of one save`)
+    },
+  }),
+
+  // A save that the server can't take (503) is tried again after 2 s,
+  // with a save made meanwhile folded in: both end up stored, with no
+  // error toast.
+  dashFlow('flow-prefs-retry', {
+    expectedFailedLoads: ['/api/preferences/starred_entries'],
+    before: async ({ page, context }) => {
+      await installClock(page)
+      prefMock(context).fail(503, { key: 'starred_entries' })
+    },
+    run: async ({ page, context, fail }) => {
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      const patches = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries').length)
+      const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
+      const a = Number(await cards.nth(0).getAttribute('data-card-id'))
+      const b = Number(await cards.nth(1).getAttribute('data-card-id'))
+      await tap(page, cards.nth(0).locator('button[aria-label="save for later"]'))
+      await page.clock.runFor(1000)
+      if (!(await waitFor(() => prefMock(context).faultsLeft() === 0, 3000))) return fail('PREFS-RETRY', 'the first save was not sent')
+      // Its retry is timed from the 503's arrival, so the clock waits for it.
+      if (!(await waitFor(() => answered(page, 'PATCH', '/api/preferences/starred_entries'), 3000))) return fail('PREFS-RETRY', 'the 503 was never taken in')
+      await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="${b}"] button[aria-label="save for later"]`))
+      await page.clock.runFor(1000)
+      await sleep(300)
+      if ((await patches()) !== 1) return fail('PREFS-RETRY', `${await patches()} PATCHes before the retry, expected 1 (the second save waits for it)`)
+      await page.clock.runFor(1500)
+      if (!(await waitFor(async () => (await patches()) === 2, 3000))) return fail('PREFS-RETRY', `no retry 2 s after the 503 (${await patches()} PATCHes)`)
+      const stored = () => prefMock(context).value('starred_entries') || []
+      if (!(await waitFor(() => stored().includes(a) && stored().includes(b), 3000))) fail('PREFS-RETRY', `the store holds ${JSON.stringify(stored())}, expected ${a} and ${b}`)
+      for (const id of [a, b]) {
+        if (!(await page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="remove from saved"]`).count())) fail('PREFS-RETRY', `story ${id} doesn't show as saved`)
+      }
+      if (await page.getByText(/^Couldn't save/).count()) fail('PREFS-RETRY', 'an error toast for a save that got through')
+    },
+  }),
+
+  // A server rolled back to before PATCH answers 405: the save stays on
+  // screen and queued (no "saved" state flips back), is tried again after
+  // 2, 4 and 8 s, then shows one "Couldn't save" toast; once the server
+  // takes PATCH again, leaving the page saves it.
+  dashFlow('flow-prefs-405', {
+    expectedFailedLoads: ['/api/preferences/starred_entries'],
+    before: async ({ page, context }) => {
+      await installClock(page)
+      prefMock(context).fail(405, { key: 'starred_entries', times: 4 })
+    },
+    run: async ({ page, context, fail, shot }) => {
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      const patches = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries').length)
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      const saved = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="remove from saved"]`).count().then((n) => n > 0)
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      await page.clock.runFor(1000)
+      if (!(await waitFor(async () => (await patches()) === 1, 3000))) return fail('PREFS-405', 'the save was not sent')
+      for (const [i, wait] of [[2, 2000], [3, 4000], [4, 8000]]) {
+        // Each retry is timed from the 405's arrival.
+        if (!(await waitFor(() => answered(page, 'PATCH', '/api/preferences/starred_entries'), 3000))) return fail('PREFS-405', `answer ${i - 1} was never taken in`)
+        if (!(await saved())) return fail('PREFS-405', `after ${i - 1} answers of 405 the story no longer shows as saved`)
+        await page.clock.runFor(wait)
+        if (!(await waitFor(async () => (await patches()) === i, 3000))) return fail('PREFS-405', `no retry ${wait / 1000} s after a 405 (${await patches()} PATCHes)`)
+      }
+      if (!(await waitFor(() => page.getByText(/^Couldn't save your latest changes/).count().then((n) => n === 1), 3000))) fail('PREFS-405', 'no toast once the retries were used up')
+      if (!(await saved())) fail('PREFS-405', 'the save no longer shows after the retries')
+      if (prefMock(context).value('starred_entries') !== undefined) fail('PREFS-405', 'a 405 stored the save')
+      await shot('unsaved')
+      await page.clock.runFor(30_000)
+      await sleep(300)
+      if ((await patches()) !== 4) fail('PREFS-405', `${await patches()} PATCHes; no timed retry after the third`)
+      // The server takes PATCH again: leaving sends the queued save.
+      await setHidden(page, true)
+      if (!(await waitFor(() => (prefMock(context).value('starred_entries') || []).includes(id), 3000))) fail('PREFS-405', 'leaving did not save the queued change')
+      await setHidden(page, false)
+    },
+  }),
+
+  // The preferences GET fails, so the page doesn't know the saves the
+  // server holds. A save then adds to them (a PATCH) instead of writing a
+  // one-story list over them (PR1b's notes), and the next return reads
+  // them all in.
+  dashFlow('flow-prefs-fail-save-keeps-list', {
+    expectedFailedLoads: ['/api/preferences'],
+    before: async ({ page, context }) => {
+      prefMock(context).seed({ starred_entries: [103] })
+      page._prefsDown = true
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences',
+        (route) =>
+          route.request().method() === 'GET' && page._prefsDown
+            ? route.fulfill({ status: 500, contentType: 'text/plain', body: 'error' })
+            : route.fallback(),
+      )
+    },
+    run: async ({ page, context, fail, shot }) => {
+      const writes = await prefWrites(page)
+      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
+      if (await hasSaved()) return fail('PREFS-FAIL-SAVE', 'a Saved tab although the preferences failed')
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]:not([data-card-id="103"])`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      const stored = () => prefMock(context).value('starred_entries') || []
+      if (!(await waitFor(() => stored().includes(id), 3000))) return fail('PREFS-FAIL-SAVE', `the save of ${id} never reached the store`)
+      if (!stored().includes(103)) fail('PREFS-FAIL-SAVE', `the save wrote over the server's saves: the store holds ${JSON.stringify(stored())}`)
+      const sent = writes.filter((w) => w.key === 'starred_entries').map((w) => `${w.method} ${JSON.stringify(w.body ?? w.value)}`)
+      if (sent.join() !== `PATCH {"add":[${id}]}`) fail('PREFS-FAIL-SAVE', `the save sent ${JSON.stringify(sent)}, expected one PATCH adding ${id}`)
+      // The server is back: the next return reads every save in.
+      page._prefsDown = false
+      await startPoll(page)
+      if (!(await waitFor(hasSaved, 3000))) return fail('PREFS-FAIL-SAVE', 'no Saved tab once the preferences loaded')
+      await tap(page, phoneTab(page, /^saved/i))
+      for (const want of [103, id]) {
+        if (!(await waitFor(() => page.locator(`${MOBILE_MAIN} article[data-card-id="${want}"]`).count().then((n) => n > 0), 3000))) fail('PREFS-FAIL-SAVE', `story ${want} is not in Saved`)
+      }
+      await shot('saved')
     },
   }),
 
@@ -2089,10 +2338,14 @@ module.exports = [
 
   // capture.cjs keeps preferences: a PUT is read back (all, since, by
   // key), a DELETE removes it, and a reload still sees what was written.
+  // PATCH changes a set key as the server does (PR2b): `remove` before
+  // `add`, `set` with null clearing a vote, 400 for a key that isn't a
+  // set key, 422 for the wrong change; a queued fault answers once.
   dashFlow('flow-h1-pref-store', {
-    // The read after DELETE is a 404 on purpose.
-    expectedFailedLoads: ['/api/preferences/hidden_entries'],
-    run: async ({ page, fail }) => {
+    // The read after DELETE is a 404 on purpose, and so are the refused
+    // PATCHes.
+    expectedFailedLoads: ['/api/preferences/column_prefs:news', '/api/preferences/filter_presets', '/api/preferences/starred_entries', '/api/preferences/voted_entries'],
+    run: async ({ page, context, fail }) => {
       const call = (method, path, body) =>
         page.evaluate(
           async ([m, p, b]) => {
@@ -2102,22 +2355,51 @@ module.exports = [
           [method, path, body],
         )
       const keys = (res) => res.body.items.map((i) => i.key).sort().join(',')
-      const a = await call('PUT', '/api/preferences/hidden_entries', { value: [101] })
-      const b = await call('PUT', '/api/preferences/starred_entries', { value: [102] })
+      const a = await call('PUT', '/api/preferences/column_prefs:news', { value: { sort: 'best', minScore: 0, maxAgeHours: null } })
+      const b = await call('PUT', '/api/preferences/filter_presets', { value: [] })
       if (a.body.updated_at >= b.body.updated_at) fail('H1-PREFS', `writes are out of order: ${a.body.updated_at}, ${b.body.updated_at}`)
       const all = await call('GET', '/api/preferences')
-      if (keys(all) !== 'hidden_entries,starred_entries') fail('H1-PREFS', `GET lists ${keys(all)}`)
+      if (keys(all) !== 'column_prefs:news,filter_presets') fail('H1-PREFS', `GET lists ${keys(all)}`)
       const since = await call('GET', `/api/preferences?since=${encodeURIComponent(a.body.updated_at)}`)
-      if (keys(since) !== 'starred_entries') fail('H1-PREFS', `GET since the first write lists ${keys(since)}`)
-      const one = await call('GET', '/api/preferences/starred_entries')
-      if (JSON.stringify(one.body.value) !== '[102]') fail('H1-PREFS', `GET by key returns ${JSON.stringify(one.body)}`)
-      await call('DELETE', '/api/preferences/hidden_entries')
-      if ((await call('GET', '/api/preferences/hidden_entries')).status !== 404) fail('H1-PREFS', 'a deleted key still reads back')
+      if (keys(since) !== 'filter_presets') fail('H1-PREFS', `GET since the first write lists ${keys(since)}`)
+      const one = await call('GET', '/api/preferences/filter_presets')
+      if (JSON.stringify(one.body.value) !== '[]') fail('H1-PREFS', `GET by key returns ${JSON.stringify(one.body)}`)
+      await call('DELETE', '/api/preferences/column_prefs:news')
+      if ((await call('GET', '/api/preferences/column_prefs:news')).status !== 404) fail('H1-PREFS', 'a deleted key still reads back')
+
+      // PATCH, as on the server.
+      const patch = (key, body) => call('PATCH', `/api/preferences/${encodeURIComponent(key)}`, body)
+      await patch('starred_entries', { add: [3, 1, 2] })
+      const changed = await patch('starred_entries', { add: [1, 4], remove: [1, 2] })
+      if (JSON.stringify(changed.body.value) !== '[3,1,4]') fail('H1-PREFS', `remove before add gave ${JSON.stringify(changed.body.value)}, expected [3,1,4]`)
+      await patch('voted_entries', { set: { 5: 'up', 6: 'down' } })
+      const votes = await patch('voted_entries', { set: { 5: null, 6: 'up' } })
+      if (JSON.stringify(votes.body.value) !== '{"6":"up"}') fail('H1-PREFS', `votes ${JSON.stringify(votes.body.value)}, expected {"6":"up"}`)
+      const seen = await patch('seen:News/Tech', { add: [9] })
+      if (seen.status !== 200 || JSON.stringify(prefMock(context).value('seen:News/Tech')) !== '[9]') fail('H1-PREFS', `seen:News/Tech PATCH: ${JSON.stringify(seen)}`)
+      if ((await patch('filter_presets', { add: [1] })).status !== 400) fail('H1-PREFS', 'PATCH of a key that is not a set key was not a 400')
+      if ((await patch('starred_entries', { set: { 1: 'up' } })).status !== 422) fail('H1-PREFS', 'set on an id list was not a 422')
+      if ((await patch('voted_entries', { add: [1] })).status !== 422) fail('H1-PREFS', 'add on voted_entries was not a 422')
+      for (const [key, body] of [
+        ['starred_entries', { add: [0] }],
+        ['starred_entries', { add: ['5'] }],
+        ['starred_entries', { add: [1], extra: true }],
+        ['voted_entries', { set: { 5: 'sideways' } }],
+        ['voted_entries', { set: { '05': 'up' } }],
+      ]) {
+        if ((await patch(key, body)).status !== 422) fail('H1-PREFS', `PATCH ${key} ${JSON.stringify(body)} was not a 422`)
+      }
+      prefMock(context).fail(503, { key: 'starred_entries' })
+      if ((await patch('starred_entries', { add: [7] })).status !== 503) fail('H1-PREFS', 'the queued fault did not answer')
+      if ((await patch('starred_entries', { add: [7] })).status !== 200) fail('H1-PREFS', 'the fault answered twice')
+      if (JSON.stringify(prefMock(context).value('starred_entries')) !== '[3,1,4,7]') fail('H1-PREFS', `starred_entries is ${JSON.stringify(prefMock(context).value('starred_entries'))}`)
+
       await page.reload()
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
       const loaded = await harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'GET' && f.path === '/api/preferences').length)
       if (loaded !== 1) fail('H1-PREFS', `the reload sent ${loaded} GET /api/preferences`)
-      if (keys(await call('GET', '/api/preferences')) !== 'starred_entries') fail('H1-PREFS', 'the store did not survive a reload')
+      const kept = 'filter_presets,seen:News/Tech,starred_entries,voted_entries'
+      if (keys(await call('GET', '/api/preferences')) !== kept) fail('H1-PREFS', 'the store did not survive a reload')
     },
   }),
 
@@ -2173,25 +2455,29 @@ module.exports = [
     before: async ({ page }) => {
       await installClock(page)
       page._reload = await newBuild(page)
-      // Saves (PUT starred_entries): while `page._refuse` lists statuses,
-      // each one is answered with the next of them; the rest are held
-      // 500 ms and marked done just before they are answered, so a reload
-      // that didn't wait for one comes first. (Playwright reports a
-      // request a navigation cut short as failed even when the page had
-      // its response, so requestfinished can't tell.)
+      // Saves (PATCH starred_entries): while `page._refuse` lists
+      // statuses, each one is answered with the next of them (counted in
+      // page._refused); the rest are held 500 ms and marked done just
+      // before they are answered, so a reload that didn't wait for one
+      // comes first. (Playwright reports a request a navigation cut short
+      // as failed even when the page had its response, so
+      // requestfinished can't tell.)
       page._refuse = []
-      page._savePuts = 0
+      page._refused = 0
+      page._saves = 0
       await page.route(
         (u) => new URL(u).pathname === '/api/preferences/starred_entries',
         async (route) => {
-          if (route.request().method() !== 'PUT') return route.fallback()
-          page._savePuts++
+          if (route.request().method() !== 'PATCH') return route.fallback()
+          page._saves++
           if (page._refuse.length) {
             const status = page._refuse.shift()
-            return route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ detail: `refused (${status})` }) })
+            await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify({ detail: `refused (${status})` }) })
+            page._refused++
+            return
           }
           await sleep(500)
-          page._reload.events.push('put-done')
+          page._reload.events.push('save-done')
           return route.fallback()
         },
       )
@@ -2281,69 +2567,84 @@ module.exports = [
       // server doesn't take; it would refuse it every time) is neither
       // retried nor kept, and the next return reloads without sending it
       // again.
-      let puts = page._savePuts
+      let saves = page._saves
       page._refuse = [400, 400, 400]
       await tap(page, saveButton())
-      if (!(await waitFor(() => page._savePuts === puts + 1, 3000))) return fail('RELOAD-REFUSED', 'the save was not sent')
+      if (!(await waitFor(() => page._saves === saves + 1, 3000))) return fail('RELOAD-REFUSED', 'the save was not sent')
       await sleep(2500)
-      if (page._savePuts !== puts + 1) return fail('RELOAD-REFUSED', `a save refused with 400 was sent again (${page._savePuts - puts} PUTs)`)
+      if (page._saves !== saves + 1) return fail('RELOAD-REFUSED', `a save refused with 400 was sent again (${page._saves - saves} PATCHes)`)
       await away(page, 11)
       if (!(await waitFor(() => log.navs === 1, 6000))) return fail('RELOAD-REFUSED', `a save refused with 400 kept the page from reloading: ${JSON.stringify(log)}`)
-      if (page._savePuts !== puts + 1) fail('RELOAD-REFUSED', `the flush sent the refused save again (${page._savePuts - puts} PUTs)`)
+      if (page._saves !== saves + 1) fail('RELOAD-REFUSED', `the flush sent the refused save again (${page._saves - saves} PATCHes)`)
       if (!(await reloaded(1))) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 1`)
       page._refuse = []
 
-      // 7. Another build. A save waits in the debounce (the clock is
-      // paused) while the page is away; coming back sends it, the server
-      // refuses it with 409 ("reload to keep saving"), and the page still
-      // reloads.
+      // Away for `minutes` once the save sent when the page hid has had
+      // its answer (`refused` refusals in all), so its fate is settled
+      // before the page comes back.
+      const awayAfterAnswer = async (minutes, refused) => {
+        await setHidden(page, true)
+        if (!(await waitFor(() => page._refused >= refused, 3000))) return false
+        if (!(await waitFor(() => answered(page, 'PATCH', '/api/preferences/starred_entries'), 3000))) return false
+        const at = await page.evaluate(() => Date.now())
+        await page.clock.setSystemTime(at + minutes * 60_000)
+        await setHidden(page, false)
+        return true
+      }
+
+      // 7. Another build. A save waits in its 1 s batch (the clock is
+      // paused); hiding the page sends it, the server refuses it with 409
+      // ("reload to keep saving"), and coming back still reloads.
       page._nextScript = '/static/index-next2.js'
       let now = await page.evaluate(() => Date.now())
       await page.clock.pauseAt(now + 1000)
-      puts = page._savePuts
+      saves = page._saves
       await tap(page, saveButton())
       await sleep(400)
-      if (page._savePuts !== puts) return fail('RELOAD-REFUSED', 'the save went out before the page hid; nothing was pending')
+      if (page._saves !== saves) return fail('RELOAD-REFUSED', 'the save went out before the page hid; nothing was pending')
       page._refuse = [409, 409, 409]
-      await away(page, 11)
+      if (!(await awayAfterAnswer(11, page._refused + 1))) return fail('RELOAD-REFUSED', 'hiding the page did not send the pending save')
       if (!(await waitFor(() => log.navs === 2, 6000))) return fail('RELOAD-REFUSED', `a pending save refused with 409 kept the page from reloading: ${JSON.stringify(log)}`)
-      if (page._savePuts !== puts + 1) fail('RELOAD-REFUSED', `${page._savePuts - puts} PUTs of the save, expected 1 (refused with 409)`)
+      if (page._saves !== saves + 1) fail('RELOAD-REFUSED', `${page._saves - saves} PATCHes of the save, expected 1 (refused with 409)`)
       await page.clock.resume()
       if (!(await reloaded(2))) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 2`)
       page._refuse = []
 
-      // 8. Another build, and a save waits in the debounce again. Coming
-      // back sends it, the server can't take it (503), and the page stays.
+      // 8. Another build, and a save waits in its batch again. Hiding
+      // sends it and the server can't take it (503); coming back sends it
+      // again (the return and the reload's flush) and it still fails, so
+      // the page stays.
       page._nextScript = '/static/index-next3.js'
       now = await page.evaluate(() => Date.now())
       await page.clock.pauseAt(now + 1000)
-      puts = page._savePuts
+      saves = page._saves
       const events = log.events.length
       await tap(page, saveButton())
       await sleep(400)
-      if (page._savePuts !== puts) return fail('RELOAD-FLUSH', 'the save went out before the page hid; nothing was pending')
-      page._refuse = [503]
-      await away(page, 11)
-      if (!(await waitFor(() => page._savePuts >= puts + 1, 3000))) return fail('RELOAD-FLUSH', `coming back did not send the pending save: ${JSON.stringify(log)}`)
+      if (page._saves !== saves) return fail('RELOAD-FLUSH', 'the save went out before the page hid; nothing was pending')
+      page._refuse = Array(8).fill(503)
+      if (!(await awayAfterAnswer(11, page._refused + 1))) return fail('RELOAD-FLUSH', 'hiding the page did not send the pending save')
+      if (!(await waitFor(() => page._saves >= saves + 2, 3000))) return fail('RELOAD-FLUSH', `coming back did not send the unsaved save again: ${page._saves - saves} PATCHes`)
       await sleep(1200)
       if (log.navs !== 2) return fail('RELOAD-SAVED', 'reloaded although the pending save did not get through')
 
-      // 8b. Back again: the flush sends it once more (its retry timer is
-      // paused) and it fails a second time. Given up on, it still keeps
+      // 8b. Back again: it is sent again and fails again. It still keeps
       // the page.
-      page._refuse = [503]
+      let before = page._saves
       await away(page, 11)
-      if (!(await waitFor(() => page._savePuts >= puts + 2, 3000))) return fail('RELOAD-FLUSH', `coming back did not resend the unsaved save: ${page._savePuts - puts} PUTs`)
+      if (!(await waitFor(() => page._saves >= before + 1, 3000))) return fail('RELOAD-FLUSH', `coming back did not resend the unsaved save: ${page._saves - before} PATCHes`)
       await sleep(1200)
-      if (log.navs !== 2) return fail('RELOAD-SAVED', 'reloaded although the save failed twice')
+      if (log.navs !== 2) return fail('RELOAD-SAVED', 'reloaded although the save failed again')
 
-      // 8c. Back again: the flush sends it a third time, and the page
-      // reloads only once it is saved.
+      // 8c. The server takes it again: back once more, the save is sent,
+      // and the page reloads only once it is saved.
+      page._refuse = []
+      before = page._saves
       await away(page, 11)
       if (!(await waitFor(() => log.navs === 3, 6000))) return fail('RELOAD-FLUSH', `back after 11 min with a new build: no reload: ${JSON.stringify(log)}`)
       const after = log.events.slice(events)
-      if (after[0] !== 'put-done') fail('RELOAD-FLUSH', `the reload started before the pending save was done: ${after.join(', ')}`)
-      if (page._savePuts !== puts + 3) fail('RELOAD-FLUSH', `${page._savePuts - puts} PUTs of the save, expected 3 (failed twice, then saved)`)
+      if (after[0] !== 'save-done') fail('RELOAD-FLUSH', `the reload started before the pending save was done: ${after.join(', ')}`)
+      if (page._saves < before + 1) fail('RELOAD-FLUSH', 'the save was not sent before the reload')
       await page.clock.resume()
       if (!(await reloaded(3))) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 3`)
 

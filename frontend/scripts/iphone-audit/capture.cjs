@@ -48,6 +48,48 @@ function json(route, body, status = 200) {
 }
 
 const log = []
+// The set keys (routes/preferences.py SET_KEY_CAPS): PATCH only.
+const SET_KEY_RE = /^(?:starred_entries|hidden_entries|voted_entries|(?:read_entries|seen):[\s\S]+)$/
+// Their caps, as SET_KEY_CAPS: the most a row holds, and the most ids one
+// PATCH list may carry.
+const setKeyCap = (key) => (key === 'voted_entries' ? 2000 : 1000)
+// A PATCH body as schemas.UserPreferencePatchIn takes it (a 422 otherwise):
+// only add, remove and set; ids are integers from 1 to 2**63-1, at most
+// 1000 per list; set maps a canonical id string to up, down or null, at
+// most 2000 of them.
+const isEntryId = (x) => typeof x === 'number' && Number.isInteger(x) && x >= 1 && x <= 2 ** 63 - 1
+const VOTE_ID_RE = /^[1-9][0-9]{0,18}$/
+function patchBodyError(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return 'the body is not an object'
+  const extra = Object.keys(body).filter((k) => !['add', 'remove', 'set'].includes(k))
+  if (extra.length) return `unknown fields: ${extra.join(', ')}`
+  for (const op of ['add', 'remove']) {
+    if (!(op in body)) continue
+    if (!Array.isArray(body[op]) || body[op].length > 1000 || !body[op].every(isEntryId)) return `${op} must be at most 1000 entry ids`
+  }
+  if ('set' in body) {
+    const set = body.set
+    if (!set || typeof set !== 'object' || Array.isArray(set)) return 'set must be an object'
+    const entries = Object.entries(set)
+    if (entries.length > 2000) return 'set takes at most 2000 votes'
+    for (const [id, v] of entries) {
+      if (!VOTE_ID_RE.test(id) || BigInt(id) > 2n ** 63n - 1n) return `set: ${id} is not an entry id`
+      if (v !== null && v !== 'up' && v !== 'down') return `set: ${id} must be up, down or null`
+    }
+  }
+  return null
+}
+// mockApi's preference store per context, for flows:
+//   prefMock(context).seed({ key: value })  rows as if the server had
+//       them (before the page loads, or before a reload)
+//   .value(key), .keys()                     what the store holds
+//   .fail(status, { method, key, times })    the next `times` (1)
+//       `method` (PATCH) requests (to `key`, or any) answer `status`
+//       and change nothing: 503 once for a retry, 405 for a server
+//       rolled back to before PATCH
+//   .faultsLeft()                            queued faults not yet used
+const PREF_MOCKS = new WeakMap()
+const prefMock = (context) => PREF_MOCKS.get(context)
 // Mock the backend for one browser context.
 //   mockApi(context, { onUnmocked })
 // The route is anchored on the pathname, so a page path such as
@@ -55,21 +97,53 @@ const log = []
 // Each call gets its own deep copy of F.SOURCES and F.ENTRIES: POST, PATCH and
 // DELETE on /api/sources mutate that copy and every GET reads it, so a flow
 // sees its own edits and contexts never share state.
-// Preferences are a store of the same kind, empty at the start: PUT and
-// DELETE change it, and GET /api/preferences (with an optional `since`,
-// an ISO time) and GET /api/preferences/<key> read it, so a flow that
-// reloads gets back what it wrote. Each write's updated_at is F.NOW plus
-// a counter, so they stay in order under the frozen clock.
+// Preferences are a store of the same kind, empty at the start: PUT,
+// PATCH and DELETE change it, and GET /api/preferences (with an optional
+// `since`, an ISO time) and GET /api/preferences/<key> read it, so a flow
+// that reloads gets back what it wrote. PATCH works as on the server
+// (routes/preferences.py): set keys only (400 otherwise), `add` /
+// `remove` on the id lists and `set` on voted_entries (422 for the wrong
+// pairing, and for a body the server's schema refuses), `remove` before
+// `add`, `null` clears a vote, and the list is trimmed to its cap
+// smallest id first. Each write's updated_at is F.NOW
+// plus a counter, so they stay in order under the frozen clock.
 // onUnmocked({ method, path, url }) is called for any request under
-// /api, /auth or /assets that no branch below answers (smoke.cjs rule C8).
+// /api, /auth or /assets that no branch below answers (smoke.cjs rule C8),
+// and onSetKeyPut({ key }) for any whole-list PUT of a set key (rule C17:
+// from PR2b no code path PUTs them; PR2c makes the server refuse it).
+// prefMock(context) is the flows' handle on the store (see below).
 function mockApi(context, opts = {}) {
   const onUnmocked = typeof opts.onUnmocked === 'function' ? opts.onUnmocked : null
+  const onSetKeyPut = typeof opts.onSetKeyPut === 'function' ? opts.onSetKeyPut : null
   const db = {
     sources: structuredClone(F.SOURCES),
     entries: structuredClone(F.ENTRIES),
     preferences: new Map(),
   }
   let prefWrites = 0
+  const prefRow = (key, value) => {
+    const row = { key, value, updated_at: new Date(F.NOW + ++prefWrites).toISOString() }
+    db.preferences.set(key, row)
+    return row
+  }
+  // Faults a flow queues: the next `times` requests of `method` (to `key`,
+  // or any key) are answered with `status` and change nothing.
+  const faults = []
+  PREF_MOCKS.set(context, {
+    seed: (rows) => {
+      for (const [key, value] of Object.entries(rows)) prefRow(key, value)
+    },
+    value: (key) => (db.preferences.has(key) ? db.preferences.get(key).value : undefined),
+    keys: () => [...db.preferences.keys()].sort(),
+    fail: (status, { method = 'PATCH', key = null, times = 1 } = {}) => faults.push({ status, method, key, times }),
+    faultsLeft: () => faults.reduce((n, f) => n + f.times, 0),
+  })
+  const takeFault = (method, key) => {
+    const f = faults.find((x) => x.times > 0 && x.method === method && (x.key == null || x.key === key))
+    if (!f) return null
+    f.times--
+    return f
+  }
   const forYouIds = F.FOR_YOU.map((e) => e.id)
   const sourceById = (id) => db.sources.find((s) => s.id === id)
   const sourceName = (id) => (sourceById(id) || {}).name || 'unknown'
@@ -194,6 +268,8 @@ function mockApi(context, opts = {}) {
     mm = p.match(/^\/api\/preferences\/(.+)$/)
     if (mm) {
       const key = decodeURIComponent(mm[1])
+      const fault = takeFault(m, key)
+      if (fault) return json(route, { detail: `mocked ${fault.status}` }, fault.status)
       if (m === 'DELETE') {
         db.preferences.delete(key)
         return route.fulfill({ status: 204 })
@@ -203,9 +279,45 @@ function mockApi(context, opts = {}) {
         return row ? json(route, row) : json(route, { detail: `preference '${key}' not set for user` }, 404)
       }
       if (m === 'PUT') {
-        const row = { key, value: (req.postDataJSON() || {}).value ?? null, updated_at: new Date(F.NOW + ++prefWrites).toISOString() }
-        db.preferences.set(key, row)
-        return json(route, row)
+        if (onSetKeyPut && SET_KEY_RE.test(key)) onSetKeyPut({ key })
+        return json(route, prefRow(key, (req.postDataJSON() || {}).value ?? null))
+      }
+      if (m === 'PATCH') {
+        // In the server's order: the body's shape (422), the key (400),
+        // then the change against the key (422).
+        const body = req.postDataJSON()
+        const bad = patchBodyError(body)
+        if (bad) return json(route, { detail: bad }, 422)
+        if (!SET_KEY_RE.test(key)) return json(route, { detail: `preference key '${key}' doesn't take PATCH` }, 400)
+        const votes = key === 'voted_entries'
+        const ops = Object.keys(body)
+        if (votes ? ops.some((k) => k !== 'set') : ops.includes('set')) {
+          return json(route, { detail: `wrong change for ${key}: ${ops.join(', ')}` }, 422)
+        }
+        const cap = setKeyCap(key)
+        if (!votes && ((body.add || []).length > cap || (body.remove || []).length > cap)) {
+          return json(route, { detail: `${key} takes at most ${cap} ids per list` }, 422)
+        }
+        const cur = db.preferences.has(key) ? db.preferences.get(key).value : undefined
+        let value
+        if (votes) {
+          value = {}
+          if (cur && typeof cur === 'object' && !Array.isArray(cur)) {
+            for (const [id, v] of Object.entries(cur)) if (VOTE_ID_RE.test(id) && (v === 'up' || v === 'down')) value[id] = v
+          }
+          for (const [id, v] of Object.entries(body.set || {})) {
+            if (v == null) delete value[id]
+            else value[id] = v
+          }
+          for (const id of Object.keys(value).sort((a, b) => a - b).slice(0, Math.max(0, Object.keys(value).length - cap))) delete value[id]
+        } else {
+          const rm = new Set(body.remove || [])
+          const ids = [...new Set(Array.isArray(cur) ? cur : [])].filter((id) => isEntryId(id) && !rm.has(id))
+          for (const id of body.add || []) if (!ids.includes(id)) ids.push(id)
+          const keep = new Set([...ids].sort((a, b) => a - b).slice(-cap))
+          value = ids.filter((id) => keep.has(id))
+        }
+        return json(route, prefRow(key, value))
       }
     }
     mm = p.match(/^\/api\/ingest\/(.+)$/)
@@ -610,7 +722,7 @@ async function main() {
   await browser.close()
 }
 
-module.exports = { mockApi, scanDom, IOS_UA, DEVICES, BASE }
+module.exports = { mockApi, prefMock, scanDom, IOS_UA, DEVICES, BASE, SET_KEY_RE }
 
 if (require.main === module) {
   main().catch((e) => {

@@ -148,6 +148,7 @@ and reports with `fail(rule, detail)`.
 | C14 | A box with `text-overflow: ellipsis` is at least `min(96px, its scrollWidth)` wide. |
 | C15 | No visible `input[type=search]`. |
 | C16 | The top bar's title (`header h1`) is not cut off (`scrollWidth <= clientWidth`). |
+| C17 | Every state and flow: no `PUT /api/preferences/<key>` of a set key (`starred_entries`, `hidden_entries`, `voted_entries`, `read_entries:*`, `seen:*`). From PR2b they change only by PATCH; PR2c makes the server refuse the PUT. The mock reports it (`onSetKeyPut`). |
 
 "Visible" means: has client rects, not `visibility: hidden`, no ancestor at
 opacity 0, not inside `[inert]` or `[aria-hidden="true"]`, not inside the
@@ -217,9 +218,9 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-fg-settings-back` | Menu → Settings opens Feeds; after Done, history grew by at most one entry and Back stays in the app with Settings closed |
 | `flow-ft-menu-edit-feed` | a source row's › in the Menu opens that feed in Settings, in view; a `?source=` change while Settings is open moves to another feed |
 | `flow-fu-jump-to-column` | Jump to column selects that phone tab and scrolls it into the strip |
-| `flow-tab-stays-on-star` | PR1b: on News, saving a story adds the Saved tab in front of it; the phone stays on News, stores `cat:news` (`popping.v1.mobileTab`), and a reload opens News |
-| `flow-unsave-last-saved` | PR1b, with one saved story: a new phone opens on For You; unsaving the only saved story takes Saved away and the phone moves to For You, now its stored tab; saving from For You brings Saved back without moving the phone |
-| `flow-tab-migrates-index` | PR1b: a stored old index (`mobileCol.last` = 0) with the preferences 1.5 s late (they bring the saved story that made index 0 Saved) opens Saved, stores `meta:saved` and drops the index; migrated before them it would be For You |
+| `flow-tab-stays-on-star` | PR1b: on News, saving a story adds the Saved tab in front of it; the phone stays on News, stores `cat:news` (`popping.v1.mobileTab`), and after the save's PATCH a reload opens News |
+| `flow-unsave-last-saved` | PR1b, with one saved story (seeded in the store): a new phone opens on For You; unsaving the only saved story takes Saved away and the phone moves to For You, now its stored tab; saving from For You brings Saved back without moving the phone |
+| `flow-tab-migrates-index` | PR1b: a stored old index (`mobileCol.last` = 0) with the preferences 1.5 s late (they bring the saved story, seeded in the store, that made index 0 Saved) opens Saved, stores `meta:saved` and drops the index; migrated before them it would be For You |
 | `flow-tab-gone-on-load` | PR1b: a stored tab whose category is gone opens For You, not Brief, and stores it |
 | `flow-filter-clear-keeps-tab` | PR1b: on News, a source filter leaves `cat:news` stored; clearing it while the unfiltered stories are 1.5 s late stores nothing in between and lands back on News |
 | `flow-foryou-fails-keeps-tab` | PR1b: a new phone stores For You; a refresh whose For You request fails (503) takes the tab away but keeps `meta:foryou` stored, and the phone is back on For You when it loads again |
@@ -233,15 +234,19 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-bookmark-on-save` | PR1c: ☆ on a story sends one `bookmark` interaction; ☆ again (unsave) sends none |
 | `flow-bookmark-on-save-desktop` | PR1c, 1280: the card menu's Save for later sends one `bookmark`, its Unsave none; keyboard `b` on the selected card (save, then unsave) sends one in all |
 | `flow-saved-order` | PR1c: Saved lists saves newest first by published, else fetched time (a page fetched a minute ago with no publish date leads, then the dated saves, then the two with neither date, the higher id first) |
-| `flow-reset-keeps-saves` | PR1c: with saves, hides, votes, a saved view and News's read marks, last visit, prefs and section folds stored, Reset reading state deletes the reading-state rows and `history_group_by` but never `starred_entries`, `hidden_entries`, `voted_entries` or `filter_presets`; after the reload the server holds only those four and the Saved tab is back |
+| `flow-reset-keeps-saves` | PR1c: with saves, hides, votes, a saved view and News's read marks, last visit, prefs and section folds stored, Reset reading state deletes the reading-state rows and `history_group_by` but never `starred_entries`, `hidden_entries`, `voted_entries` or `filter_presets`; after the reload the server holds only those four and the Saved tab is back. PR2b: a save and a read mark still queued (the clock paused inside their 1 s batch) when Reset is tapped are dropped: no PATCH or PUT after the DELETEs |
+| `flow-prefs-resync` | PR2b, sync rule 5: a hide's PATCH is held; a full GET answered meanwhile (the store without it) leaves the story hidden, and so does a GET sent while it was held but answered with the old set only after the PATCH's answer was taken in; a GET sent after that is taken in as is |
+| `flow-visibility-flush` | PR2b: a save inside its 1 s batch (clock paused), then the page hides: one PATCH of it goes at once with `keepalive`, and it is in the store |
+| `flow-prefs-retry` | PR2b, sync rule 2: the first save's PATCH answers 503 (`prefMock(context).fail`); a second save waits for the retry, which goes 2 s later with both ids; both are stored and show saved, with no error toast |
+| `flow-prefs-405` | PR2b: PATCH answers 405 (a server rolled back to before PR2a) four times: the story keeps showing saved through the retries at 2, 4 and 8 s, then one "Couldn't save" toast; nothing is stored and no timed retry follows; once the server takes PATCH again, hiding the page saves it |
 | `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
 | `flow-h1-taps` | the harness: ≡ then Settings counts 2 taps, passes `taps(page, 2, …)` and fails `taps(page, 1, …)` |
 | `flow-h1-touch-drag` | the harness: `touchDrag` does nothing off Chromium; on Chromium an upward drag scrolls the phone list and counts 1 |
 | `flow-h1-set-hidden` | the harness: `setHidden` sets `visibilityState` and `hidden`; coming back runs the app's quiet poll |
 | `flow-h1-keepalive` | the harness: the fetch log shows the load-time `GET /api/preferences` without keepalive, and the views still queued when the page hides (beacon refused) sent with it |
-| `flow-h1-pref-store` | the mock: a preference PUT reads back in the list, with `since` and by key; DELETE removes it; a reload loads it once and still sees it |
+| `flow-h1-pref-store` | the mock: a preference PUT reads back in the list, with `since` and by key; DELETE removes it; PATCH applies `remove` before `add`, `set` with null clears a vote, takes `seen:` keys with a `/`, answers 400 for a key that isn't a set key and 422 for the wrong change or a body the server's schema refuses (an id of 0 or a string, an unknown field, a vote other than up / down / null, a non-canonical vote id); a queued fault answers once; a reload loads the rows with one GET and still sees them |
 | `flow-h1-desktop` | the harness at 1280: a mouse desktop with the desktop grid; a card's Copy link and Open in new tab land in the clipboard and `window.open` stubs |
-| `flow-reload-on-new-build` | PR1r, the phone, with a new build served (`newBuild`): back after 9 min nothing is checked; back after 11 min it is not checked when the page hid right after opening a story; a key pressed during the check, a 404 for the new entry script, the Menu being open, or text in the search field stops the reload; a check cut off by a hide doesn't keep the next return from checking; a save refused with 400 is not retried or resent and the next return reloads, and so does a pending save refused with 409 (each on its own build); a pending save that fails with 503 keeps the page, and so does the same save failing again on the next return; the return after that sends it a third time and reloads only once it is saved; the reloaded page checks again but doesn't reload for the same build |
+| `flow-reload-on-new-build` | PR1r, the phone, with a new build served (`newBuild`): back after 9 min nothing is checked; back after 11 min it is not checked when the page hid right after opening a story; a key pressed during the check, a 404 for the new entry script, the Menu being open, or text in the search field stops the reload; a check cut off by a hide doesn't keep the next return from checking; a save (PATCH) refused with 400 is not retried or resent and the next return reloads, and so does a pending save that hiding sends and the server refuses with 409 (each on its own build); a pending save that hiding sends and the server can't take (503), sent again on the return and by the flush, keeps the page, and so does the same save failing again on the next return; once the server takes it, the return after that sends it and reloads only once it is saved; the reloaded page checks again but doesn't reload for the same build |
 | `flow-reload-desktop-button` | PR1r at 1280: back after 11 min with a new build and no input, the desktop shows "New version · Reload" and doesn't reload by itself; back with its own build served, the button goes; back with a new build again, a scroll and a key during the check don't stop the button; clicking it reloads, and the button is gone after |
 
 Run one with `--only <name>`; PR6 and PR8 add the PATCH and PUT counting flows.
@@ -252,9 +257,14 @@ Every flow made with `flow()` (and so `dashFlow`, `editorFlow`, `aiFlow`)
 gets `installHarness(page)` before the page loads: `window.open`,
 `navigator.share` and `navigator.clipboard` are stubs that record their
 calls, and fetches to `/api/preferences` and `/api/interactions` are recorded
-with their `keepalive` flag, which Playwright's Request does not expose.
-`harnessLog(page)` returns `{ fetches: [{ method, path, keepalive }], opened,
-shared, copied }`. `sendBeacon` is not stubbed.
+with their `keepalive` flag, which Playwright's Request does not expose, and
+`answered`, true once the app has read the response body (or the request
+failed). `harnessLog(page)` returns `{ fetches: [{ method, path, keepalive,
+answered }], opened, shared, copied }`, and `answered(page, method, path)`
+says whether the latest such request has been taken in: flows wait for it
+before moving the clock or the page's visibility, so a retry timed from an
+answer, or a return to the front, doesn't race the answer. `sendBeacon` is
+not stubbed.
 
 | Helper | What it does |
 |---|---|
@@ -263,6 +273,9 @@ shared, copied }`. `sendBeacon` is not stubbed.
 | `touchDrag(page, { from, to, steps = 10, stepMs = 50, holdMs = 150 })` | one finger from `from` to `to` (`{ x, y }`, CSS px) through CDP `Input.dispatchTouchEvent`, after two animation frames and 300 ms; holds `holdMs` before lifting; counts as one tap. Chromium only: elsewhere it returns false and does nothing |
 | `setHidden(page, hidden)` | sets `document.visibilityState` and `document.hidden`, then fires `visibilitychange` |
 | `installClock(page, time = F.NOW)` | `page.clock.install`; `touchDrag` then waits in Node instead of on animation frames |
+| `putPrefs(page, rows)` | seeds the mock's preference store (`prefMock`) with `rows`, then reloads |
+| `prefWrites(page)` | every PUT, PATCH and DELETE to `/api/preferences/<key>` from then on, in order, as `{ method, key, value, body }` |
+| `prefMock(context)` (capture.cjs) | the mock's preference store: `seed(rows)`, `value(key)`, `keys()`, `fail(status, { method = 'PATCH', key, times = 1 })` (the next requests answer `status` and change nothing), `faultsLeft()` |
 
 Tap-count flows prove "at most N taps". They start from their URL and reach
 the target only with `tap`, `touchDrag` (a swipe is one tap) and `fill`
@@ -331,10 +344,19 @@ entries per call (POST, PATCH and DELETE change that copy; GET reads it), and
 calls `onUnmocked({ method, path, url })` for anything it does not answer.
 Preferences are a per-call store too, empty at the start: `PUT
 /api/preferences/<key>` stores `{ key, value, updated_at }` and `DELETE`
-removes it; `GET /api/preferences` lists the rows (only those updated after
+removes it; `PATCH` changes a set key as the server does (400 for any other
+key, 422 for `set` on an id list or `add` / `remove` on `voted_entries`
+or for a body `schemas.UserPreferencePatchIn` refuses,
+`remove` before `add`, `null` clears a vote, trimmed to the cap smallest id
+first); `GET /api/preferences` lists the rows (only those updated after
 `since` when it is given) and `GET /api/preferences/<key>` returns one or 404.
 `updated_at` is `F.NOW` plus one millisecond per write. Any other method on a
-preference key is unmocked (C8).
+preference key is unmocked (C8). A PUT of a set key is stored but reported
+through `onSetKeyPut({ key })` (smoke rule C17). `prefMock(context)` gives
+flows the store: seed rows before the page loads, read them, and queue
+faults (see Helpers). Answering `GET /api/preferences` with a fixed body
+from a flow would bring it back on every poll and every return to the
+front, which re-read the preferences since PR2b; seed the store instead.
 
 `capture.cjs` and `probe.cjs` open Settings the way a person does since PR5:
 the Menu (`open menu`), then its Settings row.
