@@ -353,7 +353,12 @@ container:
 
 - `llm.provider` — picked via the chip; no env default.
 - `llm.model_brief` / `llm.model_scoring` — model names for brief + scoring. Default `OLLAMA_CLOUD_MODEL_BRIEF` / `OLLAMA_CLOUD_MODEL_SCORING`.
-- `brief.window_hours` — lookback window for the brief generator. Filters on `fetched_at` (when the row landed in the DB), not `published_at`, so historical content (Wikipedia "on this day") ingested today doesn't pollute today's digest. Default 24, clamped to `[1, 168]`.
+- `brief.window_hours` — lookback window for the brief generator. Filters on `fetched_at` (when the row landed in the DB), not `published_at`. Wikipedia "on this day" is left out by feed. Stories published more than `ingest.backfill_hours` before they were fetched (a new feed's backfill) are left out too. Default 24, clamped to `[1, 168]`.
+- `ingest.*` — what a poll stores (`app/ingest_rules.py`). No env default; set them as `app_settings` rows. A value that isn't a number or is out of range uses the default.
+  - `ingest.first_fetch_keep` (10, `[1, 200]`) and `ingest.backfill_hours` (48, `[1, 720]`): a feed's first fetch stores its newest 10 stories plus everything from the last 48 hours. That covers a new feed, one that first works days after it was added, one whose address changed, and one back after `ingest.resume_gap_hours` (72, `[48, 8760]`) without a successful poll.
+  - `ingest.max_age_days` (30, `[1, 3650]`): later polls skip stories older than this, or dated before the first fetch's 48-hour window.
+  - `ingest.max_undated_per_poll` (2, `[0, 100]`): later polls store at most this many undated stories, and only ones listed above the newest stored story.
+  - `ingest.max_per_poll` (50, `[1, 1000]`): new stories stored per poll, newest first. The rest are stored by the next polls.
 
 **Env vs DB.** On first boot, `seed_from_env` copies the relevant env
 values into the table — but only if the table is empty for that key.
@@ -369,7 +374,7 @@ set), all bot-tolerant. Categories:
 | Source                  | Category | Refresh | Notes |
 | ----------------------- | -------- | ------- | ----- |
 | BBC News                | `news`   | 1 h     | RSS; phase 3 fixed the User-Agent and switched to https |
-| Wikipedia On This Day   | `news`   | 12 h    | REST; today's historical events + curated anniversaries |
+| Wikipedia On This Day   | `on_this_day` | 12 h | REST; the day's 5 selected anniversaries, in their own tab and kept out of For You and the Brief |
 | Hacker News top         | `tech`   | 5 min   | Firebase API; top 30 stories, score + comment count in meta |
 | GitHub releases         | `tech`   | 30 min  | 5 repos (python/cpython, nodejs/node, kubernetes/*, rust-lang/rust); ETag-cached |
 | NVD recent CVEs         | `vulns`  | 6 h     | NIST CVE 2.0 API; 7-day rolling window of published CVEs |

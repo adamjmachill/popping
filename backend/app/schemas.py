@@ -499,6 +499,10 @@ class IngestResult(BaseModel):
     fetched: int
     inserted: int
     duplicates: int
+    # New items the ingest rules left out (``app.ingest_rules``): a
+    # first fetch's older backlog, old or undated items, or the
+    # per-poll cap's overflow, which a later poll picks up.
+    skipped: int = 0
     error: Optional[str] = None
 
 

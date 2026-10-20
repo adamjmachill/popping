@@ -30,7 +30,7 @@ from typing import Optional
 from app.article_extract import fetch_html
 from app.feed_autodiscovery import discover_sitemap_urls
 from app.models import Source
-from app.sources.base import SourcePlugin
+from app.sources.base import SourcePlugin, row_fetch_target
 
 logger = logging.getLogger("popping.sources.generic_scrape")
 
@@ -373,6 +373,8 @@ class GenericScrapePlugin(SourcePlugin):
         self.url = source_row.url
         self.refresh_interval_seconds = source_row.refresh_interval_seconds
         self.source_id = source_row.id
+        # The address this instance fetches (see ``SourcePlugin.fetch_target``).
+        self.fetch_target = row_fetch_target(source_row)
         # Optional direct sitemap URL. When set, the plugin skips
         # trafilatura's homepage-based sitemap discovery (which
         # doesn't work on every site — e.g. theprogress.com's
