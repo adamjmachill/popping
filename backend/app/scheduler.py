@@ -240,7 +240,9 @@ async def _embed_text(norm: dict) -> list[float] | None:
         return None
 
 
-# Favicon retry gate: at most one attempt per source per hour. Catches
+# Favicon retry gate: at most one attempt per source per hour, measured
+# from the feed's last check of any outcome
+# (``_last_check_of_current_address``). Catches
 # the cold-start-with-unmounted-volume case (asset_dir became writable
 # after the first ingest) without hammering a permanently-broken host
 # (a 403 stays a 403, no amount of retrying helps). One hour is long
@@ -443,14 +445,45 @@ async def _is_first_fetch(
     return not has_rows
 
 
-def _should_retry_favicon(last_fetch_at: dt.datetime | None) -> bool:
-    if last_fetch_at is None:
+def _as_utc(value: dt.datetime | None) -> dt.datetime | None:
+    # Timestamps are timezone-aware UTC in practice, but tolerate a
+    # naive value coming from a pre-upgrade DB row.
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value
+
+
+def _last_check_of_current_address(source: Source) -> dt.datetime | None:
+    """When the feed's current address was last checked, whatever the
+    outcome, for the favicon gate.
+
+    ``last_fetch_at`` moves only on a success; ``last_attempt_at`` also
+    moves on a failure or a setup state. Measured from the success
+    alone, a feed that never succeeds would retry its favicon on every
+    tick, and a setup state is never backed off or stopped.
+
+    An address change resets ``last_fetch_at`` and moves the baseline
+    (``created_at``) to the time of the edit (``update_source``), and a
+    new URL also clears the cached favicon. A ``last_attempt_at`` from
+    before the baseline is a check of the old address, so it doesn't
+    hold back the new address's favicon. (The baseline also moves when
+    a first fetch lands, inside the transaction that stamps
+    ``last_attempt_at``, so that stamp is never before it.)"""
+    last_success = _as_utc(source.last_fetch_at)
+    last_attempt = _as_utc(source.last_attempt_at)
+    baseline = _as_utc(source.created_at)
+    if last_attempt is None or (baseline is not None and last_attempt < baseline):
+        return last_success
+    if last_success is None or last_attempt > last_success:
+        return last_attempt
+    return last_success
+
+
+def _should_retry_favicon(last_check_at: dt.datetime | None) -> bool:
+    last_check_at = _as_utc(last_check_at)
+    if last_check_at is None:
         return True
-    # ``last_fetch_at`` is timezone-aware UTC in practice, but tolerate
-    # a naive value coming from a pre-upgrade DB row.
-    if last_fetch_at.tzinfo is None:
-        last_fetch_at = last_fetch_at.replace(tzinfo=dt.timezone.utc)
-    return (dt.datetime.now(dt.timezone.utc) - last_fetch_at) >= _FAVICON_RETRY_INTERVAL
+    return (dt.datetime.now(dt.timezone.utc) - last_check_at) >= _FAVICON_RETRY_INTERVAL
 
 
 # Ingest runs in progress, by job id (``_ingest_job_id``).
@@ -604,6 +637,7 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
     fetch_target: tuple[str | None, ...] | None = getattr(plugin, "fetch_target", None)
     try:
         needs_favicon = False
+        reddit_off = False
         async with SessionLocal() as session:
             source = await _upsert_source(session, plugin_cls)
             if source is None:
@@ -616,9 +650,15 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             source_url = source.url
             if fetch_target is None:
                 fetch_target = (source.url, source.sitemap_url, source.link_pattern)
+            # Only subreddit feeds depend on the server's Reddit setting
+            # (``is_disabled`` is global). Read here so a Reddit-off feed
+            # doesn't ask reddit.com for its favicon either; raised
+            # below, after the paused check.
+            reddit_off = source.type == "reddit" and reddit_client.is_disabled()
             needs_favicon = (
                 source.favicon_url is None
-                and _should_retry_favicon(source.last_fetch_at)
+                and not reddit_off
+                and _should_retry_favicon(_last_check_of_current_address(source))
             )
 
         if needs_favicon and source_id is not None and source_url:
@@ -653,12 +693,10 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 logger.debug("ingest: %s paused — skipping", source.name)
                 summary["status"] = "paused"
                 return summary
-            # Only subreddit feeds depend on the server's Reddit setting
-            # (``is_disabled`` is global). Raised before the fetch so the
-            # failure path records it as the ``[reddit off]`` setup
-            # state instead of a silently empty success.
-            reddit_off = source.type == "reddit" and reddit_client.is_disabled()
 
+        # Raised before the fetch (``reddit_off`` is read above), so the
+        # failure path records it as the ``[reddit off]`` setup state
+        # instead of a silently empty success.
         if reddit_off:
             raise RedditDisabledError(
                 "Reddit isn't set up on this server (no proxy, and direct mode is off)"

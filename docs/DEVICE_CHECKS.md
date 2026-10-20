@@ -16,7 +16,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 5. Rollback:
    - Never edit files in `/opt/popping`.
    - Never pin a tag in `.env`.
-   - Frontend-only rollback: `cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d frontend`. After that, no `popping-update` until the revert is merged and green.
+   - Frontend-only rollback: `cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d --no-deps frontend`. `--no-deps` keeps the backend on its current image: without it, compose recreates the backend on the old tag too, and from PR9a on a backend image older than PR9a can't start against the database (Rollback in `docs/ux-notes/PR9a.md`). After that, no `popping-update` until the revert is merged and green.
 
 **Last good:** not recorded yet (the first passed check sets it).
 

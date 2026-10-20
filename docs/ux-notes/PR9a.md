@@ -7,7 +7,8 @@ reading the rollback note below, which also goes in the PR body (D32).
 The unit was written in two sessions. The first wrote the code, the migration and the tests and
 stopped before its review. The second reviewed that work against the spec, changed one query
 (the list's story counts, see Deviations), re-ran EXPLAIN on a new synthetic table, ran the
-mutation checks and the full pytest, and finished these notes and the Device checks lines.
+mutation checks and the full pytest, and finished these notes and the Device checks lines. A
+third pass fixed the findings of the review agents (see Review fixes).
 
 ## Plan (written before the code)
 
@@ -80,9 +81,18 @@ The migration runs at container start, before uvicorn, so nothing else holds a l
   `last_error` and `last_attempt_at` and nothing else: no `error_count`, no backoff, no
   auto-disable, whatever the feed's age. They log one INFO line when the feed enters the state
   and DEBUG while it stays, with no traceback.
-- **Reddit off:** for a `reddit` row, `_ingest` checks `reddit_client.is_disabled()` after the
-  paused check and before the fetch, and raises `RedditDisabledError` (new, in
-  `reddit_client.py`), recorded as `[reddit off]`. Other feed types never look at the setting.
+- **Reddit off:** for a `reddit` row, `_ingest` reads `reddit_client.is_disabled()` in its first
+  session, next to the favicon gate, so a Reddit-off feed never asks reddit.com for its favicon.
+  After the paused check (a paused feed still says `paused`) and before the fetch, it raises
+  `RedditDisabledError` (new, in `reddit_client.py`), recorded as `[reddit off]`. Other feed
+  types never look at the setting.
+- **Favicon gate:** the hourly favicon retry is measured from the feed's last check of any
+  outcome (`_last_check_of_current_address`): the newer of `last_attempt_at` and `last_fetch_at`.
+  A `last_attempt_at` from before the feed's baseline (`created_at`, which an address change
+  moves to the time of the edit) belongs to the old address and is ignored, so a new URL, whose
+  cached favicon the edit cleared, still gets its favicon on its first check, as on main.
+  Measured from `last_fetch_at` alone, a feed that never succeeds (a setup state is never backed
+  off or stopped) retried its favicon on every tick.
 - **Error kinds:** `_classify_error` gains `not a feed` (`NotAFeedError`), `no list`
   (`NoArticleListError`) and `reddit off`. `network` now covers every httpx timeout and transport
   error (`TimeoutException`, `NetworkError`, `RemoteProtocolError`, `ProxyError`,
@@ -125,7 +135,7 @@ The migration runs at container start, before uvicorn, so nothing else holds a l
 
 ## Tests
 
-New (67):
+New (72):
 - `test_migration_0031_source_health.py` (2): the no_db head check (`ScriptDirectory` heads are
   `['0031']`, its `down_revision` is `'0030'`, nothing else branches off 0030) and the db cycle.
   The cycle creates a scratch database, runs `CREATE EXTENSION vector`, then `alembic upgrade
@@ -133,13 +143,18 @@ New (67):
   container does), checks the three columns' type, nullability and lack of default through
   `information_schema`, that the downgrade drops only them (a row survives), and that the
   re-upgrade gives an existing row NULLs. It drops the database `WITH (FORCE)` in a `finally`.
-- `test_source_health_fields.py` (10): the stamp is at or after the run's start on success,
+- `test_source_health_fields.py` (15): the stamp is at or after the run's start on success,
   failure, `[no list]` and `[reddit off]` (without calling the Reddit fetch); success writes the
   counts (15 listed, 10 kept by the first-fetch rule) and `last_attempt_at == last_fetch_at`; a
   later poll of known stories counts 0 new; an empty success counts 0; a failure keeps the last
   counts; a first check that fails leaves them NULL; a paused feed writes nothing; a failure
   from an address the feed no longer has records nothing, while an ordinary dynamic failure is
-  recorded.
+  recorded. The favicon gate, with a `fetch_favicon` stub that counts (`offline_ingest` stubs it
+  silently): a Reddit-off feed checked four times never asks for its favicon; a paused Reddit
+  feed still says `paused` while Reddit is off and asks for nothing; a `[no list]` feed checked
+  three times tries once, and again once its last check is an hour old; a failing feed whose last
+  success was two hours ago tries once, not on every check; a feed moved to a new URL a moment
+  after a check tries the new URL on its next check, then not again.
 - `test_rss_not_a_feed.py` (12): HTML with and without `bozo`, XHTML, JSON and an empty body
   raise `NotAFeedError` with "parse" and classify as `not a feed`; valid empty RSS 2.0, RSS
   without a version, Atom and RDF are `[]`; a feed with items is unchanged; a truncated feed
@@ -178,14 +193,16 @@ Extended:
 ## Verification
 
 - **Backend pytest** (database `popping_test`, worktree `PYTHONPATH`), after rebasing onto main
-  da8d2a0 (PR10a): 1233 passed, 13 failed. The 13 failures are exactly the DNS-only baseline
-  list (`/root/popping-env/baseline.txt`); nothing else fails. Main collects 1148 tests; this
-  unit adds 98 (67 in new files, 31 in the three extended ones). The PR9a files alone: 167
-  passed. Before the rebase the same run gave 1095 passed with the same 13.
+  da8d2a0 (PR10a) and after the review fixes: 1238 passed, 13 failed. The 13 failures are
+  exactly the DNS-only baseline list (`/root/popping-env/baseline.txt`); nothing else fails.
+  Main collects 1148 tests; this unit adds 103 (72 in new files, 31 in the three extended ones).
+  The PR9a files alone: 172 passed. Before the review fixes the same run gave 1233 passed, and
+  before the rebase 1095, each with the same 13.
 - **Frontend:** not touched. No frontend file, flow or smoke state changes; the backend tests
   that pin frontend source run in the pytest above.
 - **Mutation checks:** each guarded line broken, its test run, the file restored byte for byte
-  from a copy and compared, then `git status` checked. All 37 failed on the rule they guard.
+  from a copy and compared, then `git status` checked. All 42 failed on the rule they guard
+  (the last five rows are from the review fixes).
 
   | Guarded line | Test | Failure |
   |---|---|---|
@@ -226,6 +243,11 @@ Extended:
   | 7-day filter removed from the scan | list counts | 7 ≠ 5 |
   | 24-hour `FILTER` widened to the week | 24 h edge | 2 ≠ 0 |
   | `has_stories` from the week only | list counts | stale feed `False` |
+  | favicon gate back to `last_fetch_at` only | `[no list]` once an hour | 3 tries, not 1 |
+  | the same | failing feed once an hour | 3 tries, not 2 |
+  | `and not reddit_off` removed from the gate | Reddit off, four checks | reddit.com asked once |
+  | baseline comparison removed (the gate reads `last_attempt_at` or `last_fetch_at`) | new URL | new URL never tried |
+  | Reddit-off raise moved before the paused check | paused Reddit feed | `KeyError: 'status'` |
 
   POST of a new feed always has zero counts, so no test can tell `_one_source_out` from
   `model_validate` there; the POST test checks the fields are present and null or zero.
@@ -283,6 +305,28 @@ Extended:
   no client-written JSON is read; no new network I/O (the built-ins and `fetch_rss` keep their
   clients and SSRF hooks). Every response field is either a column or a count.
 
+## Review fixes
+
+The review agents (migration and rollback; ingest bookkeeping; query cost) confirmed four
+findings. All four are fixed in the second commit, "PR9a: review fixes".
+
+- **A frontend-only rollback could take the backend down** (major). The documented
+  `POPPING_IMAGE_TAG=sha-<last good> docker compose up -d frontend` also recreates the backend
+  on the old tag, as the frontend's dependency, and a backend image older than PR9a can't start
+  against a database at 0031. Fixed: `--no-deps` in `docs/DEVICE_CHECKS.md` and in the
+  rollback note, with the reason; the plan's copy of the command is an open item below.
+- **The image-tag rollback's "or stamp afterwards" left the backend down** (minor). Step 3's
+  commands resolve `:latest`, which after a tag rollback is still the PR9a image. Fixed: the tag
+  rollback now gives only the downgrade-first order, plus the way back if it was missed; step 3
+  says which case it is for, and that a stamp to 0031 must come before any later update while
+  the deployed main has the migration.
+- **Setup states stopped the hourly favicon throttle** and **a Reddit-off feed asked reddit.com
+  for its favicon on every check** (two minor findings, one gate). `[no list]` and
+  `[reddit off]` never move `last_fetch_at`, which the gate read, and the Reddit-off check came
+  after the favicon fetch. Fixed in `_ingest_once`'s first session: Reddit off is read there and
+  skips the favicon, and the gate is measured from the last check of the feed's current address
+  (Favicon gate above, and Deviations). Five new tests in `test_source_health_fields.py`.
+
 ## Deviations from the spec
 
 - **"One finally-style block" for `last_attempt_at`.** The stamp is written by one helper,
@@ -313,6 +357,14 @@ Extended:
 - **Setup-state logging:** INFO when a feed enters the state, DEBUG while it stays. Reddit-off
   feeds no longer reach `DynamicRedditPlugin.fetch`, so its one-shot WARNING (and
   `_warned_disabled`) only fires for a direct call; the INFO line and `last_error` replace it.
+- **The favicon gate reads the last check of the current address** (review fix), not simply
+  `last_attempt_at or last_fetch_at` as the review suggested. That simpler gate would hold back a
+  re-pointed feed's favicon: `update_source` clears the favicon on a URL change and resets
+  `last_fetch_at`, which on main made the next check fetch the new favicon, but the old
+  address's `last_attempt_at` is never an hour old on a feed checked every 15 to 30 minutes, so
+  the new favicon would never be fetched. The comparison with `created_at` mixes the database's
+  clock with the app's; both containers read the host's clock, and a skew would cost one extra
+  try or an hour's delay, nothing more.
 - **Rollback step 2's order.** The plan's text downgrades, then merges the revert and waits for
   the build. The note below merges the revert and waits for the build first, then downgrades
   and runs `popping-update` straight away. Merging deploys nothing, so the downgrade still runs
@@ -339,8 +391,20 @@ Extended:
 
 ## Rollback (goes in the PR body)
 
-Read this before merging, and again before deploying (D32). PR9a changes only the backend image;
-the frontend image is untouched, so no frontend rollback is involved.
+Read this before merging, and again before deploying (D32). PR9a changes only the backend image,
+but from its deploy on, no backend image older than PR9a may start unless the schema was
+downgraded first (step 2) or stamped (step 3). That includes a frontend-only rollback.
+
+**Frontend-only rollback, from PR9a's deploy on:**
+`cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d --no-deps frontend`
+- Without `--no-deps`, compose also brings up the frontend's dependency, the backend, and
+  recreates it on the old tag, because both images take `POPPING_IMAGE_TAG` and its image
+  reference changed. If Last good is older than PR9a, that backend image can't start against a
+  database at 0031 (below), and the whole app is down.
+- If that already happened (the backend restarts over and over on the old tag), put the backend
+  back on the image it ran, the backend sha from Step 0's revision check:
+  `cd /opt/popping && POPPING_IMAGE_TAG=sha-<that sha> docker compose up -d --no-deps backend`.
+- `docs/DEVICE_CHECKS.md` carries the corrected command.
 
 **Why the order matters.** The backend container starts with `alembic upgrade head && uvicorn`
 (`backend/Dockerfile:48`). An image without `0031_source_health.py` can't start against a
@@ -377,18 +441,38 @@ happens anyway.
    revision 0031):
    `cd /opt/popping && docker compose run --rm backend alembic stamp --purge 0030`, then
    `docker compose up -d backend`.
+   - These commands resolve `:latest`, so they are only for step 2's case: the full revert is
+     merged and published, and `:latest` is the reverted image. After a `POPPING_IMAGE_TAG`
+     rollback, main still has PR9a; see the next bullet instead.
    - `--purge` is needed because the reverted image can't resolve revision 0031; it clears the
      version table and writes 0030 without reading the old value.
    - The columns stay (nullable, ignored by the reverted code).
-   - If PR9a is re-applied later, its image's `alembic upgrade head` would try to add the
-     columns again and fail. Stamp with the new image before it starts:
+   - From then on the database says 0030 while the columns exist, so any image that has
+     migration 0031 fails at its `alembic upgrade head` (the columns already exist). Before any
+     later `popping-update` while the deployed main has migration 0031 again (PR9a re-applied, a
+     fix-forward, or step 1's revert, which keeps the file), stamp with that image before it
+     starts:
      ```
      cd /opt/popping && git pull --ff-only && docker compose pull backend
      docker compose run --rm backend alembic stamp 0031
      popping-update
      ```
-- Rolling the backend image back past PR9a with `POPPING_IMAGE_TAG` hits the same wall as step
-  3: downgrade first (step 2's order), or stamp afterwards (step 3).
+- **Rolling the backend image back past PR9a with `POPPING_IMAGE_TAG`** (main still has PR9a,
+  so `:latest` is still a 0031 image): downgrade first, with the running 0031 image, then start
+  the old image.
+  ```
+  cd /opt/popping && docker compose exec backend alembic downgrade 0030
+  POPPING_IMAGE_TAG=sha-<full sha> popping-update
+  ```
+  - Between the two commands the running backend asks for dropped columns, as in step 2, for
+    about a minute.
+  - The next plain `popping-update` starts the PR9a image again, and its `alembic upgrade head`
+    adds the three columns back cleanly. They refill on each feed's next check.
+  - Don't use step 3's stamp here: its commands start `:latest`, the PR9a image, whose upgrade
+    then fails on the columns that are still there.
+  - If the old image was started without the downgrade and the backend no longer starts, run a
+    plain `popping-update` first (the PR9a image starts against 0031 again), then the two
+    commands above.
 - `popping-update` prunes old images. To get an old build back, use a one-shot
   `POPPING_IMAGE_TAG=sha-<full sha> popping-update` on the command line, never a `.env` pin,
   which would silently stop every later update. Never edit tracked files in `/opt/popping`.
@@ -411,6 +495,10 @@ happens anyway.
 - **PR11c:** Find its feed is the fix for `[not a feed]`.
 - `queue_check`'s cooldown still uses `last_fetch_at` (PR6a's rule); a setup-state feed is
   rechecked on each pull after `_last_queued` expires. Left as specified.
+- **The plan's frontend-only rollback** (How I'll work, Deploy and device checks, step 4,
+  `docs/UX_OVERHAUL_PLAN.md:483`) has the same command without `--no-deps`. It needs the same
+  correction as `docs/DEVICE_CHECKS.md` the next time the plan is revised; this unit doesn't
+  edit the plan, which changes only with a decision or the spec.
 
 ## Device checks
 

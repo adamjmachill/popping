@@ -12,6 +12,8 @@ paused feed, a feed re-pointed mid-fetch) must not stamp either.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import httpx
 from sqlalchemy import update
 
@@ -212,3 +214,152 @@ async def test_a_failure_from_the_current_address_is_recorded(db_session, offlin
     assert after.last_attempt_at >= start
     assert after.last_error.startswith("[network]")
     assert after.error_count == 1
+
+
+# The favicon gate (``_should_retry_favicon``) allows one try an hour,
+# measured from the feed's last check of any outcome. ``last_fetch_at``
+# moves only on a success, and a setup state is never backed off or
+# stopped, so a gate measured from the success alone retried on every
+# tick of a feed that never succeeds.
+
+
+def _count_favicons(monkeypatch) -> list[str]:
+    """Replace ``fetch_favicon`` (``offline_ingest`` stubs it silently)
+    with one that records the URL of each try and finds nothing."""
+    calls: list[str] = []
+
+    async def _favicon(url, source_id):
+        calls.append(url)
+        return None, None
+
+    monkeypatch.setattr(scheduler.assets, "fetch_favicon", _favicon)
+    return calls
+
+
+async def test_reddit_off_never_asks_for_a_favicon(db_session, offline_ingest, monkeypatch):
+    """Reddit is off on the server, so a check of a subreddit feed
+    contacts reddit.com for nothing, its favicon included."""
+    monkeypatch.setattr(settings, "reddit_hydra_url", "")
+    monkeypatch.setattr(settings, "reddit_direct_disabled", True)
+    favicons = _count_favicons(monkeypatch)
+    row = await make_source(
+        db_session, "hf_reddit_off_favicon", type="reddit", url="https://www.reddit.com/r/python"
+    )
+    plugin = DynamicRedditPlugin(row)
+
+    for _ in range(4):
+        summary = await scheduler._ingest(plugin)
+        assert summary["error"].startswith("[reddit off]")
+
+    assert favicons == []
+    after = await source_row(db_session, "hf_reddit_off_favicon")
+    assert after.last_fetch_at is None
+    assert after.last_attempt_at is not None
+
+
+async def test_a_paused_reddit_feed_says_paused_while_reddit_is_off(
+    db_session, offline_ingest, monkeypatch
+):
+    # The Reddit-off check comes after the paused check: a paused feed
+    # records nothing, Reddit off or not.
+    monkeypatch.setattr(settings, "reddit_hydra_url", "")
+    monkeypatch.setattr(settings, "reddit_direct_disabled", True)
+    favicons = _count_favicons(monkeypatch)
+    row = await make_source(
+        db_session, "hf_reddit_off_paused", type="reddit", url="https://www.reddit.com/r/python",
+        active=False,
+    )
+
+    summary = await scheduler._ingest(DynamicRedditPlugin(row))
+
+    assert summary["status"] == "paused"
+    assert summary["error"] is None
+    assert favicons == []
+    after = await source_row(db_session, "hf_reddit_off_paused")
+    assert after.last_attempt_at is None
+    assert after.last_error is None
+
+
+async def test_a_feed_that_never_succeeds_tries_its_favicon_once_an_hour(
+    db_session, offline_ingest, monkeypatch
+):
+    favicons = _count_favicons(monkeypatch)
+    plugin = make_plugin("hf_no_list_favicon")
+
+    async def _no_list(self):
+        raise NoArticleListError("no sitemap and no matching links")
+
+    plugin.fetch = _no_list
+
+    for _ in range(3):
+        summary = await scheduler._ingest(plugin)
+        assert summary["error"].startswith("[no list]")
+
+    # The first check (never checked before) tries; the next two come
+    # within the hour of a check.
+    assert favicons == [plugin.url]
+    row = await source_row(db_session, plugin.name)
+    assert row.last_fetch_at is None
+
+    # An hour after the last check, it tries again.
+    await db_session.execute(
+        update(Source)
+        .where(Source.id == row.id)
+        .values(last_attempt_at=row.last_attempt_at - dt.timedelta(hours=1, minutes=1))
+    )
+    await db_session.commit()
+    await scheduler._ingest(plugin)
+    assert favicons == [plugin.url, plugin.url]
+
+
+async def test_a_failing_feed_tries_its_favicon_once_an_hour(db_session, offline_ingest, monkeypatch):
+    favicons = _count_favicons(monkeypatch)
+    plugin = make_plugin("hf_failing_favicon")
+    plugin.items = [item(0, hours_ago=1)]
+    await scheduler._ingest(plugin)
+    assert favicons == [plugin.url]
+    # The last check, a success, was two hours ago.
+    row = await source_row(db_session, plugin.name)
+    two_hours_ago = utcnow() - dt.timedelta(hours=2)
+    await db_session.execute(
+        update(Source)
+        .where(Source.id == row.id)
+        .values(last_fetch_at=two_hours_ago, last_attempt_at=two_hours_ago)
+    )
+    await db_session.commit()
+
+    async def _refused(self):
+        raise httpx.ConnectError("refused")
+
+    plugin.fetch = _refused
+    await scheduler._ingest(plugin)  # last check two hours ago: tries
+    await scheduler._ingest(plugin)  # last check a moment ago: doesn't
+
+    assert favicons == [plugin.url, plugin.url]
+    after = await source_row(db_session, plugin.name)
+    assert after.error_count == 2
+    assert after.last_fetch_at == two_hours_ago
+
+
+async def test_a_new_address_gets_its_favicon_on_its_first_check(
+    db_session, offline_ingest, monkeypatch
+):
+    """A new URL clears the cached favicon and resets the baseline. The
+    old address's last check, a moment ago, must not hold back the new
+    address's favicon: with a check every 15 minutes it would never be
+    an hour old."""
+    monkeypatch.setattr(scheduler, "_scheduler", None)
+    favicons = _count_favicons(monkeypatch)
+    plugin = make_plugin("hf_repointed_favicon")
+    plugin.items = [item(0, hours_ago=1)]
+    await scheduler._ingest(plugin)
+    await scheduler._ingest(plugin)
+    assert favicons == [plugin.url]
+    row = await source_row(db_session, plugin.name)
+
+    async with SessionLocal() as session:
+        await scheduler.update_source(session, row.id, url="https://moved.test/feed")
+    await scheduler._ingest(plugin)
+    await scheduler._ingest(plugin)
+
+    assert favicons == [plugin.url, "https://moved.test/feed"]
