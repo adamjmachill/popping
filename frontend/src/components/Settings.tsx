@@ -10,7 +10,8 @@
 //   LLM            — moved from Drawer. Provider + model pickers,
 //                    brief tone pills, "Generate brief now".
 //   Notifications  — moved from Drawer. Backend status + retry.
-//   Reset          — moved from Drawer. Clear local state.
+//   Reset          — moved from Drawer. Clear local state, and the
+//                    build this page runs (PR1r).
 //
 // Tab navigation: the URL holds the open tab via
 // ``?view=settings&tab=feeds|llm|notifications|reset`` so the back
@@ -44,6 +45,8 @@ import { useMediaQuery, useVisualViewport } from '../lib/visualViewport'
 import { toast } from './Toast'
 import { sourceLabel } from '../lib/labels'
 import { usePreferences, type HistoryGroupByValue } from '../lib/preferences'
+import { formatBuildTime, shortId } from '../lib/buildId'
+import { liveBuildId } from '../lib/useUpdateCheck'
 
 export type { SettingsTab }
 
@@ -527,12 +530,25 @@ export function Settings({
                   </button>
                 )}
               </div>
+              <BuildLine />
             </div>
           )}
         </div>
       </div>
     </div>
   )
+}
+
+// Which build this page runs, e.g. "Build 3f9a1c2e · 19 Oct, 14:02", so
+// a device can be checked against a deploy (PR1r). The id is the
+// running page's, not the server's: a resumed page keeps its old build.
+function BuildLine() {
+  const line = useMemo(() => {
+    const id = shortId(liveBuildId()) || 'dev'
+    const built = formatBuildTime(__BUILD_TIME__)
+    return built ? `Build ${id} · ${built}` : `Build ${id}`
+  }, [])
+  return <p className="px-1 text-ios-caption text-label-secondary">{line}</p>
 }
 
 // Tab icons. Inline SVGs to avoid a dep on an icon library. Each

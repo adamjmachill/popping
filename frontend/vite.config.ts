@@ -48,6 +48,11 @@ const allowedHosts = (process.env.POPPING_ALLOWED_HOSTS || '')
 
 export default defineConfig({
   plugins: [react()],
+  // When this bundle was built, for the build line in Settings (PR1r).
+  // ``define`` inlines the literal, so the CSP is unaffected.
+  define: {
+    __BUILD_TIME__: JSON.stringify(new Date().toISOString()),
+  },
   build: {
     // Build output goes to ``/static/`` instead of Vite's default
     // ``/assets/`` so the path doesn't collide with the backend's

@@ -38,6 +38,7 @@ import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
 import { recordImmediate } from './lib/interactions'
 import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
+import { useUpdateCheck } from './lib/useUpdateCheck'
 import { briefFailureMessage, errorMessage, fieldSaveMessage, isRetryable } from './lib/apiErrors'
 import { sameHeaders, type HeaderMap } from './lib/headers'
 // Per-user server-backed preferences. Replaces the 8 localStorage
@@ -579,6 +580,9 @@ export function App() {
   // The desktop grid, its For You row, framing watch and inline Brief
   // render only at desktop widths; a phone renders only its own layout.
   const isDesktop = useMediaQuery('(min-width: 768px)')
+  // A newer build on the server: the phone reloads onto it when the user
+  // comes back after 10 min away; the desktop shows a Reload button.
+  const update = useUpdateCheck(isDesktop)
   const [briefTone, setBriefToneState] = useState<BriefTone>(() => {
     const stored = safeGetItem(STORAGE_KEYS.briefTone)
     return stored === 'narrative' || stored === 'alert' ? stored : 'terse'
@@ -2681,6 +2685,17 @@ export function App() {
               : 'connecting…'}
           </span>
           <div className="flex items-center gap-2">
+            {/* A newer build is served (useUpdateCheck). Not a status
+                region: nothing role="status" stays mounted while idle. */}
+            {isDesktop && update.ready && (
+              <button
+                type="button"
+                onClick={update.reload}
+                className="min-h-[44px] -my-1.5 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated"
+              >
+                New version · Reload
+              </button>
+            )}
             <button
               onClick={() => void refresh()}
               disabled={refreshing}
