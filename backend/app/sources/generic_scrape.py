@@ -33,7 +33,7 @@ import asyncio
 import datetime as dt
 import logging
 from collections import OrderedDict
-from typing import NamedTuple, Optional
+from typing import Callable, NamedTuple, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -315,6 +315,7 @@ async def _extract_one(
     *,
     owner_configured: bool = False,
     listed_date: dt.datetime | None = None,
+    served: set[str] | None = None,
 ) -> dict | None:
     """Fetch + extract a single candidate URL into a plugin-item
     dict, or None if the fetch or extraction didn't produce anything
@@ -338,6 +339,11 @@ async def _extract_one(
     ``listed_date``: when the site's list says the page was published
     (``Candidate.published``). ``score_page`` counts it as the page's
     date, and it dates the item when the page itself carries none.
+
+    ``served``: when given, ``url`` is added to it once the site answers
+    with a page (HTML), whether or not it turns out to be an article, so
+    the plugin knows which pages can show that the site serves us (see
+    ``GenericScrapePlugin._settle_refusals``).
 
     Two kinds of failure raise, so the plugin can leave the page for a
     later poll instead of passing over it:
@@ -373,6 +379,8 @@ async def _extract_one(
     if fetched is None:
         return None
     html, final_url = fetched
+    if served is not None:
+        served.add(url)
     try:
         # Parsing and scoring a page is CPU-bound and synchronous, and
         # a poll extracts up to ``_MAX_NEW_PER_POLL`` pages. Run on the
@@ -629,6 +637,55 @@ async def _discover_page_links(
     return links[:limit]
 
 
+class _Read(NamedTuple):
+    """What ``GenericScrapePlugin._extracted_urls`` keeps for a page."""
+
+    # The site answered with a page (HTML) when it was read, whether it
+    # was kept, too old, not an article or over the undated cap: it can
+    # show that the site serves us (``_settle_refusals``). False for a
+    # page that was gone, wasn't HTML, kept failing or refused everyone.
+    served: bool = False
+    # Read in a poll whose candidates the owner never chose (see
+    # ``GenericScrapePlugin.fetch``).
+    unvouched: bool = False
+
+
+def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[str], bool]:
+    """Whether an undated candidate of ``plan`` is old backlog
+    (``GenericScrapePlugin._cap_undated``). It depends on what orders
+    the list:
+
+    - A listing page (``plan.mode == "page"``) is in publication order,
+      newest first, so a page listed below a stored story is older than
+      it: backlog.
+    - A sitemap is ordered by ``<lastmod>``, which moves a stored story
+      up whenever it is edited, so that order says nothing about age. A
+      page last modified before ``backlog_before`` (the line
+      ``ingest_rules`` draws for dated stories on a later poll) was
+      published before it: backlog. A first fetch (``backlog_before``
+      None) keeps the newest pages whatever their age.
+    - A sitemap page with no ``<lastmod>`` keeps the sitemap's own order,
+      the only one there is, so the listing page's rule applies: listed
+      below a stored story is backlog. That is its place in the sitemap
+      documents (``Candidate.place``), not in the candidates, whose date
+      order puts every undated entry after every dated one.
+    """
+    fresh = {c.url for c in plan.fresh}
+    modified = {c.url: c.modified for c in plan.candidates}
+    # Where the site listed each candidate: a sitemap entry's place, else
+    # its place in the list (a listing page's cards are in page order).
+    place = {c.url: i if c.place is None else c.place for i, c in enumerate(plan.candidates)}
+    first_stored = min((place[c.url] for c in plan.candidates if c.url not in fresh), default=None)
+
+    def backlog(url: str) -> bool:
+        changed = modified.get(url)
+        if plan.mode == "page" or changed is None:
+            return first_stored is not None and place.get(url, 0) > first_stored
+        return backlog_before is not None and changed < backlog_before
+
+    return backlog
+
+
 class GenericScrapePlugin(SourcePlugin):
     """SourcePlugin bound to a single ``type="generic_scrape"`` Source row.
 
@@ -694,24 +751,32 @@ class GenericScrapePlugin(SourcePlugin):
         # FIFO cap gives a worst-case fixed footprint; eviction
         # just means a previously-seen URL gets re-attempted, which
         # the entries-table UNIQUE constraint silently no-ops.
-        self._extracted_urls: "OrderedDict[str, bool]" = OrderedDict()
+        self._extracted_urls: "OrderedDict[str, _Read]" = OrderedDict()
         # Consecutive failed polls per page whose fetch failed in a way
         # that passes (see ``_page_failed``); bounded FIFO.
         self._page_failures: "OrderedDict[str, int]" = OrderedDict()
+        # Pages a poll left for a later one (refused, failed in a way that
+        # passes, or read without the owner's word) while they weren't
+        # backlog. Their next read keeps that verdict (see ``fetch``);
+        # bounded FIFO.
+        self._deferred_new: "OrderedDict[str, None]" = OrderedDict()
 
-    def _mark_extracted(self, url: str, *, unvouched: bool = False) -> None:
+    def _mark_extracted(self, url: str, *, served: bool = False, unvouched: bool = False) -> None:
         """Add ``url`` to the seen-set, evicting the oldest entry if
         the cap is exceeded. ``OrderedDict.popitem(last=False)`` is
         O(1) and returns FIFO order.
 
+        ``served``: the site answered with a page (``_Read.served``).
         ``unvouched``: the page was read in a poll whose candidates the
         owner never chose (see ``fetch``), so ``_seen`` lets a poll that
         has the owner's word read it once more.
         """
         # ``setdefault`` would also work but ``__setitem__`` is faster
         # and we don't need the existing-value semantics.
-        self._extracted_urls[url] = unvouched
+        self._extracted_urls[url] = _Read(served, unvouched)
         self._page_failures.pop(url, None)
+        if not unvouched:
+            self._deferred_new.pop(url, None)
         while len(self._extracted_urls) > _MAX_EXTRACTED_URLS:
             self._extracted_urls.popitem(last=False)
 
@@ -721,7 +786,7 @@ class GenericScrapePlugin(SourcePlugin):
         have the owner's word (``owner_configured``)."""
         if url not in self._extracted_urls:
             return False
-        return not (owner_configured and self._extracted_urls[url])
+        return not (owner_configured and self._extracted_urls[url].unvouched)
 
     def _page_failed(self, url: str, exc: BaseException) -> None:
         """A page's fetch failed in a way that passes (a timeout, a
@@ -809,6 +874,13 @@ class GenericScrapePlugin(SourcePlugin):
                 # instead of being skipped forever.
                 break
             batch.append(candidate)
+        # A page an earlier poll left for later while it was new is still
+        # new: a story stored in the meantime and listed above it doesn't
+        # make it backlog (``_cap_undated``).
+        new_before = {c.url for c in batch if c.url in self._deferred_new}
+        backlog = _backlog_rule(plan, backlog_before)
+        # The pages the site answered with a page (``_extract_one``).
+        served: set[str] = set()
 
         # Fetch the batch concurrently (bounded — see
         # _FETCH_CONCURRENCY) instead of one at a time: a source
@@ -830,6 +902,7 @@ class GenericScrapePlugin(SourcePlugin):
                     custom_headers=self.custom_headers,
                     owner_configured=owner_configured,
                     listed_date=candidate.published,
+                    served=served,
                 )
 
         results = await asyncio.gather(
@@ -854,7 +927,7 @@ class GenericScrapePlugin(SourcePlugin):
             # Use the bounded helper (FIFO eviction at
             # ``_MAX_EXTRACTED_URLS``) instead of ``.add()`` to keep
             # the in-memory set's footprint fixed.
-            self._mark_extracted(url, unvouched=unvouched)
+            self._mark_extracted(url, served=url in served, unvouched=unvouched)
             if isinstance(result, BaseException):
                 logger.debug(
                     "generic_scrape: extraction failed for %s: %s", url, result,
@@ -862,9 +935,18 @@ class GenericScrapePlugin(SourcePlugin):
                 continue
             if result is not None and not _too_old(result):
                 items.append(result)
+        # The pages this poll leaves for a later one (refused, failed in a
+        # way that passes, or read without the owner's word) while they
+        # are new stay new until they are read for good.
+        for candidate in batch:
+            read = self._extracted_urls.get(candidate.url)
+            if (read is None or read.unvouched) and not backlog(candidate.url):
+                self._deferred_new[candidate.url] = None
+        while len(self._deferred_new) > _MAX_PAGE_FAILURE_URLS:
+            self._deferred_new.popitem(last=False)
         if batch and len(refused) == len(batch):
             await self._settle_refusals(refused, plan)
-        return self._cap_undated(items, plan, max_undated, backlog_before)
+        return self._cap_undated(items, backlog, max_undated, new_before)
 
     async def _settle_refusals(self, refused: dict[str, FetchRefusedError], plan: Plan) -> None:
         """Every page this poll asked for was refused. A site that
@@ -873,10 +955,12 @@ class GenericScrapePlugin(SourcePlugin):
         among public ones. To tell them apart, fetch a page of the site
         outside the batch as a control. The controls are the stored
         stories, newest first (each loaded as an article before), then
-        the candidates not tried yet. A page this feed already read and
-        didn't keep is never one: it may be gone, not a page, or a
-        members-only page skipped on an earlier poll, and none of those
-        can say whether the site serves us.
+        the pages this feed read and didn't keep that answered with a
+        page (too old, not an article, over the undated cap: a site that
+        posts rarely has stored nothing), then the candidates not tried
+        yet. A page that was gone, wasn't a page, kept failing or was a
+        members-only page skipped on an earlier poll is never one: none
+        of those can say whether the site serves us.
 
         - The control serves a page: the site serves us, and these pages
           refuse everyone. The 401-403 ones are marked, so a lone
@@ -894,11 +978,13 @@ class GenericScrapePlugin(SourcePlugin):
         """
         served: str | None = None
         fresh = {c.url for c in plan.fresh}
-        controls = [c.url for c in plan.candidates if c.url not in fresh] + [
-            c.url
-            for c in plan.fresh
-            if c.url not in refused and c.url not in self._extracted_urls
-        ]
+        others = [c.url for c in plan.fresh if c.url not in refused]
+        read = self._extracted_urls
+        controls = (
+            [c.url for c in plan.candidates if c.url not in fresh]
+            + [url for url in others if url in read and read[url].served]
+            + [url for url in others if url not in read and url not in self._page_failures]
+        )
         for control in controls[:_MAX_CONTROLS]:
             try:
                 body = await fetch_html_checked(
@@ -928,57 +1014,32 @@ class GenericScrapePlugin(SourcePlugin):
     def _cap_undated(
         self,
         items: list[dict],
-        plan: Plan,
+        backlog: Callable[[str], bool],
         max_undated: int | None,
-        backlog_before: dt.datetime | None,
+        new_before: set[str],
     ) -> list[dict]:
         """At most ``max_undated`` undated pages per poll (D12), and none
-        that are old backlog. This is the rule ``ingest_rules`` applies
-        to every other feed type, which it can't apply to this plugin's
-        items because they never include stored URLs.
+        that are old backlog (``_backlog_rule``). This is the rule
+        ``ingest_rules`` applies to every other feed type, which it can't
+        apply to this plugin's items because they never include stored
+        URLs. An undated page here is one whose page and list both gave
+        no publication date.
 
-        An undated page here is one whose page and list both gave no
-        publication date. Whether it is backlog depends on what orders
-        the list:
-
-        - A listing page (``plan.mode == "page"``) is in publication
-          order, newest first, so a page below the first stored
-          candidate is older than a stored story: backlog.
-        - A sitemap is ordered by ``<lastmod>``, which moves a stored
-          story up whenever it is edited, so that order says nothing
-          about age. A page last modified before ``backlog_before`` (the
-          line ``ingest_rules`` draws for dated stories on a later poll)
-          was published before it: backlog. A first fetch
-          (``backlog_before`` None) keeps the newest pages whatever
-          their age.
-        - A sitemap page with no ``<lastmod>`` keeps the sitemap's own
-          order, the only one there is, so the listing page's rule
-          applies: below the first stored candidate is backlog.
+        A page in ``new_before`` was left for this poll by an earlier one
+        (refused, failed in a way that passes, or read without the
+        owner's word) while it wasn't backlog, so it isn't now: it would
+        have come in then, before the stories stored since.
 
         Every page dropped here stays marked extracted: it was read and
         passed over, and fetching it again every poll would only drop it
         again."""
         cap = _DEFAULT_MAX_UNDATED if max_undated is None else max_undated
-        modified = {c.url: c.modified for c in plan.candidates}
-        fresh = {c.url for c in plan.fresh}
-        position = {c.url: i for i, c in enumerate(plan.candidates)}
-        first_stored = next(
-            (i for i, c in enumerate(plan.candidates) if c.url not in fresh),
-            len(plan.candidates),
-        )
-
-        def backlog(url: str) -> bool:
-            changed = modified.get(url)
-            if plan.mode == "page" or changed is None:
-                return position.get(url, 0) > first_stored
-            return backlog_before is not None and changed < backlog_before
-
         kept: list[dict] = []
         undated = dropped = 0
         for item in items:
             if item.get("published_at") is not None:
                 kept.append(item)
-            elif undated < cap and not backlog(item["url"]):
+            elif undated < cap and (item["url"] in new_before or not backlog(item["url"])):
                 kept.append(item)
                 undated += 1
             else:

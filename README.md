@@ -472,9 +472,12 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   already stored. At most `ingest.max_undated_per_poll` (2) of them may
   be undated, and an undated page that is old backlog is skipped: on a
   listing page, or in a sitemap that gives the page no `<lastmod>`, one
-  below a stored story; in a sitemap, one last modified before the
-  check's backlog line. A page that times out or answers 5xx
-  is asked for again on the next checks (3 in all).
+  listed below a stored story (in the sitemap's own order); in a
+  sitemap, one last modified before the check's backlog line. A page a
+  check left for later while it was new (refused, failed, or read while
+  the `sitemap_url` gave nothing) is still new when it is read. A page
+  that times out or answers 5xx is asked for again on the next checks
+  (3 in all).
 
 A website's failures read as the kinds above: a site that refuses its
 sitemaps, its listing page or every article page asked for is
@@ -485,10 +488,11 @@ articles at all. A missing robots.txt or guessed sitemap path is
 routine, a refused robots.txt counts only when every sitemap is refused
 too, and a sitemap index that loads counts neither way (an index whose
 post sitemaps are all refused is `[blocked]`). A page that refuses
-everyone (members only) while a stored story of the site loads is
-skipped, so it never fails the feed; a page that is gone or answers 5xx
-doesn't count as loading, and a page already read and not kept is
-never the one asked.
+everyone (members only) while another page of the site loads (a stored
+story, a page read before that answered with a page, or a page not
+tried yet) is skipped, so it never fails the feed; a page that is gone
+or answers 5xx doesn't count as loading, and a page that was gone,
+wasn't a page or refused us before is never the one asked.
 
 ### Adding a YouTube channel
 

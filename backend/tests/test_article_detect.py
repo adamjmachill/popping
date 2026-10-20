@@ -132,6 +132,15 @@ def _page(
         "https://www.example.com/city/news/council-vote/112233.cms",
         "https://www.example.com/rj/noticia/2026/10/18/council-vote.ghtml",
         "https://www.example.com/cgi-bin/news.pl?id=42",
+        # Page endings of CMSs courlan doesn't know: nyc.gov's agency
+        # press releases, JavaServer Faces, ColdFusion.
+        "https://www.example.com/site/doh/about/press/pr2026/flu-shots-available.page",
+        "https://www.example.com/news/item.jsf?id=123",
+        "https://www.example.com/news/report.cfml",
+        # A slug that keeps a dotted word, with a trailing slash (Hugo,
+        # Jekyll pretty permalinks): the path has no ending.
+        "https://www.example.com/blog/moving-to-fly.io/",
+        "https://www.example.com/posts/notes-on-deno.land/",
     ],
 )
 def test_url_ok_keeps_articles(url):
@@ -144,12 +153,32 @@ def test_url_ok_keeps_articles(url):
         "https://www.example.com/library/riverlm3",
         "https://www.example.com/library/riverlm3-png-tools",
         "https://www.example.com/library/home",
+        "https://www.example.com/library/why-we-chose-deno.land",
+        "https://www.example.com/library/flu-shots-available.page",
     ],
 )
 def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
-    """Under the owner's ``link_pattern`` courlan isn't asked: the
-    pattern says what an article is, as ``score_page`` takes it."""
+    """Under the owner's ``link_pattern`` courlan isn't asked, nor its
+    2-to-5-letter ending rule: the pattern says what an article is, as
+    ``score_page`` takes it."""
     assert url_ok(url, SITE, owner_pattern=True)
+
+
+@pytest.mark.parametrize(
+    ("path", "ok"),
+    [
+        # Without the owner's pattern, an unknown ending at the end of
+        # the path is a file, as courlan reads it ...
+        ("/blog/why-we-chose-deno.land", False),
+        ("/parks/trails/maps/trail-1.gpx", False),
+        # ... but a path that ends in ``/`` has no ending ...
+        ("/blog/why-we-chose-deno.land/", True),
+        # ... and a file ending is a file either way.
+        ("/files/annual-report.pdf/", False),
+    ],
+)
+def test_url_ok_reads_an_ending_only_at_the_end_of_the_path(path, ok):
+    assert url_ok("https://www.example.com" + path, SITE) is ok
 
 
 @pytest.mark.parametrize(
@@ -158,7 +187,7 @@ def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
         "https://www.example.com/library/tag/python",
         "https://www.example.com/library/2026/07/",
         "https://www.example.com/library/riverlm3.png",
-        "https://www.example.com/library/riverlm3.gguf",
+        "https://www.example.com/library/riverlm3.zip/",
         "https://www.example.com/library/about",
         "https://www.other-site.com/library/riverlm3",
     ],

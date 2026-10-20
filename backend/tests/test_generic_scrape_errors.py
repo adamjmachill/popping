@@ -282,24 +282,80 @@ async def test_an_explicit_sitemap_url_is_read_whatever_its_address_looks_like(s
     assert [c.url for c in plan.candidates] == [f"{SITE}/news/council-approves-river-trail/"]
 
 
+# A formatted page whose ``srcset`` puts one image address per line
+# (Prettier's HTML output, Ghost's Casper theme).
+_SRCSET_PAGE = """<!doctype html>
+<html lang="en">
+  <head><title>Example</title></head>
+  <body>
+    <img
+      srcset="
+        https://images.example-cdn.net/hero-400.jpg 400w,
+        https://www.example.com/wp-content/uploads/hero-800.jpg 800w
+      "
+      alt=""
+    />
+    <p>Welcome.</p>
+  </body>
+</html>
+"""
+
+
+@pytest.mark.parametrize("page", [_NO_LIST_PAGE, _SRCSET_PAGE], ids=["plain", "srcset"])
 @pytest.mark.parametrize("address", ["/", "/site-map/"])
-async def test_a_sitemap_url_that_is_a_page_reads_the_sites_sitemaps(site, address):
+async def test_a_sitemap_url_that_is_a_page_reads_the_sites_sitemaps(site, address, page):
     """The Sitemap address field holds the site's own address or an HTML
     site-map page. It names no page or sitemap, and doesn't look like a
     sitemap, so the site's sitemaps are read through robots.txt, as for
-    a site. When those refuse us, the feed is blocked."""
+    a site. When those refuse us, the feed is blocked. A web page's
+    lines are no plain-text list of URLs, even when some start with one
+    (a formatted ``srcset``)."""
     post = f"{SITE}/news/council-approves-river-trail/"
     site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/post-sitemap.xml\n")
     site.routes[f"{SITE}/post-sitemap.xml"] = _xml(_urlset(post))
     site.routes[post] = _html(_fixture("yoast-post.html"))
-    site.routes[f"{SITE}/"] = _html(_NO_LIST_PAGE)
-    site.routes[f"{SITE}/site-map/"] = _html(_NO_LIST_PAGE)
+    site.routes[f"{SITE}/"] = _html(page)
+    site.routes[f"{SITE}/site-map/"] = _html(page)
     plugin = _plugin(f"{SITE}/", sitemap_url=SITE + address)
     assert [i["url"] for i in await plugin.fetch()] == [post]
 
     site.routes[f"{SITE}/post-sitemap.xml"] = 403
     plugin = _plugin(f"{SITE}/", sitemap_url=SITE + address)
     assert await _kind_of(plugin.fetch()) == "blocked"
+
+
+def _site_sitemap_with_a_post(site: _Site) -> None:
+    """robots.txt names a post sitemap whose one post is an article."""
+    post = f"{SITE}/news/council-approves-river-trail/"
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/post-sitemap.xml\n")
+    site.routes[f"{SITE}/post-sitemap.xml"] = _xml(_urlset(post))
+    site.routes[post] = _html(_fixture("yoast-post.html"))
+    site.routes[f"{SITE}/"] = _html(_NO_LIST_PAGE)
+
+
+async def test_an_empty_sitemap_url_is_not_replaced_by_the_sites_other_sitemaps(site):
+    """The owner's news sitemap is an empty urlset for a poll (it is being
+    rebuilt). Its address looks like a sitemap, so it is the owner's
+    sitemap, not a page: the site's other sitemaps are not read in its
+    place as the owner's choice. The poll reads ``[no list]``."""
+    _site_sitemap_with_a_post(site)
+    site.routes[f"{SITE}/news-sitemap.xml"] = _xml(_urlset())
+    plugin = _plugin(f"{SITE}/", sitemap_url=f"{SITE}/news-sitemap.xml")
+    assert await _kind_of(plugin.fetch()) == "no list"
+    assert site.asked("/robots.txt") == 0
+    assert site.asked("/post-sitemap.xml") == 0
+
+
+async def test_a_sitemap_url_whose_entries_are_all_left_out_is_not_replaced(site):
+    """A ``sitemap_url`` at a page-like address that lists only static
+    pages names pages, so it is a sitemap whatever its address: its
+    entries are left out (``url_ok``), and the site's other sitemaps are
+    not read in its place."""
+    _site_sitemap_with_a_post(site)
+    site.routes[f"{SITE}/?sitemap=index"] = _xml(_urlset(f"{SITE}/about/", f"{SITE}/contact-us"))
+    plugin = _plugin(f"{SITE}/", sitemap_url=f"{SITE}/?sitemap=index")
+    assert await _kind_of(plugin.fetch()) == "no list"
+    assert site.asked("/robots.txt") == 0
 
 
 # A Yoast-style index in robots.txt whose post sitemaps the site refuses
@@ -651,6 +707,91 @@ async def test_a_stored_story_is_the_control_before_a_page_not_tried_yet(site):
     assert site.asked("/news/annual-report/") == 0
 
 
+@pytest.mark.parametrize("passed_over", ["too old", "not an article"])
+async def test_a_page_read_and_passed_over_that_served_a_page_is_a_control(
+    site, monkeypatch, passed_over
+):
+    """A site that posts rarely: every page its sitemap lists was read and
+    passed over (too old, or not an article), so the feed has stored
+    nothing. Then a members-only page goes up. The pages passed over
+    answered with a page when they were read, so the first is the
+    control: it loads, the members-only page is skipped, and the feed
+    stays healthy instead of reading ``[blocked]`` on every poll (the
+    sixth would stop it)."""
+    public = [f"{SITE}/news/autumn-update-{n}/" for n in range(3)]
+    members = f"{SITE}/news/members-only-briefing/"
+    if passed_over == "too old":
+        monkeypatch.setattr(generic_scrape, "_MAX_AGE_DAYS", 0)
+        page = _html(_fixture("yoast-post.html"))
+    else:
+        page = _html(_NO_LIST_PAGE)
+    for url in public:
+        site.routes[url] = page
+    site.routes[members] = 403
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*public))
+
+    async def known(urls):
+        return set()
+
+    plugin = _plugin(f"{SITE}/")
+    assert await plugin.fetch(known_urls=known) == []
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(members, *public))
+    for _ in range(6):
+        assert await plugin.fetch(known_urls=known) == []
+    assert members in plugin._extracted_urls
+    assert site.requests.count(members) == 1
+    assert site.requests.count(public[0]) == 2  # read, then the control
+
+
+@pytest.mark.parametrize("earlier", ["not a page", "gone", "members only", "failing"])
+async def test_a_page_that_did_not_serve_a_page_is_never_the_control(site, earlier):
+    """No stored story can be the control (the only one has been deleted
+    since), and pages read on an earlier poll that didn't answer with a
+    page (a PDF at a page-like address, deleted stories, a members-only
+    page skipped then, a page that answered 503 and is still being
+    retried) are listed before a page not tried yet. None of them can
+    say whether the site serves us, so they are passed over and the page
+    not tried yet is the control: it loads, the poll succeeds, and they
+    are not asked for again."""
+    stored = f"{SITE}/news/council-approves-river-trail/"
+    site.routes[stored] = _html(_fixture("yoast-post.html"))
+    if earlier == "not a page":
+        read = [f"{SITE}/news/annual-report/"]
+        site.routes[read[0]] = (200, "%PDF-1.7 ...", "application/pdf")
+    elif earlier == "gone":
+        read = [f"{SITE}/news/deleted-{n}/" for n in range(generic_scrape._MAX_CONTROLS)]  # 404
+    elif earlier == "members only":
+        read = [f"{SITE}/news/members-only-briefing/"]
+        site.routes[read[0]] = 403
+    else:
+        read = [f"{SITE}/news/budget-hearing-notes/"]
+        site.routes[read[0]] = 503
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*read, stored))
+
+    async def known(urls):
+        return {stored} & set(urls)
+
+    plugin = _plugin(f"{SITE}/")
+    assert await plugin.fetch(known_urls=known) == []
+    if earlier == "failing":
+        assert set(read) <= set(plugin._page_failures)
+    else:
+        assert set(read) <= set(plugin._extracted_urls)
+
+    # The stored story is deleted, and a full batch of members-only pages
+    # goes up, above those pages and a public page not tried yet.
+    del site.routes[stored]
+    refused = [f"{SITE}/news/members-only-{n}/" for n in range(generic_scrape._MAX_NEW_PER_POLL)]
+    untried = f"{SITE}/news/harvest-market-returns/"
+    for page in refused:
+        site.routes[page] = 403
+    site.routes[untried] = _html(_fixture("yoast-post.html"))
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*refused, *read, untried, stored))
+    assert await plugin.fetch(known_urls=known) == []
+    assert set(refused) <= set(plugin._extracted_urls)
+    assert all(site.requests.count(page) == 1 for page in read)
+
+
 @pytest.mark.parametrize("failure", [httpx.ReadTimeout, httpx.ConnectError, 503, 500])
 async def test_an_article_that_fails_in_a_way_that_passes_is_fetched_again(site, failure):
     """A timeout or a 5xx on a new article doesn't lose it: the page
@@ -826,10 +967,11 @@ async def test_a_dead_sitemap_url_does_not_vouch_for_the_home_pages_links(site, 
     ids=["503", "429", "timeout", "empty"],
 )
 async def test_a_sitemap_url_that_fails_for_one_poll_keeps_its_pages(site, monkeypatch, failure):
-    """The owner's sitemap_url fails for one poll, and the home page's
+    """The owner's sitemap_url fails for a few polls, and the home page's
     links (the same pages) are read without the owner's word and
-    rejected. When the sitemap answers again, it vouches for them and
-    they come in: one bad poll doesn't lose the owner's pages."""
+    rejected, once: nothing is fetched again while the sitemap stays
+    down. When the sitemap answers again, it vouches for them and they
+    come in: bad polls don't lose the owner's pages."""
     seen = _spy_owner_configured(monkeypatch)
     sitemap = f"{SITE}/news-sitemap.xml"
     site.routes[f"{SITE}/"] = _html(_MODEL_LIST)
@@ -837,8 +979,10 @@ async def test_a_sitemap_url_that_fails_for_one_poll_keeps_its_pages(site, monke
         site.routes[model] = _html(_fixture("ollama-library-model.html"))
     plugin = _plugin(f"{SITE}/", sitemap_url=sitemap)
     site.routes[sitemap] = failure
-    assert await plugin.fetch() == []
+    for _ in range(3):
+        assert await plugin.fetch() == []
     assert seen == [False] * len(_MODELS)
+    assert all(site.requests.count(model) == 1 for model in _MODELS)
     site.routes[sitemap] = _xml(_urlset(*_MODELS))
     items = await plugin.fetch()
     assert [i["url"] for i in items] == _MODELS[: generic_scrape._DEFAULT_MAX_UNDATED]
@@ -856,6 +1000,92 @@ async def test_a_working_sitemap_url_vouches_for_its_pages(site, monkeypatch):
     items = await _plugin(f"{SITE}/", sitemap_url=f"{SITE}/news-sitemap.xml").fetch()
     assert [i["url"] for i in items] == _MODELS[: generic_scrape._DEFAULT_MAX_UNDATED]
     assert seen == [True] * len(_MODELS)
+
+
+def _once(first, then, *, times: int = 1):
+    """A route that answers ``first`` to the first ``times`` requests,
+    then ``then``."""
+    asked = 0
+
+    async def route(request):
+        nonlocal asked
+        asked += 1
+        return first if asked <= times else then
+
+    return route
+
+
+class _Stored:
+    """The feed's stored stories, as ``known_urls`` reads them; each poll's
+    items are stored, as ``scheduler._ingest`` would."""
+
+    def __init__(self, *urls: str) -> None:
+        self.urls = set(urls)
+
+    async def __call__(self, urls):
+        return self.urls & set(urls)
+
+    async def poll(self, plugin: GenericScrapePlugin) -> list[str]:
+        items = await plugin.fetch(known_urls=self)
+        self.urls |= {i["url"] for i in items}
+        return [i["url"] for i in items]
+
+
+@pytest.mark.parametrize("left", ["sitemap 503", "page 503", "page 503 twice", "page 429"])
+async def test_a_page_left_for_a_later_poll_keeps_its_place(site, left):
+    """The owner's sitemap (no ``<lastmod>``) lists a new dated article
+    above a new undated model page. One poll leaves the model page for
+    later: the sitemap answers 503, so the home page's links are read
+    without the owner's word, or the page itself answers 503 (on one
+    poll or two) or 429. The article comes in on that poll. When the
+    model page loads, it is listed below a story stored since, but it
+    was new when it was first left, and so it still is: it comes in,
+    once."""
+    sitemap = f"{SITE}/library-sitemap.xml"
+    article = f"{SITE}/news/council-approves-river-trail/"
+    other = f"{SITE}/news/harvest-market-returns/"
+    model, older = f"{SITE}/library/riverlm3", f"{SITE}/library/riverlm1"
+    for story in (article, other):
+        site.routes[story] = _html(_fixture("yoast-post.html"))
+    page = _html(_fixture("ollama-library-model.html"))
+    site.routes[model] = page
+    listed = _xml(_urlset(article, model, older))
+    site.routes[sitemap] = listed
+    site.routes[f"{SITE}/"] = _html(
+        "<html><body><main><ul>{}</ul></main></body></html>".format(
+            "".join(f'<li><a href="{u}">{u}</a></li>' for u in (article, model, other))
+        )
+    )
+    failures = 2 if left.endswith("twice") else 1
+    if left == "sitemap 503":
+        site.routes[sitemap] = _once(503, listed)
+    else:
+        site.routes[model] = _once(int(left.split()[1]), page, times=failures)
+    stored = _Stored(older)
+    plugin = _plugin(f"{SITE}/", sitemap_url=sitemap)
+    assert article in await stored.poll(plugin)
+    for _ in range(failures - 1):
+        assert await stored.poll(plugin) == []
+    assert model not in stored.urls
+    assert await stored.poll(plugin) == [model]
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(model) == failures + 1
+
+
+async def test_a_page_left_for_later_while_it_was_backlog_is_still_backlog(site):
+    """After a restart the feed reads again the pages it passed over
+    before. One listed below a stored story answers 503 and is left for
+    later: it was backlog then, so it is when it loads."""
+    sitemap = f"{SITE}/library-sitemap.xml"
+    stored_model, old_model = f"{SITE}/library/riverlm3", f"{SITE}/library/riverlm1"
+    site.routes[sitemap] = _xml(_urlset(stored_model, old_model))
+    site.routes[old_model] = _once(503, _html(_fixture("ollama-library-model.html")))
+    stored = _Stored(stored_model)
+    plugin = _plugin(f"{SITE}/", sitemap_url=sitemap)
+    assert await stored.poll(plugin) == []
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(old_model) == 2
+    assert old_model in plugin._extracted_urls
 
 
 async def test_a_listing_cards_date_dates_a_page_that_carries_none(site):

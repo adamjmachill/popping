@@ -475,7 +475,7 @@ async def _backlog_cutoff(
     ``ingest_rules`` draws for dated items on a later poll (the
     baseline's backfill window, or ``max_age_days``, whichever is
     later). None on a first fetch, which keeps the newest items
-    whatever their age. ``GenericScrapePlugin._cap_undated`` holds an
+    whatever their age. ``generic_scrape._backlog_rule`` holds an
     undated page's sitemap ``<lastmod>`` against it."""
     if await _is_first_fetch(session, source, now, rules):
         return None

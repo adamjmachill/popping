@@ -222,13 +222,14 @@ async def discover_sitemap_entries(
 ) -> list[Candidate]:
     """Return up to ``limit`` article candidates from ``page_url``'s
     sitemap, newest first, as ``Candidate(url, published, title,
-    modified)``.
+    modified, place)``.
 
     They are ordered by their best date: a news sitemap's publication
     date, else ``<lastmod>``, else a ``/YYYY/MM/`` style date in the URL
     itself; undated URLs follow in sitemap order. ``published`` is the
     publication date alone, ``modified`` the ``<lastmod>`` alone, and
-    ``title`` a news sitemap's title, each None when absent.
+    ``title`` a news sitemap's title, each None when absent. ``place``
+    is the entry's place in the sitemaps' own order.
 
     ``input_is_sitemap``: ``page_url`` is the owner's ``sitemap_url``,
     read as the sitemap whatever its address looks like (a WordPress
@@ -336,6 +337,10 @@ def _local(tag: str) -> str:
 # One sitemap page entry: ``(url, published, lastmod, title)``.
 _Entry = tuple[str, str | None, str | None, str | None]
 
+# A web page. It is never a plain-text list of URLs, even when some of
+# its lines start with one (a formatted ``srcset``, an embed's address).
+_WEB_PAGE_RE = re.compile(r"<(?:!doctype\s+html|html|head|body)\b", re.IGNORECASE)
+
 
 def _parse_sitemap_entries(
     text: str,
@@ -348,10 +353,15 @@ def _parse_sitemap_entries(
     ``<news:publication_date>``, ``lastmod`` its ``<lastmod>`` and
     ``title`` its ``<news:title>``, each None when absent. The two dates
     stay apart: a publication date dates the page, a ``<lastmod>`` only
-    says when it last changed."""
+    says when it last changed.
+
+    A web page (an HTML document) names nothing: its lines are not a
+    plain-text list, whatever they start with."""
     try:
         root = DefusedET.fromstring(text.lstrip())
     except (DefusedET.ParseError, ValueError, DefusedXmlException):
+        if _WEB_PAGE_RE.search(text):
+            return [], []
         lines = [ln.strip() for ln in text.splitlines()]
         return [
             (ln, None, None, None) for ln in lines if ln.startswith(("http://", "https://"))
@@ -605,10 +615,14 @@ async def _crawl_sitemaps(
             raise most_telling_error(refused)
         if network:
             raise network[0]
-    by_url = {url: (published, lastmod, title) for url, published, lastmod, title in pages}
+    # ``pages`` is in the site's own order (``Candidate.place``).
+    by_url = {
+        url: (published, lastmod, title, place)
+        for place, (url, published, lastmod, title) in enumerate(pages)
+    }
     ordered = _newest_first([(url, published or lastmod) for url, published, lastmod, _ in pages])
     out = []
     for url in ordered[:limit]:
-        published, lastmod, title = by_url[url]
-        out.append(Candidate(url, parse_date(published), title, parse_date(lastmod)))
+        published, lastmod, title, place = by_url[url]
+        out.append(Candidate(url, parse_date(published), title, parse_date(lastmod), place))
     return out

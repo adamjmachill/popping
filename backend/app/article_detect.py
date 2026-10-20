@@ -50,12 +50,18 @@ class Candidate(NamedTuple):
       changed, not when it was published (static pages get edited), so
       it orders a sitemap but never dates a page. A page was published
       no later than it.
+    - ``place``: a sitemap entry's place in the site's own order, the
+      sitemap documents as the crawl read them, each top to bottom
+      (None for a listing card, whose list is in its own order).
+      Candidates are sorted by date, which moves every undated entry
+      last, so this is the only record of where the site listed it.
     """
 
     url: str
     published: dt.datetime | None
     title: str | None
     modified: dt.datetime | None = None
+    place: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -203,13 +209,17 @@ _PAGE_EXTENSIONS = frozenset({
     "php", "php3", "php4", "php5", "asp", "aspx", "adp", "jsp", "cfm", "cgi", "pl", "do",
     "stm", "amp",
 })
-# Endings of article pages on news CMSs that courlan doesn't know
-# (Escenic's ``.ece``, the Times Internet ``.cms``, Globo's ``.ghtml``).
-# They are left out of what courlan sees.
-_ARTICLE_EXTENSIONS = frozenset({"ece", "cms", "ghtml"})
+# Endings of article pages on CMSs that courlan doesn't know: news CMSs
+# (Escenic's ``.ece``, the Times Internet ``.cms``, Globo's ``.ghtml``),
+# the ``.page`` of nyc.gov's agency press releases, JavaServer Faces'
+# ``.jsf`` and ColdFusion's ``.cfml``. They are left out of what courlan
+# sees.
+_ARTICLE_EXTENSIONS = frozenset({"ece", "cms", "ghtml", "page", "jsf", "cfml"})
 # Any other ending of 2 to 5 letters is a file of a type not listed
 # above (``.gpx``, ``.kmz``, ``.rtf``, ``.wmv``), as courlan's own
-# ending test reads it.
+# ending test reads the end of a path. Not at the end of a path that
+# ends in ``/`` (``/blog/moving-to-fly.io/`` has no ending, for courlan
+# too), and not under the owner's link pattern (see ``url_ok``).
 _LETTERS_ENDING_RE = re.compile(r"[a-z]{2,5}")
 # A camera's file name used as the page name (WordPress attachment
 # pages: ``/img_1234/``, ``/IMG-1234``).
@@ -238,12 +248,12 @@ def _courlan_page(page: str) -> str:
     return f"{name}.{extension}" if extension in _PAGE_EXTENSIONS else name
 
 
-def _is_file(page: str) -> bool:
+def _is_file(page: str, *, any_ending: bool = True) -> bool:
     """Whether the page's own name (lower case) names a file: a file
     ending (``trail.jpg``, ``episode-12.mp3``), any other ending of 2 to
-    5 letters that is no web page's (``trail-3.gpx``), a file ending
-    under a page ending (``doc.pdf.html``), or a camera's file name
-    (``img_1234``)."""
+    5 letters that is no web page's (``trail-3.gpx``; only with
+    ``any_ending``), a file ending under a page ending
+    (``doc.pdf.html``), or a camera's file name (``img_1234``)."""
     stem, extension = _split_extension(page)
     if extension in _PAGE_EXTENSIONS:
         stem, inner = _split_extension(stem)
@@ -251,7 +261,11 @@ def _is_file(page: str) -> bool:
             return True
     elif extension in _FILE_EXTENSIONS:
         return True
-    elif extension not in _ARTICLE_EXTENSIONS and _LETTERS_ENDING_RE.fullmatch(extension):
+    elif (
+        any_ending
+        and extension not in _ARTICLE_EXTENSIONS
+        and _LETTERS_ENDING_RE.fullmatch(extension)
+    ):
         return True
     return bool(_CAMERA_NAME_RE.fullmatch(stem))
 
@@ -317,9 +331,12 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
       as a search page.
     - **Files are ours too**, by the page's own name only (``_is_file``):
       a file ending, any other ending of 2 to 5 letters that is no web
-      page's or news CMS's, or a camera's file name.
-      ``/blog/png-vs-jpg`` and ``/blog/node.js-22-released`` are
-      articles; ``trail.jpg``, ``trail-3.gpx`` and ``img_1234`` are not.
+      page's or known CMS's, or a camera's file name.
+      ``/blog/png-vs-jpg``, ``/blog/node.js-22-released`` and
+      ``/press/flu-shots-available.page`` are articles; ``trail.jpg``,
+      ``trail-3.gpx`` and ``img_1234`` are not. Only the end of the path
+      has an ending, as courlan reads it: a path that ends in ``/``
+      (``/blog/moving-to-fly.io/``) is judged by the file endings alone.
     - **courlan judges the rest**: ``check_url(strict=True)`` on a
       one-word page name (contact, login, imprint and index pages,
       ``/feed``), the query (a file type hidden in it) and the host
@@ -335,8 +352,10 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
 
     ``owner_pattern``: the URL is under the owner's ``link_pattern``,
     which is the article signal (as ``score_page``'s
-    ``owner_configured``), so courlan isn't asked; our path and file
-    rules still apply.
+    ``owner_configured``), so courlan isn't asked, and neither is the
+    2-to-5-letter ending rule that reads like it
+    (``/library/why-we-chose-deno.land``); our path rules and the file
+    endings still apply.
     """
     try:
         parts = urlsplit(url.strip())
@@ -360,7 +379,7 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
     page = segments[-1] if segments else ""
-    if _is_file(page):
+    if _is_file(page, any_ending=not owner_pattern and not parts.path.endswith("/")):
         return False
     # Blogspot's date archives (/2026_10_01_archive.html).
     if page.endswith("_archive.html"):

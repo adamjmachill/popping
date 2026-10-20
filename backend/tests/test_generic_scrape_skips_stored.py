@@ -14,7 +14,7 @@ listing page is in publication order, so a page below a stored story is
 older; a sitemap's ``<lastmod>`` order says nothing about age (an edited
 story moves up), so a page's own ``<lastmod>`` is held against the
 backlog line instead, and a page with no ``<lastmod>`` is judged by its
-place, as on a listing page.
+place in the sitemap, as on a listing page.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import pytest
 from sqlalchemy import select
 
-from app import ingest_rules, scheduler
+from app import feed_autodiscovery, ingest_rules, scheduler
 from app.article_detect import Candidate
 from app.models import Entry
 from app.sources import generic_scrape
@@ -259,6 +259,53 @@ async def test_an_undated_sitemap_page_with_no_lastmod_is_judged_by_its_place(mo
     # A first fetch has nothing stored yet: the newest pages come in.
     _serve(monkeypatch, [new, old], dated=False)
     assert [i["url"] for i in await GenericScrapePlugin(_row()).fetch()] == [new, old]
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dated_by", ["lastmod", "url"])
+async def test_an_undated_page_is_judged_by_its_place_in_the_sitemap_not_the_date_order(
+    monkeypatch, fake_dns, dated_by
+):
+    """Through the real crawl: the stored stories carry a date the crawl
+    sorts by (a ``<lastmod>``, or a ``/YYYY/MM/DD/`` URL), and two undated
+    pages with neither are listed first and last. The candidates are in
+    date order, which puts both after every stored story; the sitemap
+    lists the first above them, so it is new and comes in, and the last
+    is backlog."""
+    site = "https://example.com"
+    if dated_by == "lastmod":
+        stored = [f"{site}/notes/river-trail-{n}/" for n in range(2)]
+        lastmod = "<lastmod>2026-10-18</lastmod>"
+    else:
+        stored = [f"{site}/2026/10/18/river-trail-{n}/" for n in range(2)]
+        lastmod = ""
+    new, old = f"{site}/guides/harvest-market-plans/", f"{site}/guides/winter-road-closures/"
+    entries = "".join(
+        f"<url><loc>{u}</loc>{lastmod if u in stored else ''}</url>" for u in [new, *stored, old]
+    )
+    sitemap = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>'
+    )
+
+    async def fake_fetch_html_checked(url, custom_headers=None, **kwargs):
+        return sitemap if url == f"{site}/sitemap.xml" else None
+
+    calls: list[str] = []
+
+    async def fake_extract(url, custom_headers=None, **kwargs):
+        calls.append(url)
+        return {"title": f"Page {url}", "url": url, "published_at": None}
+
+    monkeypatch.setattr(feed_autodiscovery, "fetch_html_checked", fake_fetch_html_checked)
+    monkeypatch.setattr(generic_scrape, "_extract_one", fake_extract)
+    plugin = GenericScrapePlugin(_row(url=f"{site}/"))
+    items = await plugin.fetch(
+        known_urls=_known(set(stored)), max_undated=5, backlog_before=NOW - dt.timedelta(days=2)
+    )
+    assert calls == [new, old]
+    assert [i["url"] for i in items] == [new]
 
 
 # --- through scheduler._ingest ------------------------------------------------
