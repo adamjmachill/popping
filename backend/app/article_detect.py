@@ -196,11 +196,24 @@ _FILE_EXTENSIONS = frozenset({
     "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub",
     "woff", "woff2", "ttf", "otf", "eot",
 })
-# Endings of web pages that courlan knows; any other ending that isn't a
-# file (``.ece``, ``.cms`` news CMSs) is left out of what courlan sees.
+# Endings of web pages that courlan knows (its own whitelist, without
+# ``.txt`` and ``.xml``, which are files here).
 _PAGE_EXTENSIONS = frozenset({
-    "html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp", "cfm",
+    "html", "htm", "xhtml", "shtml", "phtml", "mht", "mhtml", "htx",
+    "php", "php3", "php4", "php5", "asp", "aspx", "adp", "jsp", "cfm", "cgi", "pl", "do",
+    "stm", "amp",
 })
+# Endings of article pages on news CMSs that courlan doesn't know
+# (Escenic's ``.ece``, the Times Internet ``.cms``, Globo's ``.ghtml``).
+# They are left out of what courlan sees.
+_ARTICLE_EXTENSIONS = frozenset({"ece", "cms", "ghtml"})
+# Any other ending of 2 to 5 letters is a file of a type not listed
+# above (``.gpx``, ``.kmz``, ``.rtf``, ``.wmv``), as courlan's own
+# ending test reads it.
+_LETTERS_ENDING_RE = re.compile(r"[a-z]{2,5}")
+# A camera's file name used as the page name (WordPress attachment
+# pages: ``/img_1234/``, ``/IMG-1234``).
+_CAMERA_NAME_RE = re.compile(r"img[-_]?\d+")
 _EXTENSION_RE = re.compile(r"^(.+)\.([a-z][a-z0-9]{0,4})$")
 # A page name of one word, which courlan judges as a whole (``contact``,
 # ``login``, ``impressum``, ``index``, ``home``, ``feed``). A slug of
@@ -223,6 +236,24 @@ def _courlan_page(page: str) -> str:
     stem, extension = _split_extension(page)
     name = stem if _ONE_WORD_RE.fullmatch(stem) else "post"
     return f"{name}.{extension}" if extension in _PAGE_EXTENSIONS else name
+
+
+def _is_file(page: str) -> bool:
+    """Whether the page's own name (lower case) names a file: a file
+    ending (``trail.jpg``, ``episode-12.mp3``), any other ending of 2 to
+    5 letters that is no web page's (``trail-3.gpx``), a file ending
+    under a page ending (``doc.pdf.html``), or a camera's file name
+    (``img_1234``)."""
+    stem, extension = _split_extension(page)
+    if extension in _PAGE_EXTENSIONS:
+        stem, inner = _split_extension(stem)
+        if inner in _FILE_EXTENSIONS:
+            return True
+    elif extension in _FILE_EXTENSIONS:
+        return True
+    elif extension not in _ARTICLE_EXTENSIONS and _LETTERS_ENDING_RE.fullmatch(extension):
+        return True
+    return bool(_CAMERA_NAME_RE.fullmatch(stem))
 
 
 def _segments(path: str) -> list[str]:
@@ -284,15 +315,17 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
       ``/pets/fat-cat/how-to-feed`` as a category page,
       ``/news/power-user/tips`` as a user page, and any ``/search/``
       as a search page.
-    - **Files are ours too**, by the page's own ending only
-      (``_FILE_EXTENSIONS``): ``/blog/png-vs-jpg`` and
-      ``/blog/node.js-22-released`` are articles, ``trail.jpg`` is not.
+    - **Files are ours too**, by the page's own name only (``_is_file``):
+      a file ending, any other ending of 2 to 5 letters that is no web
+      page's or news CMS's, or a camera's file name.
+      ``/blog/png-vs-jpg`` and ``/blog/node.js-22-released`` are
+      articles; ``trail.jpg``, ``trail-3.gpx`` and ``img_1234`` are not.
     - **courlan judges the rest**: ``check_url(strict=True)`` on a
       one-word page name (contact, login, imprint and index pages,
       ``/feed``), the query (a file type hidden in it) and the host
       (malformed hosts). A slug of several words reaches it as a
-      neutral word, and an ending that is neither a file nor a web page
-      it knows (``.ece``, ``.cms``) is left off. It is a yes/no test
+      neutral word, and a news CMS's ending it doesn't know (``.ece``,
+      ``.cms``) is left off. It is a yes/no test
       only. The URL it would normalize to is never used, because strict
       normalizing drops query parameters it doesn't know.
 
@@ -327,7 +360,7 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
     page = segments[-1] if segments else ""
-    if _split_extension(page)[1] in _FILE_EXTENSIONS:
+    if _is_file(page):
         return False
     # Blogspot's date archives (/2026_10_01_archive.html).
     if page.endswith("_archive.html"):

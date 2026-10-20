@@ -694,22 +694,34 @@ class GenericScrapePlugin(SourcePlugin):
         # FIFO cap gives a worst-case fixed footprint; eviction
         # just means a previously-seen URL gets re-attempted, which
         # the entries-table UNIQUE constraint silently no-ops.
-        self._extracted_urls: "OrderedDict[str, None]" = OrderedDict()
+        self._extracted_urls: "OrderedDict[str, bool]" = OrderedDict()
         # Consecutive failed polls per page whose fetch failed in a way
         # that passes (see ``_page_failed``); bounded FIFO.
         self._page_failures: "OrderedDict[str, int]" = OrderedDict()
 
-    def _mark_extracted(self, url: str) -> None:
+    def _mark_extracted(self, url: str, *, unvouched: bool = False) -> None:
         """Add ``url`` to the seen-set, evicting the oldest entry if
         the cap is exceeded. ``OrderedDict.popitem(last=False)`` is
         O(1) and returns FIFO order.
+
+        ``unvouched``: the page was read in a poll whose candidates the
+        owner never chose (see ``fetch``), so ``_seen`` lets a poll that
+        has the owner's word read it once more.
         """
         # ``setdefault`` would also work but ``__setitem__`` is faster
         # and we don't need the existing-value semantics.
-        self._extracted_urls[url] = None
+        self._extracted_urls[url] = unvouched
         self._page_failures.pop(url, None)
         while len(self._extracted_urls) > _MAX_EXTRACTED_URLS:
             self._extracted_urls.popitem(last=False)
+
+    def _seen(self, url: str, owner_configured: bool) -> bool:
+        """Whether this poll skips ``url`` as already read: it is marked,
+        unless it was marked ``unvouched`` and this poll's candidates
+        have the owner's word (``owner_configured``)."""
+        if url not in self._extracted_urls:
+            return False
+        return not (owner_configured and self._extracted_urls[url])
 
     def _page_failed(self, url: str, exc: BaseException) -> None:
         """A page's fetch failed in a way that passes (a timeout, a
@@ -775,14 +787,20 @@ class GenericScrapePlugin(SourcePlugin):
         owner_configured = bool(self.link_pattern) or (
             bool(self.sitemap_url) and plan.mode == "sitemap"
         )
-        if self.sitemap_url and plan.mode != "sitemap":
+        # So a page the home page's links brought in a poll like that is
+        # marked as read without the owner's word (``unvouched``). When
+        # the owner's sitemap lists it on a later poll, it is read once
+        # more: a sitemap that failed for one poll (a 503, a timeout, an
+        # empty answer while it rebuilds) mustn't lose the pages it lists.
+        unvouched = bool(self.sitemap_url) and not owner_configured
+        if unvouched:
             logger.info(
-                "generic_scrape: %s: its sitemap_url %s listed nothing; read %s instead",
+                "generic_scrape: %s: its sitemap_url %s gave no pages; read %s instead",
                 self.name, self.sitemap_url, self.url,
             )
         batch: list[Candidate] = []
         for candidate in plan.fresh:
-            if candidate.url in self._extracted_urls:
+            if self._seen(candidate.url, owner_configured):
                 continue
             if len(batch) >= _MAX_NEW_PER_POLL:
                 # Leave the rest for the next poll — see
@@ -836,7 +854,7 @@ class GenericScrapePlugin(SourcePlugin):
             # Use the bounded helper (FIFO eviction at
             # ``_MAX_EXTRACTED_URLS``) instead of ``.add()`` to keep
             # the in-memory set's footprint fixed.
-            self._mark_extracted(url)
+            self._mark_extracted(url, unvouched=unvouched)
             if isinstance(result, BaseException):
                 logger.debug(
                     "generic_scrape: extraction failed for %s: %s", url, result,
@@ -853,8 +871,12 @@ class GenericScrapePlugin(SourcePlugin):
         serves its sitemap but refuses its article pages is common (a
         challenge in front of the pages), and so is a members-only page
         among public ones. To tell them apart, fetch a page of the site
-        outside the batch (the newest other candidate, usually a stored
-        story) as a control:
+        outside the batch as a control. The controls are the stored
+        stories, newest first (each loaded as an article before), then
+        the candidates not tried yet. A page this feed already read and
+        didn't keep is never one: it may be gone, not a page, or a
+        members-only page skipped on an earlier poll, and none of those
+        can say whether the site serves us.
 
         - The control serves a page: the site serves us, and these pages
           refuse everyone. The 401-403 ones are marked, so a lone
@@ -871,7 +893,12 @@ class GenericScrapePlugin(SourcePlugin):
           again.
         """
         served: str | None = None
-        controls = [c.url for c in plan.candidates if c.url not in refused]
+        fresh = {c.url for c in plan.fresh}
+        controls = [c.url for c in plan.candidates if c.url not in fresh] + [
+            c.url
+            for c in plan.fresh
+            if c.url not in refused and c.url not in self._extracted_urls
+        ]
         for control in controls[:_MAX_CONTROLS]:
             try:
                 body = await fetch_html_checked(
@@ -918,14 +945,15 @@ class GenericScrapePlugin(SourcePlugin):
           order, newest first, so a page below the first stored
           candidate is older than a stored story: backlog.
         - A sitemap is ordered by ``<lastmod>``, which moves a stored
-          story up whenever it is edited, or by nothing at all, so its
-          order says nothing about age. A page last modified before
-          ``backlog_before`` (the line ``ingest_rules`` draws for dated
-          stories on a later poll) was published before it: backlog. A
-          page with no date at all can't be told from old backlog, so
-          it is backlog too, except on a first fetch
-          (``backlog_before`` None), which keeps the newest pages
-          whatever their age.
+          story up whenever it is edited, so that order says nothing
+          about age. A page last modified before ``backlog_before`` (the
+          line ``ingest_rules`` draws for dated stories on a later poll)
+          was published before it: backlog. A first fetch
+          (``backlog_before`` None) keeps the newest pages whatever
+          their age.
+        - A sitemap page with no ``<lastmod>`` keeps the sitemap's own
+          order, the only one there is, so the listing page's rule
+          applies: below the first stored candidate is backlog.
 
         Every page dropped here stays marked extracted: it was read and
         passed over, and fetching it again every poll would only drop it
@@ -940,12 +968,10 @@ class GenericScrapePlugin(SourcePlugin):
         )
 
         def backlog(url: str) -> bool:
-            if plan.mode == "page":
-                return position.get(url, 0) > first_stored
-            if backlog_before is None:
-                return False
             changed = modified.get(url)
-            return changed is None or changed < backlog_before
+            if plan.mode == "page" or changed is None:
+                return position.get(url, 0) > first_stored
+            return backlog_before is not None and changed < backlog_before
 
         kept: list[dict] = []
         undated = dropped = 0

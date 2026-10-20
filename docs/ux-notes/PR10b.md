@@ -116,7 +116,9 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
     - Failures are collected per document. A document that fails is skipped, as before. With
       `raise_errors`, an empty crawl raises, in order: the input sitemap's own failure (the
       feed's `sitemap_url`, read as the sitemap whatever its address looks like, or its URL when
-      that looks like a sitemap; a 404 there is `[not found]`); a refusal when every sitemap
+      that looks like a sitemap; a 404 there is `[not found]`; one that loads but names nothing
+      and doesn't look like a sitemap is followed by the site's robots.txt and usual paths,
+      round 2); a refusal when every sitemap
       that could list pages was refused (a sitemap index that loaded counts neither way, and a
       refused robots.txt reads as no robots.txt and never counts on its own); a network error.
   - `discover_sitemap_entries(page_url, limit, path_prefix, *, headers, raise_errors,
@@ -159,15 +161,17 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
       `_extracted_urls`;
     - a refused page is not marked extracted, nor is a page whose fetch failed in a way that
       passes (`_page_failed`: marked after 3 failed polls in a row);
-    - when every page of a non-empty batch was refused, `_settle_refusals` fetches a control (the
-      newest candidate outside the batch; a gone one, 404 or 410, passes to the next, up to 3).
-      Serves a page: the 401-403 pages are marked, and a 429 stays unmarked. Refused, a 5xx, no
-      answer, an answer with no page in it (not HTML, empty), or no control: it raises the
-      refusal and leaves the pages unmarked;
+    - when every page of a non-empty batch was refused, `_settle_refusals` fetches a control:
+      the stored stories newest first, then candidates not tried yet, never a page already read
+      and not kept (round 2); a gone one, 404 or 410, passes to the next, up to 3. Serves a
+      page: the 401-403 pages are marked, and a 429 stays unmarked. Refused, a 5xx, no answer,
+      an answer with no page in it (not HTML, empty), or no control: it raises the refusal and
+      leaves the pages unmarked;
     - `_cap_undated`: at most `max_undated` undated pages per poll, and none that are old
       backlog (see the review fixes). Pages it drops stay marked;
     - `owner_configured` is worked out after the plan: the link pattern, or a `sitemap_url` whose
-      sitemap gave the candidates.
+      sitemap gave the candidates. A page read in a poll where the `sitemap_url` gave nothing is
+      marked `unvouched` and read once more when the sitemap lists it (round 2).
   - `probe` uses the same plan without `raise_errors` and skips refused pages, so the Test
     route's preview never raises.
 - **`backend/app/sources/base.py`**: the `KnownUrls` type and `SourcePlugin.takes_ingest_hints`
@@ -233,7 +237,9 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   members-only post. That page is never marked, so every poll's batch would be that page
   alone, refused, and the sixth poll would auto-disable the feed. This is common after a
   restart, when the only unstored candidate left is the refused one. So when the whole batch is
-  refused, one page of the site outside the batch is fetched first:
+  refused, one page of the site outside the batch is fetched first. The controls are the stored
+  stories, newest first, then candidates not tried yet; a page the feed already read and didn't
+  keep (gone, not a page, a members-only page skipped before) is never one (round 2):
   - refused too, a 5xx, no answer, an answer with no page in it, or no other page: the spec's
     rule (raise, pages unmarked);
   - gone (404, 410): the next candidate is tried, up to 3, so a deleted stored story doesn't
@@ -246,10 +252,10 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   feed type. Without it, after each restart the plugin would store up to two old undated pages
   per poll that it had passed over before. Which pages are backlog depends on the list's order
   (review fix; the first cut used position everywhere): below the first stored candidate on a
-  listing page; in a sitemap, last modified before the poll's backlog line, or with no date at
-  all after the first fetch. Pages the cap drops stay marked. PR4a's notes suggested leaving
-  them unmarked, but then every poll would fetch them again only to drop them again, up to 8
-  wasted fetches a poll on an undated site.
+  listing page, and in a sitemap for a page with no `<lastmod>` (round 2); in a sitemap, last
+  modified before the poll's backlog line. Pages the cap drops stay marked. PR4a's notes
+  suggested leaving them unmarked, but then every poll would fetch them again only to drop
+  them again, up to 8 wasted fetches a poll on an undated site.
 - **`url_ok` applies under a link pattern too,** as the spec's raw-discovery rule says, but
   without courlan (review fix): the pattern is the owner's article signal. The prefix filter
   itself is unchanged, and our own path rules still apply, so an owner pattern that targets
@@ -395,7 +401,8 @@ mutation run below):
 1. **A control page that answers 404 or 5xx counted as loaded.** `_settle_refusals` fetches the
    control with `raise_for_status` and counts it only when it returns a page. A 5xx, a
    refusal, a network error, a non-HTML answer or an empty body is not the site serving us; a
-   404 or 410 passes to the next candidate (up to 3).
+   404 or 410 passes to the next candidate (up to 3). (Which pages are controls changed in
+   round 2, fixes 1 and 2.)
 2. **An HTML sitemap page was never read as a page.** A URL that looks like a sitemap now reads
    the sitemap, then the page, like a site root.
 3. **A served sitemap index whose children are all refused read as `[no list]`** (reported
@@ -414,6 +421,7 @@ mutation run below):
    after the plan, so links `listing_links` found are scored as any page is. An INFO line
    names the `sitemap_url` that listed nothing. The feed still reads its page: raising
    `[not found]` there would stop `sitemap_url` plus `link_pattern` feeds that work today.
+   (Round 2, fix 3: such pages are read again once the sitemap lists them.)
 7. **Dated articles were scored as undated.**
    - `Candidate.published` (a listing card's `<time datetime>` or a news sitemap's
      publication date) reaches `score_page` as `listed_date`, which counts like the page's own
@@ -431,13 +439,15 @@ mutation run below):
    baseline minus `backfill_hours`, or `max_age_days`, whichever is later; None on a first
    fetch), or when it has no date at all after the first fetch. A page can't have been
    published after it last changed, so the first is sound; the second can't tell a new
-   undated page from old backlog in an order that says nothing.
+   undated page from old backlog in an order that says nothing. (Round 2, fix 4: a page with
+   no `<lastmod>` uses the position rule instead.)
 9. **`url_ok`'s courlan step rejected real slugs** (`png-vs-jpg`, `node.js-22-released`,
    `.ece`, `.cms`). File types are judged by the page's own ending (`_FILE_EXTENSIONS`);
    courlan sees a one-word page name as it is and a longer slug as a neutral word, with an
    ending that is neither a file nor a web page it knows left off; and under the owner's link
    pattern (page links and the sitemap read) courlan isn't asked (`owner_pattern`).
    Blogspot's `_archive.html` pages, which only courlan rejected, are rejected by our rules.
+   (Round 2, fix 6: any other 2 to 5 letter ending is a file again.)
 10. **No request-level test of the feed's headers.** Two tests serve robots.txt, a sitemap index
     listed only there, its post sitemap, the article page and a section's listing page only to
     a Safari User-Agent, and assert that every request carries it. Each fails when
@@ -446,7 +456,7 @@ mutation run below):
 11. **An explicit `sitemap_url` that didn't look like a sitemap was ignored.**
     `discover_sitemap_entries(..., input_is_sitemap=True)` reads the owner's URL as the sitemap
     whatever its path (`/?sitemap=index`), so a 404 there is `[not found]`. `/auto` doesn't set
-    it.
+    it. (Round 2, fix 5: one that loads but names nothing falls back to robots.txt.)
 12. **The VPS probe contradicted Step 0 and its 24-hour count couldn't catch a stopped feed.**
     The baseline is its own line, marked as the one check that runs before Step 0's
     `popping-update`. The probe now has a `since_deploy` column (stories fetched since the
@@ -488,7 +498,9 @@ mutation run below):
     against the line, an undated no-date page kept after the first fetch, the scheduler passing
     no line, the line ignoring the baseline;
   - `url_ok`: courlan seeing the whole slug, our file-type check dropped, courlan asked under
-    the owner's pattern, page links and the sitemap read not passing `owner_pattern`;
+    the owner's pattern, page links and the sitemap read not passing `owner_pattern` (the
+    sitemap read's half only at the `plan_candidates` level, where the discovery call is a
+    fake; inside `feed_autodiscovery` all three reverts survived, round 2 fix 9);
   - headers dropped on the robots.txt fetch, the sitemap document fetch and the listing page
     fetch, one at a time;
   - the explicit `sitemap_url` read by its looks, and the plan not flagging it.
@@ -504,6 +516,111 @@ mutation run below):
   run its container half locally, against sample rows in a scratch schema on the test cluster
   (dropped afterwards): it parses, and `since_deploy` reads 0 for a feed whose stories all came
   in the 24 hours before the deploy.
+
+## Review fixes (round 2)
+
+The second review's nine confirmed findings. Each fix has a test that fails when the fix is
+reverted in place (Verification below). None was skipped.
+
+1. **Pages already read as gone or not a page were picked as controls** (major). The controls
+   were the candidates in date order, so a page this feed had already read and not kept (three
+   deleted stories, a PDF at a page-like address, a page that kept failing) came before the
+   stored stories. A lone members-only page then read `[blocked]` on every poll after the first,
+   and the sixth stopped the feed; on main the page is just marked. `_settle_refusals` now asks
+   the stored stories first, newest first (each loaded as an article before), then candidates
+   not tried yet, and never a page in `_extracted_urls` that isn't stored. Tests:
+   `test_pages_read_as_not_a_page_or_gone_are_never_the_control` (PDF, three 404s; four polls)
+   and `test_a_stored_story_is_the_control_before_a_page_not_tried_yet`.
+2. **A second members-only page blocked the feed** (major). Same cause: the first members-only
+   page, marked on an earlier poll, was the next poll's control and answered 403. Fixed by 1.
+   Test: `test_a_second_members_only_page_does_not_block_the_feed` (one poll, then three with
+   the second page listed; the first page is never asked again).
+3. **A `sitemap_url` that failed for one poll lost the owner's pages** (major). A poll whose
+   `sitemap_url` gave nothing (a 503, a 429, a timeout, an empty urlset) read the home page's
+   links without the owner's signal, rejected the undated pages and marked them, so the next
+   poll, with the sitemap back, skipped them until a restart. Such a poll now marks the pages it
+   reads `unvouched` (the value in `_extracted_urls`, now `OrderedDict[str, bool]`), and
+   `_seen` lets a poll whose candidates have the owner's word (`owner_configured`) read them
+   once more. Nothing is fetched again while the sitemap stays down, so a dead `sitemap_url`
+   costs no extra fetches; a gone page gets one more fetch when the sitemap returns. The INFO
+   line now says the `sitemap_url` "gave no pages" (it said "listed nothing" after a 503 too).
+   Test: `test_a_sitemap_url_that_fails_for_one_poll_keeps_its_pages` (503, 429, timeout,
+   empty; the third poll fetches nothing).
+4. **A sitemap with no `<lastmod>` dropped every new undated page after the first fetch**
+   (minor). In a sitemap, a page with no `<lastmod>` now uses the listing page's rule (above
+   the first stored candidate is new, below is backlog); only a page with a `<lastmod>` is held
+   against the backlog line. A new page at the top of the sitemap comes in again, as on main and
+   in the first cut; an oldest-first sitemap still loses it (Risks). Test:
+   `test_an_undated_sitemap_page_with_no_lastmod_is_judged_by_its_place`, which replaces
+   `test_an_undated_sitemap_page_with_no_date_at_all_is_backlog_after_the_first_fetch`.
+5. **A `sitemap_url` that is the site's address read as no sitemap** (minor). Round-1 fix 11
+   read the owner's `sitemap_url` directly whatever it looked like, so a home page or HTML
+   site-map page saved there no longer reached robots.txt, as it did on main. When that document
+   loads but names no page or sitemap at all and its address doesn't look like a sitemap, the
+   crawl now reads the site's robots.txt and usual paths after it (`site_sitemaps`, the code the
+   site-URL branch already ran). It counts like an index for the refusal rule, so refused site
+   sitemaps still read `[blocked]`; a 404 on it is still `[not found]`. Test:
+   `test_a_sitemap_url_that_is_a_page_reads_the_sites_sitemaps` (`/` and `/site-map/`).
+6. **`url_ok` accepted file links with endings it didn't list** (minor). Round-1 fix 9 left
+   courlan only a neutral word for the page name, so `.gpx`, `.kmz`, `.rtf`, `.wmv` and other
+   unlisted endings passed, and on a section page a table of downloads outnumbered the article
+   cards in `listing_links`; the poll fetched files and returned nothing. `_is_file` now
+   judges the page name: a file ending (`_FILE_EXTENSIONS`); any other ending of 2 to 5 letters
+   that is no web page's (`_PAGE_EXTENSIONS`, now courlan's own whitelist without `.txt` and
+   `.xml`) or known news CMS's (`_ARTICLE_EXTENSIONS`: `.ece`, `.cms`, `.ghtml`), as courlan's
+   ending test reads it; a file ending under a page ending (`doc.pdf.html`); and a camera's file
+   name as the page (`img_1234`, courlan's `[/-](img|jpg|png)` narrowed to the whole name, so
+   `img-tags-explained` stays an article). Slugs such as `png-vs-jpg` and
+   `node.js-22-released` are still articles. Over the 431 URLs in the tests and fixtures, the
+   only ones `url_ok` now rejects that round 1 accepted are files (`.xsd`, `.dtd`, `.xsl`,
+   `.srt`, `.vtt`, the new cases) and a YouTube handle with a dot. Tests: the new junk and keep
+   cases in `test_article_detect.py`, and
+   `test_listing_links_takes_the_post_cards_over_a_larger_table_of_downloads`.
+7. **The upper-case ending case passed without the ending rule** (minor). Its URL sat under
+   `wp-content/uploads`, which the path rules reject first. New cases outside any rejected
+   section: `/files/Trail-Map.JPG`, and `/news/Episode-12.MP3`, which only `_FILE_EXTENSIONS`
+   rejects (`mp3` is not all letters, so fix 6's rule doesn't cover it).
+8. **`<lastmod>` ordering had no test that could fail** (minor). The fixture was already newest
+   first. `test_an_oldest_first_post_sitemap_is_read_newest_first_by_lastmod` serves a post
+   sitemap oldest first and crawls it with `limit=1`. The old test checked only that `<lastmod>`
+   is carried and never dates a page; it is renamed
+   `test_a_post_sitemaps_lastmod_is_carried_but_never_dates`.
+9. **The sitemap half of round-1 fix 9 had no test** (minor). The round-1 mutation list
+   overstated it (corrected above).
+   `test_sitemap_entries_under_the_link_pattern_are_the_owners_choice` plans a site root with
+   `link_pattern=/library/` through the real crawl, whose sitemap lists
+   `/library/home` and `/library/riverlm3`, and expects both (only `riverlm3` without the
+   pattern).
+
+README's "Website feeds" and ARCHITECTURE.md's `_extracted_urls` row follow fixes 1, 3, 4
+and 5.
+
+### Verification of the round-2 fixes
+
+- **Revert in place.** A script replaced each fix with the code it replaced (or the reviewer's
+  mutation), ran the tests that guard it, required a failure, and restored the file byte for
+  byte (SHA-256; `git diff` hashed the same before and after). All 14 were caught:
+  - the control selection (findings 1 and 2): 4 tests fail; the stored-first order alone: 1;
+  - `unvouched` pages never read again: 4 (every failure kind);
+  - the old backlog rule for pages with no `<lastmod>`: 1;
+  - the robots.txt fallback removed: 2; the fallback document counted as a list: 2 (the
+    refused case);
+  - `url_ok`'s file check back to `_FILE_EXTENSIONS` alone: 9; news CMS endings not allowed: 3;
+  - `_FILE_EXTENSIONS` emptied: 2; the ending read without lower-casing: 3;
+  - `<lastmod>` dropped from the sitemap order (the reviewer's M12d): 1;
+  - the reviewer's M9e, M9h and M9i (`owner_pattern` not reaching the sitemap read): 1 each.
+- **The reviewers' scratch probes**, run against this tree: the control probe gives `[]` on all
+  8 polls for every variant (one, two or three 404s, a PDF, a 500, an empty page on top); the
+  `sitemap_url` fallback probe brings `riverlm0` and `riverlm1` on poll 2 after a 503, a
+  timeout, a 429, an empty urlset or a 404; probe C finds the article for a `sitemap_url` of
+  `/` and `/site-map/`; the no-`<lastmod>` probe through `scheduler._ingest` stores the new
+  page when it is listed at the top and not at the bottom (the Risks entry).
+- **PR10b test files** (the 12, plus `test_feed_autodiscovery.py` and
+  `test_b1_b8_coverage_gaps.py`): 378 passed, 4 failed, the 4 DNS-only `/auto` route tests
+  in the baseline.
+- **Backend pytest** (database `popping_test_b`, worktree `PYTHONPATH`): **13 failed, 1396
+  passed**. The 13 are exactly the DNS-only baseline (`/root/popping-env/baseline.txt`).
+- **`ruff check --select F,E9,B`** on every changed app file and test: clean.
 
 ## Risks and data-compatibility notes
 
@@ -522,8 +639,14 @@ mutation run below):
   still uses the position rule for undated pages: a new undated page below a stored one that
   was just updated is dropped as backlog. The review asked to keep position for listing pages;
   a `sitemap_url` or a dated listing avoids it.
-- **A sitemap with no `<lastmod>` and pages with no date** brings undated pages only on its
-  first fetch: such a page can't be told from old backlog.
+- **A sitemap with no `<lastmod>` and pages with no date** uses the listing page's position rule
+  (round 2): a new undated page listed above a stored one comes in; one listed below is dropped
+  as backlog. A sitemap that lists its newest pages last (oldest first, with no `<lastmod>`)
+  therefore brings no undated page after its first fetch, where main kept draining 2 a poll. A
+  dated page, or a `<lastmod>`, avoids it.
+- **A `sitemap_url` that is the site's own address** now leads to the site's sitemaps through
+  robots.txt (round 2), and those sitemaps vouch for their pages as the owner's
+  (`owner_configured`), as any sitemap the `sitemap_url` names does.
 - **After a restart,** pages that were fetched but not kept (not articles, too old, over the
   undated cap) are fetched once more, and pages that were failing start a new count of 3.
   Stored pages are not fetched.
@@ -551,7 +674,10 @@ mutation run below):
 - **A date written only as text** ("Posted on October 14, 2026") with no `<time>`, no metadata
   and no listing card date still leaves an `og:type=website` page undated (−3), and such a page
   is rejected without a link pattern. Reading dates from text is a heuristic of its own.
-- **A slug that ends in a file type** (`/blog/getting-started-with-vue.js`) is read as a file.
+- **A slug that ends in a file type** (`/blog/getting-started-with-vue.js`), or in any other
+  ending of 2 to 5 letters that is no web page's or known news CMS's
+  (`/blog/announcing-socket.io`), is read as a file (round 2; courlan's own ending test,
+  which main's `url_ok` used, reads them the same).
 - **The plan's frontend-only rollback command** still lacks `--no-deps` (PR9a's open item).
 
 ## Device checks

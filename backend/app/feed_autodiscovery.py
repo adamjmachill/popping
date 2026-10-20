@@ -385,12 +385,15 @@ def _parse_sitemap_entries(
 
 def _read_sitemap(
     text: str, site: str, path_prefix: str | None, room: int, owner_pattern: bool = False,
-) -> tuple[list[_Entry], list[tuple[str, str | None]]]:
+) -> tuple[list[_Entry], list[tuple[str, str | None]], bool]:
     """Parse one sitemap document and keep the pages that could be
     articles on ``site``: under ``path_prefix`` when there is one, and
     passing ``url_ok`` (as the owner's pattern when ``owner_pattern``).
-    At most ``room`` pages. Pure and CPU-bound (an XML parse, then a URL
-    test per entry), so ``_crawl_sitemaps`` runs it in a thread."""
+    At most ``room`` pages. Returns ``(pages, nested sitemaps, listed)``,
+    ``listed`` False when the document named no page or sitemap at all,
+    before any filter (an HTML page, an empty urlset). Pure and
+    CPU-bound (an XML parse, then a URL test per entry), so
+    ``_crawl_sitemaps`` runs it in a thread."""
     found, nested = _parse_sitemap_entries(text)
     pages: list[_Entry] = []
     for entry in found:
@@ -400,7 +403,7 @@ def _read_sitemap(
             continue
         if url_ok(entry[0], site, owner_pattern=owner_pattern):
             pages.append(entry)
-    return pages, nested
+    return pages, nested, bool(found or nested)
 
 
 _MONTHS = {
@@ -472,8 +475,10 @@ async def _crawl_sitemaps(
     using only SSRF-guarded fetches. ``page_url`` may be a sitemap
     itself (``input_is_sitemap``, or an address that looks like one) or
     a site URL; for a site URL, robots.txt ``Sitemap:`` lines are tried
-    first, then a few common paths. Returns the newest ``limit`` (see
-    ``discover_sitemap_entries``).
+    first, then a few common paths. An owner's ``sitemap_url`` that
+    doesn't look like a sitemap and names nothing (the site's own
+    address, an HTML site-map page) is read as a site URL after it.
+    Returns the newest ``limit`` (see ``discover_sitemap_entries``).
 
     A document that fails is skipped and the crawl moves on: robots.txt
     and the guessed paths 404 on many sites, and a nested sitemap can be
@@ -499,10 +504,10 @@ async def _crawl_sitemaps(
     own_failure: BaseException | None = None
     refused: list[FetchRefusedError] = []
     network: list[BaseException] = []
-    if input_is_sitemap or looks_like_sitemap(page_url):
-        input_doc = page_url
-        queue = [page_url]
-    else:
+
+    async def site_sitemaps() -> list[str]:
+        """The site's sitemaps: robots.txt ``Sitemap:`` lines, else the
+        usual paths."""
         robots = ""
         try:
             robots = await fetch_html_checked(
@@ -519,14 +524,21 @@ async def _crawl_sitemaps(
             for line in robots.splitlines()
             if line.lower().startswith("sitemap:")
         ]
-        queue = order_sitemaps(listed) if listed else [origin + path for path in _GUESSED_SITEMAP_PATHS]
+        return order_sitemaps(listed) if listed else [origin + path for path in _GUESSED_SITEMAP_PATHS]
+
+    if input_is_sitemap or looks_like_sitemap(page_url):
+        input_doc = page_url
+        queue = [page_url]
+    else:
+        queue = await site_sitemaps()
 
     seen: set[str] = set()
     pages: list[_Entry] = []
     page_set: set[str] = set()
     fetched = 0
-    # Sitemap indexes that loaded: they list sitemaps, not pages, so the
-    # refusal rule above leaves them out of ``fetched``.
+    # Documents that loaded but list no pages of their own (sitemap
+    # indexes, and an owner's sitemap_url that turned out to be a page):
+    # the refusal rule above leaves them out of ``fetched``.
     indexes = 0
     while queue and fetched < _MAX_SITEMAP_DOCS and len(pages) < _MAX_SITEMAP_COLLECT:
         url = queue.pop(0)
@@ -557,16 +569,23 @@ async def _crawl_sitemaps(
             if url == input_doc:
                 own_failure = exc
             continue
-        if not text:
+        found, nested, listed = [], [], False
+        if text:
+            found, nested, listed = await asyncio.to_thread(
+                _read_sitemap,
+                text,
+                page_url,
+                path_prefix,
+                _MAX_SITEMAP_COLLECT - len(pages),
+                owner_pattern,
+            )
+        if url == input_doc and not listed and not looks_like_sitemap(url):
+            # The owner's sitemap_url names nothing and doesn't look like
+            # a sitemap: it is likely the site's address or an HTML
+            # site-map page, so read the site's sitemaps, as for a site.
+            indexes += 1
+            queue.extend(await site_sitemaps())
             continue
-        found, nested = await asyncio.to_thread(
-            _read_sitemap,
-            text,
-            page_url,
-            path_prefix,
-            _MAX_SITEMAP_COLLECT - len(pages),
-            owner_pattern,
-        )
         if nested:
             indexes += 1
         for entry in found:

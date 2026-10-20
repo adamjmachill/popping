@@ -451,7 +451,9 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   with a `sitemap_url`, or an address that looks like a sitemap reads the
   sitemap first (an HTML `/sitemap/` page is still read as a page after
   it). A `sitemap_url` is read as the sitemap whatever its address looks
-  like (`/?sitemap=index`). With a `link_pattern`, the page's links under
+  like (`/?sitemap=index`); one that names nothing and doesn't look like
+  a sitemap (the site's own address) leads to the site's sitemaps
+  through robots.txt. With a `link_pattern`, the page's links under
   that path are the list; without one, the page's repeating list of
   posts is. The sitemap is read for the pattern's path, else the
   address's section, never the whole site instead.
@@ -464,13 +466,14 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   site's own list gives a page (a listing card's `<time>`, a news
   sitemap's publication date) counts as the page's date. A feed with a
   `link_pattern` takes the pattern as the article signal, and so does a
-  `sitemap_url` for the pages it lists.
+  `sitemap_url` for the pages it lists (a page read while the sitemap
+  gave nothing is read again once it lists it).
 - **Fetches only new pages,** at most 10 a check, skipping stories
   already stored. At most `ingest.max_undated_per_poll` (2) of them may
   be undated, and an undated page that is old backlog is skipped: on a
-  listing page, one below a stored story; in a sitemap, one last
-  modified before the check's backlog line, or with no date at all once
-  the feed's first fetch is done. A page that times out or answers 5xx
+  listing page, or in a sitemap that gives the page no `<lastmod>`, one
+  below a stored story; in a sitemap, one last modified before the
+  check's backlog line. A page that times out or answers 5xx
   is asked for again on the next checks (3 in all).
 
 A website's failures read as the kinds above: a site that refuses its
@@ -482,9 +485,10 @@ articles at all. A missing robots.txt or guessed sitemap path is
 routine, a refused robots.txt counts only when every sitemap is refused
 too, and a sitemap index that loads counts neither way (an index whose
 post sitemaps are all refused is `[blocked]`). A page that refuses
-everyone (members only) while another page of the site loads is
+everyone (members only) while a stored story of the site loads is
 skipped, so it never fails the feed; a page that is gone or answers 5xx
-doesn't count as loading.
+doesn't count as loading, and a page already read and not kept is
+never the one asked.
 
 ### Adding a YouTube channel
 

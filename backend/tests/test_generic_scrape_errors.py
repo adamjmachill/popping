@@ -282,6 +282,26 @@ async def test_an_explicit_sitemap_url_is_read_whatever_its_address_looks_like(s
     assert [c.url for c in plan.candidates] == [f"{SITE}/news/council-approves-river-trail/"]
 
 
+@pytest.mark.parametrize("address", ["/", "/site-map/"])
+async def test_a_sitemap_url_that_is_a_page_reads_the_sites_sitemaps(site, address):
+    """The Sitemap address field holds the site's own address or an HTML
+    site-map page. It names no page or sitemap, and doesn't look like a
+    sitemap, so the site's sitemaps are read through robots.txt, as for
+    a site. When those refuse us, the feed is blocked."""
+    post = f"{SITE}/news/council-approves-river-trail/"
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/post-sitemap.xml\n")
+    site.routes[f"{SITE}/post-sitemap.xml"] = _xml(_urlset(post))
+    site.routes[post] = _html(_fixture("yoast-post.html"))
+    site.routes[f"{SITE}/"] = _html(_NO_LIST_PAGE)
+    site.routes[f"{SITE}/site-map/"] = _html(_NO_LIST_PAGE)
+    plugin = _plugin(f"{SITE}/", sitemap_url=SITE + address)
+    assert [i["url"] for i in await plugin.fetch()] == [post]
+
+    site.routes[f"{SITE}/post-sitemap.xml"] = 403
+    plugin = _plugin(f"{SITE}/", sitemap_url=SITE + address)
+    assert await _kind_of(plugin.fetch()) == "blocked"
+
+
 # A Yoast-style index in robots.txt whose post sitemaps the site refuses
 # (the index itself served from a cache, say).
 _POST_SITEMAPS = (f"{SITE}/post-sitemap.xml", f"{SITE}/post-sitemap2.xml")
@@ -552,6 +572,85 @@ async def test_when_every_control_page_is_gone_the_refusal_stands(site):
     assert members not in plugin._extracted_urls
 
 
+async def test_a_second_members_only_page_does_not_block_the_feed(site):
+    """The first members-only page was skipped on an earlier poll. When a
+    second one is published, the first is not the control (it refuses
+    everyone, so it can't say whether the site serves us): the stored
+    story is, it loads, and the second page is skipped too."""
+    stored = f"{SITE}/news/council-approves-river-trail/"
+    first = f"{SITE}/news/members-only-briefing-1/"
+    second = f"{SITE}/news/members-only-briefing-2/"
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(first, stored))
+    site.routes[stored] = _html(_fixture("yoast-post.html"))
+    site.routes[first] = 403
+    site.routes[second] = 403
+
+    async def known(urls):
+        return {stored} & set(urls)
+
+    plugin = _plugin(f"{SITE}/")
+    assert await plugin.fetch(known_urls=known) == []
+    assert first in plugin._extracted_urls
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(second, first, stored))
+    for _ in range(3):
+        assert await plugin.fetch(known_urls=known) == []
+    assert second in plugin._extracted_urls
+    assert site.requests.count(first) == 1
+    assert site.requests.count(second) == 1
+
+
+@pytest.mark.parametrize("newer", ["not a page", "gone"])
+async def test_pages_read_as_not_a_page_or_gone_are_never_the_control(site, newer):
+    """Pages newer than every stored story that the feed already read and
+    didn't keep (a PDF at a page-like address, or three deleted stories
+    still listed) come first in the candidates. They can't say whether
+    the site serves us, so the stored stories are the controls, and a
+    lone members-only page is skipped on every poll after the first
+    instead of blocking the feed."""
+    members = f"{SITE}/news/members-only-briefing/"
+    stored = [f"{SITE}/news/council-approves-river-trail/", f"{SITE}/news/harvest-market-returns/"]
+    if newer == "not a page":
+        top = [f"{SITE}/news/annual-report/"]
+        site.routes[top[0]] = (200, "%PDF-1.7 ...", "application/pdf")
+    else:
+        top = [f"{SITE}/news/deleted-{n}/" for n in range(3)]  # unrouted: 404
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*top, members, *stored))
+    site.routes[members] = 403
+    for story in stored:
+        site.routes[story] = _html(_fixture("yoast-post.html"))
+
+    async def known(urls):
+        return set(stored) & set(urls)
+
+    plugin = _plugin(f"{SITE}/")
+    for _ in range(4):
+        assert await plugin.fetch(known_urls=known) == []
+    assert members in plugin._extracted_urls
+    assert all(site.requests.count(page) == 1 for page in top)
+
+
+async def test_a_stored_story_is_the_control_before_a_page_not_tried_yet(site):
+    """A full batch of refused pages, with more new pages behind it: the
+    stored story is the first control (it loaded as an article before),
+    not the next new page, which may be anything (here a PDF)."""
+    refused = [f"{SITE}/news/members-only-{n}/" for n in range(generic_scrape._MAX_NEW_PER_POLL)]
+    untried = f"{SITE}/news/annual-report/"
+    stored = f"{SITE}/news/council-approves-river-trail/"
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*refused, untried, stored))
+    for page in refused:
+        site.routes[page] = 403
+    site.routes[untried] = (200, "%PDF-1.7 ...", "application/pdf")
+    site.routes[stored] = _html(_fixture("yoast-post.html"))
+
+    async def known(urls):
+        return {stored} & set(urls)
+
+    plugin = _plugin(f"{SITE}/")
+    assert await plugin.fetch(known_urls=known) == []
+    assert set(refused) <= set(plugin._extracted_urls)
+    assert site.asked("/news/annual-report/") == 0
+
+
 @pytest.mark.parametrize("failure", [httpx.ReadTimeout, httpx.ConnectError, 503, 500])
 async def test_an_article_that_fails_in_a_way_that_passes_is_fetched_again(site, failure):
     """A timeout or a 5xx on a new article doesn't lose it: the page
@@ -721,6 +820,34 @@ async def test_a_dead_sitemap_url_does_not_vouch_for_the_home_pages_links(site, 
     assert set(_MODELS) <= set(plugin._extracted_urls)
 
 
+@pytest.mark.parametrize(
+    "failure",
+    [503, 429, httpx.ReadTimeout, _xml(_urlset())],
+    ids=["503", "429", "timeout", "empty"],
+)
+async def test_a_sitemap_url_that_fails_for_one_poll_keeps_its_pages(site, monkeypatch, failure):
+    """The owner's sitemap_url fails for one poll, and the home page's
+    links (the same pages) are read without the owner's word and
+    rejected. When the sitemap answers again, it vouches for them and
+    they come in: one bad poll doesn't lose the owner's pages."""
+    seen = _spy_owner_configured(monkeypatch)
+    sitemap = f"{SITE}/news-sitemap.xml"
+    site.routes[f"{SITE}/"] = _html(_MODEL_LIST)
+    for model in _MODELS:
+        site.routes[model] = _html(_fixture("ollama-library-model.html"))
+    plugin = _plugin(f"{SITE}/", sitemap_url=sitemap)
+    site.routes[sitemap] = failure
+    assert await plugin.fetch() == []
+    assert seen == [False] * len(_MODELS)
+    site.routes[sitemap] = _xml(_urlset(*_MODELS))
+    items = await plugin.fetch()
+    assert [i["url"] for i in items] == _MODELS[: generic_scrape._DEFAULT_MAX_UNDATED]
+    assert seen[len(_MODELS):] == [True] * len(_MODELS)
+    # Read once more, not on every poll: the third poll asks for nothing.
+    assert await plugin.fetch() == []
+    assert all(site.requests.count(model) == 2 for model in _MODELS)
+
+
 async def test_a_working_sitemap_url_vouches_for_its_pages(site, monkeypatch):
     seen = _spy_owner_configured(monkeypatch)
     site.routes[f"{SITE}/news-sitemap.xml"] = _xml(_urlset(*_MODELS))
@@ -775,6 +902,19 @@ async def test_links_under_the_link_pattern_are_the_owners_choice(site):
     assert [c.url for c in plan.candidates] == [f"{SITE}/library/{m}" for m in names]
     plan = await plan_candidates(page)
     assert f"{SITE}/library/home" not in [c.url for c in plan.candidates]
+
+
+async def test_sitemap_entries_under_the_link_pattern_are_the_owners_choice(site):
+    """The same rule in the sitemap read: a site root with a link
+    pattern reads its sitemap first, and a one-word page name courlan
+    rejects (``home``) is still a candidate under the owner's pattern."""
+    models = [f"{SITE}/library/home", f"{SITE}/library/riverlm3"]
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*models))
+    plan = await plan_candidates(f"{SITE}/", link_pattern="/library/", raise_errors=True)
+    assert plan.mode == "sitemap"
+    assert [c.url for c in plan.candidates] == models
+    plan = await plan_candidates(f"{SITE}/")
+    assert [c.url for c in plan.candidates] == [f"{SITE}/library/riverlm3"]
 
 
 async def test_without_a_link_pattern_the_same_page_is_not_an_article(site):

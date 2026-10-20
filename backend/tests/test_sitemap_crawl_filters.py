@@ -144,7 +144,7 @@ async def test_candidates_are_dated_newest_first(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_post_sitemaps_lastmod_orders_and_is_carried_but_never_dates(monkeypatch):
+async def test_a_post_sitemaps_lastmod_is_carried_but_never_dates(monkeypatch):
     _serve(monkeypatch, {f"{SITE}/post-sitemap.xml": _fixture("yoast-post-sitemap2.xml")})
     entries = await _crawl_sitemaps(f"{SITE}/post-sitemap.xml", limit=10)
     assert [e.url for e in entries] == [
@@ -154,6 +154,26 @@ async def test_a_post_sitemaps_lastmod_orders_and_is_carried_but_never_dates(mon
     assert all(e.published is None for e in entries)
     assert entries[0].modified == dt.datetime(2026, 10, 18, 9, 30, 11, tzinfo=dt.timezone.utc)
     assert entries[0].modified > entries[1].modified
+
+
+@pytest.mark.asyncio
+async def test_an_oldest_first_post_sitemap_is_read_newest_first_by_lastmod(monkeypatch):
+    """WordPress core and Yoast list a post sitemap oldest first. Its
+    ``<lastmod>`` puts the newest post first, so a crawl capped below the
+    sitemap's size keeps the newest posts, not the oldest."""
+    entries = "".join(
+        f"<url><loc>{SITE}/news/{slug}/</loc><lastmod>{lastmod}</lastmod></url>"
+        for slug, lastmod in [
+            ("harvest-market-returns", "2026-10-12T14:02:45+00:00"),
+            ("council-approves-river-trail", "2026-10-18T09:30:11+00:00"),
+        ]
+    )
+    _serve(monkeypatch, {
+        f"{SITE}/post-sitemap.xml":
+            f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>',
+    })
+    entries = await _crawl_sitemaps(f"{SITE}/post-sitemap.xml", limit=1)
+    assert [e.url for e in entries] == [f"{SITE}/news/council-approves-river-trail/"]
 
 
 @pytest.mark.asyncio

@@ -130,6 +130,8 @@ def _page(
         "https://www.example.com/blog/node.js-22-released",
         "https://www.example.com/news/national/council-vote/article68765432.ece",
         "https://www.example.com/city/news/council-vote/112233.cms",
+        "https://www.example.com/rj/noticia/2026/10/18/council-vote.ghtml",
+        "https://www.example.com/cgi-bin/news.pl?id=42",
     ],
 )
 def test_url_ok_keeps_articles(url):
@@ -156,6 +158,7 @@ def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
         "https://www.example.com/library/tag/python",
         "https://www.example.com/library/2026/07/",
         "https://www.example.com/library/riverlm3.png",
+        "https://www.example.com/library/riverlm3.gguf",
         "https://www.example.com/library/about",
         "https://www.other-site.com/library/riverlm3",
     ],
@@ -214,6 +217,21 @@ def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():
         "https://www.example.com/wp-content/uploads/2026/10/trail.jpg",
         "https://www.example.com/files/annual-report.pdf",
         "https://www.example.com/wp-content/uploads/2026/10/trail.JPG",
+        # Upper-case endings outside any rejected section: only the
+        # (lower-cased) ending rejects them.
+        "https://www.example.com/files/Trail-Map.JPG",
+        "https://www.example.com/news/Episode-12.MP3",
+        # Endings of 2 to 5 letters that are no web page's are files,
+        # listed or not (map downloads, documents, video).
+        "https://www.example.com/parks/trails/maps/trail-1.gpx",
+        "https://www.example.com/parks/trails/maps/trail-2.kmz",
+        "https://www.example.com/files/minutes-2026-10.rtf",
+        "https://www.example.com/media/council-meeting.wmv",
+        # A file behind a page ending, and a camera's file name as the
+        # page (WordPress attachment pages).
+        "https://www.example.com/files/doc.pdf.html",
+        "https://www.example.com/blog/IMG_1234",
+        "https://www.example.com/2026/10/img-1234/",
         "https://www.example.com/news/feed.xml",
         "https://www.example.com/assets/app.js",
         "https://www.example.com/download?file=annual-report.pdf",
@@ -794,6 +812,25 @@ def test_listing_links_needs_three_distinct_links():
       <article><h2><a href="/news/two#comments">Two again</a></h2></article>
     </main></body></html>"""
     assert listing_links(html, "https://www.example.com/news/") == []
+
+
+def test_listing_links_takes_the_post_cards_over_a_larger_table_of_downloads():
+    """A parks page lists 4 news cards and a table of 8 trail-map
+    downloads. The downloads are files (endings no web page has), so
+    they never form a group, and the cards are the list."""
+    cards = "".join(
+        f'<article><h2><a href="/parks/trails/news/trail-update-{n}">Trail update {n}</a></h2></article>'
+        for n in range(4)
+    )
+    rows = "".join(
+        f'<tr><td>Trail {n}</td><td><a href="/parks/trails/maps/trail-{n}.{ext}">Download</a></td></tr>'
+        for n, ext in enumerate(["gpx", "kmz", "kml", "gpx", "kmz", "kml", "gpx", "kmz"])
+    )
+    html = f"<html><body><main><div>{cards}</div><table>{rows}</table></main></body></html>"
+    page = "https://www.example.ca/parks/trails"
+    assert [c.url for c in listing_links(html, page)] == [
+        f"https://www.example.ca/parks/trails/news/trail-update-{n}" for n in range(4)
+    ]
 
 
 def test_listing_links_prefers_title_links_over_image_links_to_the_same_posts():

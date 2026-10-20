@@ -13,7 +13,8 @@ Which undated pages are old backlog depends on what orders the list: a
 listing page is in publication order, so a page below a stored story is
 older; a sitemap's ``<lastmod>`` order says nothing about age (an edited
 story moves up), so a page's own ``<lastmod>`` is held against the
-backlog line instead.
+backlog line instead, and a page with no ``<lastmod>`` is judged by its
+place, as on a listing page.
 """
 
 from __future__ import annotations
@@ -242,14 +243,22 @@ async def test_an_undated_sitemap_page_last_modified_before_the_backlog_line_is_
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_an_undated_sitemap_page_with_no_date_at_all_is_backlog_after_the_first_fetch(monkeypatch):
-    """No publication date, no ``<lastmod>`` and an order that says
-    nothing: such a page can't be told from old backlog, so only a first
-    fetch takes it."""
-    urls = [f"{SITE}/a", f"{SITE}/b"]
-    _serve(monkeypatch, urls, dated=False)
-    assert await GenericScrapePlugin(_row()).fetch(backlog_before=NOW - dt.timedelta(days=2)) == []
-    assert [i["url"] for i in await GenericScrapePlugin(_row()).fetch()] == urls
+async def test_an_undated_sitemap_page_with_no_lastmod_is_judged_by_its_place(monkeypatch):
+    """No publication date and no ``<lastmod>``: the sitemap's own order
+    is all there is, so the listing page's rule applies. A new page
+    listed above the stored story comes in on a later poll; the pages
+    below it are backlog."""
+    new, stored, old = f"{SITE}/library/new", f"{SITE}/library/stored", f"{SITE}/library/old"
+    _serve(monkeypatch, [new, stored, old], dated=False)
+    plugin = GenericScrapePlugin(_row())
+    items = await plugin.fetch(
+        known_urls=_known({stored}), max_undated=5, backlog_before=NOW - dt.timedelta(days=2)
+    )
+    assert [i["url"] for i in items] == [new]
+    assert old in plugin._extracted_urls
+    # A first fetch has nothing stored yet: the newest pages come in.
+    _serve(monkeypatch, [new, old], dated=False)
+    assert [i["url"] for i in await GenericScrapePlugin(_row()).fetch()] == [new, old]
 
 
 # --- through scheduler._ingest ------------------------------------------------
