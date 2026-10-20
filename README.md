@@ -123,6 +123,7 @@ Only pushes to `main` publish images. PR builds are validation-only and never re
 | `GET  /api/entries/by-ids`        | Cards for up to 200 ids (`?ids=1,2,3`), same fields as the list plus `source_name` | public |
 | `GET  /api/foryou`                | Personal top-N feed (with convergence boost; `max_age_hours=`). Leaves out paused feeds and your hidden stories | login |
 | `POST /api/ingest/{source_name}`  | Force a fetch now (instead of waiting) | login     |
+| `POST /api/sources/check-now`     | Check up to 20 feeds in the next minute (pull to refresh), keeping each feed's cooldown and failure backoff | login |
 | `GET  /auth/login`                | Kick off the OIDC flow (302 to IdP)    | n/a       |
 | `GET  /auth/callback`             | OIDC redirect URI                      | n/a       |
 | `POST /auth/local`                | Local-user login (form on login page)  | n/a       |
@@ -360,6 +361,7 @@ container:
   - `ingest.max_age_days` (30, `[1, 3650]`): later polls skip stories older than this, or dated before the first fetch's 48-hour window.
   - `ingest.max_undated_per_poll` (2, `[0, 100]`): later polls store at most this many undated stories, and only ones listed above the newest stored story.
   - `ingest.max_per_poll` (50, `[1, 1000]`): new stories stored per poll, newest first. The rest are stored by the next polls.
+- `refresh.cooldown_seconds` (600, `[60, 86400]`): after a feed is checked (a check-now queue or any successful fetch), `POST /api/sources/check-now` doesn't queue it again for this long. `force` uses 60. No env default; a value that isn't a number or is out of range uses the default.
 
 **Env vs DB.** On first boot, `seed_from_env` copies the relevant env
 values into the table — but only if the table is empty for that key.

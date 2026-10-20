@@ -273,6 +273,19 @@ def is_disabled() -> bool:
     )
 
 
+def is_direct_mode() -> bool:
+    """True when Reddit calls go straight to reddit.com through the
+    per-process token bucket (no proxy URL, direct mode not disabled),
+    so every subreddit fetch spends one of ``_DIRECT_RPS``'s calls.
+    """
+    return not settings.reddit_hydra_url and not settings.reddit_direct_disabled
+
+
+def direct_call_interval_seconds() -> float:
+    """Seconds between two direct-mode calls (``_DIRECT_RPS``)."""
+    return 1.0 / _DIRECT_RPS
+
+
 def _user_agent() -> str:
     """User-Agent string for Reddit calls.
     """
