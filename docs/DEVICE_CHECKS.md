@@ -37,11 +37,11 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #36 · Open Saved and remove its only story. Pass: the phone moves to the tab next to it; saving a story from there brings Saved back without moving the phone.
 - [ ] #36 · Scroll down a tab, then tap that tab's name again. Pass: the list goes back to the top and the tab doesn't change.
 - [ ] #36 · On a tab other than For You, force-quit the home-screen app and reopen it. Pass: it opens on the same tab.
-- [ ] #<pr> · On the phone, open the News tab, tap its ⋯ and tap Best. Pass: the list reorders with the highest-ranked stories first, and after a force-quit and reopen News is still on Best.
-- [ ] #<pr> · Open For You's ⋯. Pass: Best is chosen; tapping Newest puts the most recent stories first, and Best puts back the order it had.
-- [ ] #<pr> · With a saved view chip showing, set News to Best and tap the chip. Pass: News stays on Best.
-- [ ] #<pr> · Save a story, then open Menu → Settings → Reset, tap Reset reading state, then Reset. Pass: after the reload the story is still in Saved, hidden stories stay hidden and the saved view chips are still there.
-- [ ] #<pr> · Only if no AI provider is set up: open the Brief tab. Pass: it shows "Brief needs an AI provider · Set up" on one line; Set up opens Settings › AI. (With a provider set up: Generate or Regenerate shows as before.)
+- [ ] #38 · On the phone, open the News tab, tap its ⋯ and tap Best. Pass: the list reorders with the highest-ranked stories first, and after a force-quit and reopen News is still on Best.
+- [ ] #38 · Open For You's ⋯. Pass: Best is chosen; tapping Newest puts the most recent stories first, and Best puts back the order it had.
+- [ ] #38 · With a saved view chip showing, set News to Best and tap the chip. Pass: News stays on Best.
+- [ ] #38 · Save a story, then open Menu → Settings → Reset, tap Reset reading state, then Reset. Pass: after the reload the story is still in Saved, hidden stories stay hidden and the saved view chips are still there.
+- [ ] #38 · Only if no AI provider is set up: open the Brief tab. Pass: it shows "Brief needs an AI provider · Set up" on one line; Set up opens Settings › AI. (With a provider set up: Generate or Regenerate shows as before.)
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
