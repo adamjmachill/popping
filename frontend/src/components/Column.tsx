@@ -142,6 +142,12 @@ type Props = {
   // Toggle callback for a section header click. App flips the
   // appropriate bit in the per-column storage record.
   onToggleSection?: (key: 'new' | 'history') => void
+  // The phone only: a callback ref for the story list, which is the
+  // phone's real scroller (this section is h-full inside App's
+  // wrapper). The list it lands on is marked ``data-scroller``. Pass a
+  // stable function (App passes its state setter); the memo comparator
+  // ignores it like the other callbacks.
+  scrollerRef?: (el: HTMLElement | null) => void
 }
 
 // Slice 21: renamed ``Column`` to ``ColumnInner`` and added a
@@ -150,7 +156,8 @@ type Props = {
 // comparator ignores the per-card callback props (``onMarkEntryRead``,
 // ``onHideEntry``, ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
 // ``onToggleSummary``, ``onToggleSection``, ``onPrefsChange``,
-// ``onMarkRead``, ``onRefresh``) and the per-card ``cardRefs`` —
+// ``onMarkRead``, ``onRefresh``), the per-card ``cardRefs`` and the
+// phone's ``scrollerRef`` (a stable setter) —
 // they're inherently per-render at the App layer; the data-driven
 // props (``sections``, ``sourcesById``, ``sourcesByName``,
 // ``starredSet``, ``hiddenSet``, ``votedMap``, ``prefs``,
@@ -199,6 +206,7 @@ export function ColumnInner({
   votedMap,
   sectionsCollapsed,
   onToggleSection,
+  scrollerRef,
 }: Props) {
   const [popoverOpen, setPopoverOpen] = useState(false)
   const popoverRef = useRef<HTMLDivElement | null>(null)
@@ -490,7 +498,11 @@ export function ColumnInner({
           gesture pans the whole list instead of dragging the card.
           ``clip`` (not ``hidden``) keeps the element scrollable and
           avoids creating a scroll container on the X axis. */}
-      <div className="flex-1 overflow-x-clip overflow-y-auto overscroll-contain space-y-2 pr-1">
+      <div
+        ref={scrollerRef}
+        data-scroller={scrollerRef ? '' : undefined}
+        className="flex-1 overflow-x-clip overflow-y-auto overscroll-contain space-y-2 pr-1"
+      >
         {entryCount === 0 ? (
           // Slice 19: context-aware empty state. The source's
           // ``last_fetch_at`` / ``last_error`` / ``error_count``

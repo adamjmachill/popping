@@ -39,6 +39,18 @@ import { recordImmediate } from './lib/interactions'
 import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
 import { useUpdateCheck } from './lib/useUpdateCheck'
+import {
+  BRIEF_KEY,
+  FILTER_KEY,
+  FORYOU_KEY,
+  SAVED_KEY,
+  colKey,
+  readStoredTab,
+  resolveTab,
+  type ColKey,
+  type StoredTab,
+  type Tab,
+} from './lib/columns'
 import { briefFailureMessage, errorMessage, fieldSaveMessage, isRetryable } from './lib/apiErrors'
 import { sameHeaders, type HeaderMap } from './lib/headers'
 // Per-user server-backed preferences. Replaces the 8 localStorage
@@ -63,7 +75,7 @@ import {
   MAX_STARRED,
   MAX_PRESETS,
 } from './lib/preferences'
-import { STORAGE_KEYS, safeGetItem, safeSetItem } from './lib/storage'
+import { STORAGE_KEYS, safeGetItem, safeRemoveItem, safeSetItem } from './lib/storage'
 import { useMediaQuery } from './lib/visualViewport'
 
 const REFRESH_INTERVAL_MS = 60_000
@@ -137,24 +149,23 @@ function reconcileById<T extends { id: number }>(prev: T[], next: T[]): T[] {
 }
 
 // localStorage keys live in ``lib/storage.ts`` so feature
-// modules share one namespaced key registry. Only two keys
-// remain there (mobileColLast, briefCollapsed) -- the rest
-// moved to the server-backed ``user_preferences`` store
-// (``lib/preferences.tsx``) so all of a user's devices see
+// modules share one namespaced key registry. Only device-local
+// screen state remains there (the phone tab, Brief's collapse and
+// tone) -- the rest moved to the server-backed ``user_preferences``
+// store (``lib/preferences.tsx``) so all of a user's devices see
 // the same state.
 
-// -1 is the "Brief" tab, a sibling of the column tabs rather than an
-// index into ``columns``. Valid range is [-1, columns.length).
-function loadMobileCol(): number {
-  if (typeof window === 'undefined') return 0
-  try {
-    const raw = safeGetItem(STORAGE_KEYS.mobileColLast)
-    if (!raw) return 0
-    const n = Number(raw)
-    return Number.isInteger(n) && n >= -1 ? n : 0
-  } catch {
-    return 0
-  }
+// The phone's stored tab: its key, or (read once, to migrate) the
+// index stored before keys. ``resolveTab`` turns it into the tab shown.
+function loadMobileTab(): StoredTab {
+  if (typeof window === 'undefined') return null
+  return readStoredTab(safeGetItem(STORAGE_KEYS.mobileTab), safeGetItem(STORAGE_KEYS.mobileColLast))
+}
+
+// A source filter as one value, so the same filter in a new Set
+// compares equal.
+function filterScope(sources: Set<string>): string {
+  return Array.from(sources).sort().join('\n')
 }
 
 // Per-card manual read-set. Stored as ``{columnName: number[]}`` so
@@ -555,15 +566,22 @@ export function App() {
     u.searchParams.delete('source')
     window.history.replaceState(null, '', u.toString())
   }, [])
-  const [mobileCol, setMobileCol] = useState<number>(loadMobileCol)
-  // The phone column (by name) to stay on once a category save has
-  // changed the columns. Set by a save, cleared by any tab the user
-  // picks, so a later change can't snap back over their choice.
-  const followTabRef = useRef<string | null>(null)
-  const selectMobileCol = useCallback((i: number) => {
-    followTabRef.current = null
-    setMobileCol(i)
+  // The phone's stored tab (see ``resolveTab`` for the tab shown).
+  // Only ``selectTab`` writes it, from a tap, the Menu's Jump to, or
+  // the resolve effect settling a tab that went.
+  const [mobileTab, setMobileTab] = useState<StoredTab>(loadMobileTab)
+  const selectTab = useCallback((key: ColKey) => {
+    setMobileTab((prev) => (prev && 'key' in prev && prev.key === key ? prev : { key }))
+    safeSetItem(STORAGE_KEYS.mobileTab, key)
+    safeRemoveItem(STORAGE_KEYS.mobileColLast)
   }, [])
+  // The phone tab's story list, its real scroller (Column's list, not
+  // the wrapper around it, which only scrolls Brief). Set through
+  // Column's ``scrollerRef``, so it changes on every tab remount and
+  // hooks that need it take it as an effect dependency.
+  const [phoneScroller, setPhoneScroller] = useState<HTMLElement | null>(null)
+  // The wrapper that scrolls the Brief tab.
+  const phoneBodyRef = useRef<HTMLDivElement | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [user, setUser] = useState<CurrentUser | null>(null)
   const [authProbed, setAuthProbed] = useState(false)
@@ -699,6 +717,19 @@ export function App() {
     return () => window.clearInterval(id)
   }, [])
   const [refreshing, setRefreshing] = useState(false)
+  // The first refresh has answered (with stories or an error). Until
+  // then the tab list is incomplete: the first-load skeleton shows, and
+  // the phone neither migrates its stored tab nor settles a missing one.
+  const [firstRefreshDone, setFirstRefreshDone] = useState(false)
+  // The source filter (``filterScope``) the last applied refresh loaded
+  // the tabs for. Until it is the filter in force, the strip still holds
+  // another scope's stories, so a missing phone tab may only be late,
+  // and nothing settles.
+  const [tabsLoadedFor, setTabsLoadedFor] = useState<string | null>(null)
+  // The last applied refresh got For You. Its request fails on its own
+  // (the refresh then carries on without it), which takes the tab away
+  // until the next refresh that gets it.
+  const [forYouLoaded, setForYouLoaded] = useState(false)
   // Per-user server-backed preferences. The localStorage that
   // used to back these has moved to ``lib/preferences.tsx``'s
   // provider; the setters here debounce the PUTs to the server.
@@ -978,19 +1009,19 @@ export function App() {
   // renders For You as a separate row above the category columns (see
   // the render block); on mobile the For You column *is* the For You
   // row, in a single-column swipe.
-  const allSubsColumns = useMemo<Array<{ name: string; entries: Entry[] }>>(() => {
-    const out: Array<{ name: string; entries: Entry[] }> = []
+  const allSubsColumns = useMemo<Array<{ key: ColKey; name: string; entries: Entry[] }>>(() => {
+    const out: Array<{ key: ColKey; name: string; entries: Entry[] }> = []
     // Saved column — the user's starred entries. Pinned at the
     // top of the dashboard so intentional saves are the first
     // thing they see on every load. Skipped when empty so a
     // user who hasn't starred anything doesn't see an empty
     // column wasting horizontal space.
     if (visibleStarred.length > 0) {
-      out.push({ name: 'Saved', entries: visibleStarred })
+      out.push({ key: SAVED_KEY, name: 'Saved', entries: visibleStarred })
     }
-    if (visibleForYou.length > 0) out.push({ name: 'For You', entries: visibleForYou })
+    if (visibleForYou.length > 0) out.push({ key: FORYOU_KEY, name: 'For You', entries: visibleForYou })
     for (const cat of categories) {
-      out.push({ name: cat, entries: byCategory.get(cat) ?? [] })
+      out.push({ key: colKey(cat), name: cat, entries: byCategory.get(cat) ?? [] })
     }
     return out
   }, [visibleForYou, categories, byCategory, visibleStarred])
@@ -1029,20 +1060,20 @@ export function App() {
     return `${names[0]} + ${names.length - 1} more`
   }, [activeSources])
 
-  const multisubColumn = useMemo<Array<{ name: string; entries: Entry[] }>>(() => {
+  const multisubColumn = useMemo<Array<{ key: ColKey; name: string; entries: Entry[] }>>(() => {
     if (activeSources.size === 0) {
       // Defensive: this branch shouldn't be reached because
       // ``viewKind`` switches to 'all' when ``activeSources``
       // is empty, but we keep the empty case explicit so
       // a stale memo doesn't accidentally render a
       // unfiltered column.
-      return [{ name: multisubColumnName, entries: [] }]
+      return [{ key: FILTER_KEY, name: multisubColumnName, entries: [] }]
     }
     const filtered = visibleEntries.filter((e) => {
       const name = sourcesById.get(e.source_id)
       return name != null && activeSources.has(name)
     })
-    return [{ name: multisubColumnName, entries: filtered }]
+    return [{ key: FILTER_KEY, name: multisubColumnName, entries: filtered }]
   }, [visibleEntries, activeSources, sourcesById, multisubColumnName])
 
   const baseColumns = viewKind === 'multisub' ? multisubColumn : allSubsColumns
@@ -1050,7 +1081,7 @@ export function App() {
   // Apply per-column prefs. For You skips the sort filter (backend
   // pre-sorts by composite_score) but still respects min-score +
   // max-age.
-  const columns = useMemo<Array<{ name: string; entries: Entry[]; totalCount: number }>>(() => {
+  const columns = useMemo<Array<{ key: ColKey; name: string; entries: Entry[]; totalCount: number }>>(() => {
     const now = Date.now()
     return baseColumns.map((col) => {
       const prefs = columnPrefs[col.name] ?? DEFAULT_PREFS
@@ -1072,7 +1103,7 @@ export function App() {
           return prefs.sort === 'newest' ? tb - ta : ta - tb
         })
       }
-      return { name: col.name, entries: filtered, totalCount: col.entries.length }
+      return { key: col.key, name: col.name, entries: filtered, totalCount: col.entries.length }
     })
   }, [baseColumns, columnPrefs])
 
@@ -1211,6 +1242,7 @@ export function App() {
     setRefreshing(true)
     const seq = ++refreshSeqRef.current
     const startedAt = Date.now()
+    let forYouOk = true
     try {
       const sourceArg = activeSources.size > 0 ? Array.from(activeSources) : undefined
       // A flat global `limit` on the unfiltered "give me everything"
@@ -1232,7 +1264,10 @@ export function App() {
       const [rawEntries, rawSources, rawForYou] = await Promise.all([
         entriesReq,
         api.sources(),
-        api.forYou({ limit: 25 }).catch(() => [] as Entry[]),
+        api.forYou({ limit: 25 }).catch(() => {
+          forYouOk = false
+          return [] as Entry[]
+        }),
       ])
       // A newer refresh already landed: this one's data is older.
       if (seq < appliedRefreshRef.current) return
@@ -1278,6 +1313,9 @@ export function App() {
         return reconcileById(prev, next)
       })
       setForYou((prev) => reconcileById(prev, fy))
+      setFirstRefreshDone(true)
+      setTabsLoadedFor(filterScope(activeSources))
+      setForYouLoaded(forYouOk)
       setError(null)
       // Surface a brief success toast so the user knows the
       // pull actually happened — the Refresh button's …→
@@ -1293,6 +1331,7 @@ export function App() {
       // Plain words, never the raw "<status> for <url>" text.
       const message = errorMessage(err)
       setError(message)
+      setFirstRefreshDone(true)
       if (!opts?.silent) toast(message, 'error')
     } finally {
       setRefreshing(false)
@@ -1534,38 +1573,78 @@ export function App() {
     return () => window.clearTimeout(id)
   }, [activeSources, refresh, authProbed])
 
-  // Keep ``mobileCol`` in bounds AND persist to localStorage. This
-  // effect is the only writer to ``STORAGE_KEYS.mobileColLast``: a
-  // previous version had a separate write effect that fired every
-  // time ``mobileCol`` changed, but React runs effects in source
-  // order within a single commit — so when a stored value came back
-  // out-of-bounds, the clamp's ``setMobileCol(next)`` would queue a
-  // re-render and the write effect would immediately stamp the OLD
-  // (bad) value back to storage before the queue settled. Merging
-  // clamp + write into a single effect with both deps in the array
-  // gives us "validate, then persist" in the right order.
-  // After a category save, the phone stays on the column it showed
-  // (by name) even when columns are added or removed around it. If
-  // that column is gone, the clamp below lands on a neighbour.
+  // Desktop: j/k/o never target a column that has gone.
   useEffect(() => {
-    const name = followTabRef.current
-    if (name == null) return
-    followTabRef.current = null
-    const idx = columns.findIndex((c) => c.name === name)
-    if (idx >= 0) setMobileCol(idx)
-  }, [columns])
+    if (columns.length) setSelectedColumnIndex((i) => Math.min(i, columns.length - 1))
+  }, [columns.length])
+
+  // The phone's tabs in strip order: Brief, then the columns.
+  const phoneTabs = useMemo<Tab[]>(
+    () => [{ key: BRIEF_KEY, size: 0 }, ...columns.map((c) => ({ key: c.key, size: c.entries.length }))],
+    [columns],
+  )
+  // Where in the strip the stored tab last stood, so a tab that goes is
+  // replaced by its neighbour (the tab now there). Only a commit that
+  // showed the stored tab itself sets it: a stand-in shown while
+  // loading or under the filter is not the stored tab's place, and a
+  // stored tab never seen (its category went while the phone was away)
+  // gets the fresh-device tab, not Brief.
+  const [lastTabIndex, setLastTabIndex] = useState<number | null>(null)
+  // The tab the phone shows. It follows the stored key, so Saved or
+  // For You appearing or emptying around it, or a feed moving between
+  // categories, never moves the phone. Nothing is migrated or settled
+  // until preferences have loaded and the first refresh has answered,
+  // and the last refresh applied loaded every tab for the filter in
+  // force: before that a stored tab can be missing only because its
+  // stories haven't arrived.
+  //
+  // While For You's request fails, only what hangs on For You waits: a
+  // stored For You, a fresh device's first tab (For You first), and an
+  // old index (counted with For You in its place). Any other tab still
+  // settles, so a For You that stays down can't bring back the jump.
+  const storedKey = mobileTab && 'key' in mobileTab ? mobileTab.key : null
+  const activeScope = useMemo(() => filterScope(activeSources), [activeSources])
+  const tabsLoaded =
+    !prefs.loading &&
+    firstRefreshDone &&
+    tabsLoadedFor === activeScope &&
+    (forYouLoaded || (storedKey != null && storedKey !== FORYOU_KEY))
+  const tabChoice = useMemo(
+    () =>
+      resolveTab(phoneTabs, mobileTab, lastTabIndex, {
+        loaded: tabsLoaded,
+        filterActive: viewKind === 'multisub',
+      }),
+    [phoneTabs, mobileTab, lastTabIndex, tabsLoaded, viewKind],
+  )
+  const shownTab: ColKey = tabChoice.key ?? BRIEF_KEY
+  // The shown column (-1 and undefined on Brief).
+  const phoneColIndex = columns.findIndex((c) => c.key === shownTab)
+  const phoneCol = phoneColIndex >= 0 ? columns[phoneColIndex] : undefined
   useEffect(() => {
-    if (columns.length === 0) return
-    // Desktop: j/k/o never target a column that has gone.
-    setSelectedColumnIndex((i) => Math.min(i, columns.length - 1))
-    if (mobileCol >= columns.length) {
-      const next = columns.length - 1
-      setMobileCol(next)
-      safeSetItem(STORAGE_KEYS.mobileColLast, String(next))
-    } else {
-      safeSetItem(STORAGE_KEYS.mobileColLast, String(mobileCol))
-    }
-  }, [columns.length, mobileCol])
+    if (storedKey != null && tabChoice.key === storedKey) setLastTabIndex(tabChoice.index)
+    // A tab that went, a fresh device's first tab, or an old index:
+    // the tab shown becomes the stored one. Only on the phone: the
+    // desktop never shows the strip, so it leaves the phone's tab alone.
+    if (tabChoice.store && !isDesktop) selectTab(tabChoice.store)
+  }, [tabChoice, storedKey, isDesktop, selectTab])
+  // A tap on another tab selects it. A tap on the tab shown scrolls it
+  // to the top (at once under reduced motion), and selects it when it
+  // only stands in for the stored tab (while loading), except the
+  // filter's column, which stands in only until the filter is cleared.
+  const onPhoneTabTap = useCallback(
+    (key: ColKey) => {
+      if (key !== shownTab) {
+        selectTab(key)
+        return
+      }
+      if (key !== storedKey && key !== FILTER_KEY) selectTab(key)
+      const el = key === BRIEF_KEY ? phoneBodyRef.current : phoneScroller
+      const reduce = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
+      el?.scrollTo({ top: 0, behavior: reduce ? 'auto' : 'smooth' })
+    },
+    [shownTab, storedKey, phoneScroller, selectTab],
+  )
 
   // Note: readEntries, lastViewed, columnPrefs, columnSections,
   // hiddenEntries, starredEntries, filterPresets, and
@@ -2223,20 +2302,10 @@ export function App() {
   }, [setActiveSources, setFilterPresets])
 
   // --- Feed editor (Settings › Feeds) ---------------------------------
-  // The phone shows a column; a category save may move it (see the
-  // follow effect above).
-  const columnsRef = useRef(columns)
-  columnsRef.current = columns
-  const mobileColRef = useRef(mobileCol)
-  mobileColRef.current = mobileCol
-
   // A row the server returned for a save. The PATCH response carries
-  // no vote score, so the shown one is kept.
+  // no vote score, so the shown one is kept. A category change can't
+  // move the phone: it follows its tab by key (``resolveTab``).
   const applyServerSource = useCallback((row: Source) => {
-    const before = sourcesRef.current.find((s) => s.id === row.id)
-    if (before && before.category !== row.category && mobileColRef.current >= 0) {
-      followTabRef.current = columnsRef.current[mobileColRef.current]?.name ?? null
-    }
     sourceChangesRef.current.written.set(row.id, Date.now())
     setSources((prev) => prev.map((s) => (s.id === row.id ? { ...row, net_vote_score: s.net_vote_score } : s)))
   }, [])
@@ -2383,7 +2452,7 @@ export function App() {
       setSearchOpen(false)
       setSelectedColumnIndex(idx)
       setSelectedCardId(null)
-      selectMobileCol(idx)
+      selectTab(columns[idx].key)
       requestAnimationFrame(() => {
         document
           .querySelector<HTMLElement>('[role="tablist"][aria-label="dashboard sections"] [aria-selected="true"]')
@@ -2394,7 +2463,7 @@ export function App() {
         ;(el?.firstElementChild as HTMLElement | null)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
       })
     }
-  }, [columns, setSelectedColumnIndex, setSelectedCardId, columnRefs, selectMobileCol])
+  }, [columns, setSelectedColumnIndex, setSelectedCardId, columnRefs, selectTab])
 
   const setPrefsFor = useCallback((columnName: string, prefs: ColumnPrefs) => {
     setColumnPrefs(columnName, prefs as ColumnPrefsValue)
@@ -2837,21 +2906,19 @@ export function App() {
             votedMap={votedMap}
           />
         </main>
+      ) : !firstRefreshDone || (columns.length === 0 && refreshing) ? (
+        // First load in flight — the empty-state copy below would
+        // otherwise flash for a moment before the very first response
+        // lands; also while an empty dashboard (a first load that
+        // failed) refreshes. Once any stories exist, a later refresh
+        // never brings it back.
+        <div className="flex-1 overflow-y-auto overscroll-contain">
+          <SkeletonGrid />
+        </div>
       ) : columns.length === 0 ? (
-        refreshing ? (
-          // First load in flight — the empty-state copy below would
-          // otherwise flash for a moment before the very first
-          // response lands. Only shown pre-first-load: once any
-          // entries exist, ``columns.length`` is never 0 again, so a
-          // later in-flight refresh never re-triggers this.
-          <div className="flex-1 overflow-y-auto overscroll-contain">
-            <SkeletonGrid />
-          </div>
-        ) : (
-          <div className="flex-1 flex items-center justify-center text-ios-body text-label-secondary px-4 text-center">
-            No stories yet. Tap Refresh to check now, or add feeds in Menu → Settings → Feeds.
-          </div>
-        )
+        <div className="flex-1 flex items-center justify-center text-ios-body text-label-secondary px-4 text-center">
+          No stories yet. Tap Refresh to check now, or add feeds in Menu → Settings → Feeds.
+        </div>
       ) : (
         <>
           {/* Desktop. The view is two surfaces stacked:
@@ -3037,13 +3104,13 @@ export function App() {
               <button
                 type="button"
                 role="tab"
-                aria-selected={mobileCol === -1}
-                onClick={() => selectMobileCol(-1)}
+                aria-selected={shownTab === BRIEF_KEY}
+                onClick={() => onPhoneTabTap(BRIEF_KEY)}
                 className="group shrink-0 min-h-[44px] flex items-center"
               >
                 <span
                   className={`rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                    mobileCol === -1
+                    shownTab === BRIEF_KEY
                       ? 'bg-accent text-white'
                       : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
                   }`}
@@ -3051,8 +3118,9 @@ export function App() {
                   Brief
                 </span>
               </button>
-              {columns.map((c, i) => {
+              {columns.map((c) => {
                 const newCount = newCountByColumn.get(c.name)
+                const shown = c.key === shownTab
                 return (
                   // Navigation, not mark-read. Merely peeking at a
                   // column shouldn't drop its "+N new" chip — that
@@ -3061,15 +3129,15 @@ export function App() {
                   // the explicit mark-read affordances.
                   <button
                     type="button"
-                    key={c.name}
+                    key={c.key}
                     role="tab"
-                    aria-selected={i === mobileCol}
-                    onClick={() => selectMobileCol(i)}
+                    aria-selected={shown}
+                    onClick={() => onPhoneTabTap(c.key)}
                     className="group shrink-0 min-h-[44px] flex items-center"
                   >
                     <span
                       className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                        i === mobileCol
+                        shown
                           ? 'bg-accent text-white'
                           : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
                       }`}
@@ -3078,7 +3146,7 @@ export function App() {
                       {!!newCount && (
                         <span
                           className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
-                            i === mobileCol ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
+                            shown ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
                           }`}
                         >
                           {newCount}
@@ -3090,8 +3158,10 @@ export function App() {
               })}
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
-              {mobileCol === -1 ? (
+            {/* Scrolls only the Brief tab: a Column fills it (h-full) and
+                scrolls its own list, the phone's ``data-scroller``. */}
+            <div ref={phoneBodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
+              {!phoneCol ? (
                 <BriefCard
                   brief={brief}
                   onBriefChange={setBrief}
@@ -3102,21 +3172,23 @@ export function App() {
                 />
               ) : (
                 <Column
-                  name={columns[mobileCol]?.name ?? ''}
-                  sections={
-                    sectionsByColumn.get(columns[mobileCol]?.name ?? '') ?? { new: [], history: [] }
-                  }
+                  // A new list per tab: it starts at the top, and the
+                  // scroller hooks rebind to it.
+                  key={phoneCol.key}
+                  scrollerRef={setPhoneScroller}
+                  name={phoneCol.name}
+                  sections={sectionsByColumn.get(phoneCol.name) ?? { new: [], history: [] }}
                   sourcesById={sourcesById}
                   sourcesByName={sourcesByName}
-                  newCount={newCountByColumn.get(columns[mobileCol]?.name ?? '')}
+                  newCount={newCountByColumn.get(phoneCol.name)}
                   onRefresh={manualRefresh}
                   onSourceTap={onSourceTap}
                   selectedId={
-                    mobileCol === selectedColumnIndex ? selectedCardId ?? undefined : undefined
+                    phoneColIndex === selectedColumnIndex ? selectedCardId ?? undefined : undefined
                   }
                   cardRefs={cardRefs}
-                  onMarkRead={() => markColumnRead(columns[mobileCol]?.name ?? '')}
-                  onMarkEntryRead={(entryId) => toggleEntryRead(columns[mobileCol]?.name ?? '', entryId)}
+                  onMarkRead={() => markColumnRead(phoneCol.name)}
+                  onMarkEntryRead={(entryId) => toggleEntryRead(phoneCol.name, entryId)}
                   onHideEntry={(entryId) => {
                     hideEntry(entryId)
                     toast('Entry hidden.', {
@@ -3127,7 +3199,7 @@ export function App() {
                       },
                     })
                   }}
-                  onHideToggle={(entryId) => toggleHideEntry(columns[mobileCol]?.name ?? '', entryId)}
+                  onHideToggle={(entryId) => toggleHideEntry(phoneCol.name, entryId)}
                   hiddenSet={hiddenSet}
                   onStarEntry={(entryId) => {
                     const wasStarred = starredSet.has(entryId)
@@ -3148,21 +3220,15 @@ export function App() {
                   starredSet={starredSet}
                   onVoteEntry={setEntryVote}
                   votedMap={votedMap}
-                  prefs={
-                    columns[mobileCol]
-                      ? columnPrefs[columns[mobileCol].name] ?? DEFAULT_PREFS
-                      : DEFAULT_PREFS
-                  }
-                  onPrefsChange={(next) =>
-                    columns[mobileCol] && setPrefsFor(columns[mobileCol].name, next)
-                  }
-                  totalCount={columns[mobileCol]?.totalCount}
+                  prefs={columnPrefs[phoneCol.name] ?? DEFAULT_PREFS}
+                  onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
+                  totalCount={phoneCol.totalCount}
                   categoriesBySourceId={categoriesBySourceId}
                   faviconBySourceId={faviconBySourceId}
                   expandedSummaries={expandedSummaries}
                   onToggleSummary={toggleSummary}
-                  sectionsCollapsed={sectionsCollapsedFor(columns[mobileCol]?.name ?? '')}
-                  onToggleSection={(key) => setColumnSection(columns[mobileCol]?.name ?? '', key)}
+                  sectionsCollapsed={sectionsCollapsedFor(phoneCol.name)}
+                  onToggleSection={(key) => setColumnSection(phoneCol.name, key)}
                 />
               )}
             </div>

@@ -215,6 +215,14 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-fg-settings-back` | Menu → Settings opens Feeds; after Done, history grew by at most one entry and Back stays in the app with Settings closed |
 | `flow-ft-menu-edit-feed` | a source row's › in the Menu opens that feed in Settings, in view; a `?source=` change while Settings is open moves to another feed |
 | `flow-fu-jump-to-column` | Jump to column selects that phone tab and scrolls it into the strip |
+| `flow-tab-stays-on-star` | PR1b: on News, saving a story adds the Saved tab in front of it; the phone stays on News, stores `cat:news` (`popping.v1.mobileTab`), and a reload opens News |
+| `flow-unsave-last-saved` | PR1b, with one saved story: a new phone opens on For You; unsaving the only saved story takes Saved away and the phone moves to For You, now its stored tab; saving from For You brings Saved back without moving the phone |
+| `flow-tab-migrates-index` | PR1b: a stored old index (`mobileCol.last` = 0) with the preferences 1.5 s late (they bring the saved story that made index 0 Saved) opens Saved, stores `meta:saved` and drops the index; migrated before them it would be For You |
+| `flow-tab-gone-on-load` | PR1b: a stored tab whose category is gone opens For You, not Brief, and stores it |
+| `flow-filter-clear-keeps-tab` | PR1b: on News, a source filter leaves `cat:news` stored; clearing it while the unfiltered stories are 1.5 s late stores nothing in between and lands back on News |
+| `flow-foryou-fails-keeps-tab` | PR1b: a new phone stores For You; a refresh whose For You request fails (503) takes the tab away but keeps `meta:foryou` stored, and the phone is back on For You when it loads again |
+| `flow-foryou-down-settles` | PR1b, For You failing (503) throughout: a new phone shows Saved but stores nothing; a tapped Saved that empties gives way to its neighbour, which is stored, and saving again doesn't move the phone |
+| `flow-tap-tab-scrolls-top` | PR1b: only the phone list carries `data-scroller`; tapping the shown tab scrolls that list to the top (at once under reduced motion) without moving the phone; another tab opens at its own top |
 | `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
 | `flow-h1-taps` | the harness: ≡ then Settings counts 2 taps, passes `taps(page, 2, …)` and fails `taps(page, 1, …)` |
 | `flow-h1-touch-drag` | the harness: `touchDrag` does nothing off Chromium; on Chromium an upward drag scrolls the phone list and counts 1 |

@@ -33,6 +33,10 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #35 · After `popping-update` (read the PR's rollback note first), run `cd /opt/popping && docker compose exec backend alembic current`. Pass: it prints `0031 (head)`.
 - [ ] #35 · Force-quit and reopen the app, then open Menu → Settings → Feeds. Pass: stories load and every feed is listed as before.
 - [ ] #35 · An hour after deploying, run `cd /opt/popping && docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT name, last_attempt_at, last_item_count, last_new_count, left(last_error, 30) AS error FROM sources ORDER BY last_attempt_at DESC NULLS LAST LIMIT 15"'`. Pass: the feeds checked since the deploy show a `last_attempt_at` after it, and the ones without an error show both counts.
+- [ ] #<pr> · On the phone, open the News tab and save a story from it. Pass: a Saved tab appears and the phone stays on News.
+- [ ] #<pr> · Open Saved and remove its only story. Pass: the phone moves to the tab next to it; saving a story from there brings Saved back without moving the phone.
+- [ ] #<pr> · Scroll down a tab, then tap that tab's name again. Pass: the list goes back to the top and the tab doesn't change.
+- [ ] #<pr> · On a tab other than For You, force-quit the home-screen app and reopen it. Pass: it opens on the same tab.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
