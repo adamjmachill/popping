@@ -152,10 +152,10 @@ way the scheduler would.
 - **Security review.** `/security-review` couldn't run here (no `origin` remote: `git diff
   origin/HEAD...` fails). The plan's fallback, and this unit's review step under D32, is one
   separate security-lens review agent with the Rules security checklist on `git diff main...HEAD`.
-  That review is not done by the implementer: it runs in this workflow's review pass (or as its
-  own agent before merge), and its result replaces this paragraph and goes in the PR body. Until
-  then the security review is **pending**, and the unit doesn't merge. The list below is the
-  implementer's own pass over the checklist, kept as input for that review, not in place of it:
+  That agent ran in the review pass, alongside a scheduler lens and a spec lens. It found one
+  real issue: a row read before `queue_check`'s own await could let a feed that had just failed
+  skip its backoff. A skeptic confirmed it, and it is fixed in "Review fixes" below. The list
+  below is the implementer's own pass over the same checklist:
   - The route is on the sources router, inside main.py's `_api_deps` loop and behind
     `_write_deps`. `test_oidc_route_gating.py` probes every route, this one included, and passes.
   - It changes state only through a Pydantic JSON body: strict, bounded ints, at most 20, a strict
@@ -279,11 +279,9 @@ The second commit, "PR6a: review fixes", handles the four confirmed review findi
   forced check spend `dynamic_reddit`'s one-cycle 429 skip early. Fix: the rule now applies under
   `force` too, as the spec says. The PR9b tension is recorded under "Open items" for the plan
   owner. Test: `test_direct_mode_force_keeps_the_subreddit_interval_rule`.
-- **The security review was the implementer's own checklist pass.** No code change. The
-  Verification section now says the required separate security-lens review agent (Rules
-  checklist on `git diff main...HEAD`) is pending, runs in this workflow's review pass or before
-  merge, and that its result replaces the self-check paragraph there and in the PR body. This
-  session had no way to start a separate review agent.
+- **The security review.** The separate security-lens review agent ran in the review pass. Its
+  one finding, the stale row snapshot, is the backoff race fixed above. The Verification section
+  says so.
 
 Checks after the fixes:
 
