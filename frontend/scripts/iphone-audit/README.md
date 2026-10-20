@@ -113,6 +113,8 @@ wait looks for a phone card in the hidden `main.md:hidden`. Then:
 | `settings-llm` | the AI tab |
 | `settings-notifications`, `settings-history`, `settings-hidden`, `settings-starred` (Saved), `settings-voted` (Downvoted), `settings-reset` | one per tab via `?view=settings&tab=`; `settings-reset` also holds the build line (PR1r), which passes C14 at 320 |
 | `brief-empty` | 320 only: the phone Brief tab with `/api/brief/latest` returning `[]` |
+| `brief-needs-ai` | PR1c, at 390, 320 and 312: `/api/llm/status` says `configured: false`; the phone Brief tab, expanded, with no brief: "Brief needs an AI provider · Set up" on its own 44px row, on one line |
+| `brief-needs-ai-compact` | PR1c, the same at 390, 320 and 312 with one brief, collapsed: the Set up row under "Brief" and its time |
 
 Selectors avoid visible labels that the redesign changes: feed-manager tabs are
 picked by position, headers by `aria-label` (`close settings`, `close menu`).
@@ -226,6 +228,12 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-foryou-down-holds-index` | PR1b: the same with only an old index stored (`mobileCol.last` = 1); the index isn't migrated while For You is down |
 | `flow-prefs-fail-keeps-saved` | PR1b: `GET /api/preferences` fails (500) with `meta:saved` stored; the phone shows another tab, and `meta:saved` stays stored, also after a poll |
 | `flow-tap-tab-scrolls-top` | PR1b: only the phone list carries `data-scroller`; tapping the shown tab scrolls that list to the top (at once under reduced motion) without moving the phone; another tab opens at its own top |
+| `flow-sort-best` | PR1c: For You opens on Best, in the server's order; News opens Newest (newest first) with no minimum score slider; Best reorders it by score and stores `column_prefs:news` with `sort: 'best'`; tapping a saved view's chip that captured News as Newest writes no `column_prefs` and keeps Best; Saved's ⋯ has no Newest \| Best |
+| `flow-brief-needs-ai` | PR1c, `/api/llm/status` saying `configured: false`: the phone Brief's four Generate / Regenerate states (no brief expanded and collapsed, then one brief expanded and collapsed) each read "Brief needs an AI provider · Set up" (44px); Set up opens Settings › AI; with a provider set up, closing Settings brings Regenerate back; with it gone again, coming back to the front reads the status again, and at 1280 (`setViewportSize`) the header's Brief is the same Set up, which opens Settings › AI, and comes back as Brief after Done |
+| `flow-bookmark-on-save` | PR1c: ☆ on a story sends one `bookmark` interaction; ☆ again (unsave) sends none |
+| `flow-bookmark-on-save-desktop` | PR1c, 1280: the card menu's Save for later sends one `bookmark`, its Unsave none; keyboard `b` on the selected card (save, then unsave) sends one in all |
+| `flow-saved-order` | PR1c: Saved lists saves newest first by published, else fetched time (a page fetched a minute ago with no publish date leads, then the dated saves, then the two with neither date, the higher id first) |
+| `flow-reset-keeps-saves` | PR1c: with saves, hides, votes, a saved view and News's read marks, last visit, prefs and section folds stored, Reset reading state deletes the reading-state rows and `history_group_by` but never `starred_entries`, `hidden_entries`, `voted_entries` or `filter_presets`; after the reload the server holds only those four and the Saved tab is back |
 | `flow-menu-closed-inert` | closing the Menu puts focus back on ≡, and Tab never reaches the closed Menu |
 | `flow-h1-taps` | the harness: ≡ then Settings counts 2 taps, passes `taps(page, 2, …)` and fails `taps(page, 1, …)` |
 | `flow-h1-touch-drag` | the harness: `touchDrag` does nothing off Chromium; on Chromium an upward drag scrolls the phone list and counts 1 |

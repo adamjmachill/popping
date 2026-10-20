@@ -89,13 +89,13 @@ export type ReadEntriesValue = number[]
 export type LastViewedValue = string
 
 /**
- * One column's sort/filter preferences. Matches the
- * ``ColumnPrefs`` type in App.tsx -- duplicated here to avoid a
- * circular import (App imports this module, this module would
- * have to import App's ColumnPrefs otherwise).
+ * One column's sort/filter preferences. Matches ``TabPrefs`` in
+ * ``lib/sorting.ts`` (Column's ``ColumnPrefs``), which reads it:
+ * ``top`` and ``oldest`` are older builds' values, and ``minScore`` is
+ * kept in the shape but no longer filters.
  */
 export type ColumnPrefsValue = {
-  sort: 'top' | 'newest' | 'oldest'
+  sort: 'top' | 'newest' | 'oldest' | 'best'
   minScore: number
   maxAgeHours: number | null
 }
@@ -171,9 +171,9 @@ export const PREFERENCE_KEYS = {
 } as const
 
 // Default state for a brand-new user (server has no rows yet).
-// Mirrors the ``DEFAULT_PREFS`` constant in App.tsx; values are
-// chosen to match the existing localStorage defaults so the
-// migration is transparent.
+// Values are chosen to match the existing localStorage defaults so
+// the migration is transparent. A tab with no column prefs row gets
+// ``lib/sorting``'s defaults.
 const DEFAULT_STATE: PreferencesState = {
   readEntries: {},
   lastViewed: {},

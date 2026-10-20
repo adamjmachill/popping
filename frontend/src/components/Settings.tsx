@@ -10,7 +10,7 @@
 //   LLM            — moved from Drawer. Provider + model pickers,
 //                    brief tone pills, "Generate brief now".
 //   Notifications  — moved from Drawer. Backend status + retry.
-//   Reset          — moved from Drawer. Clear local state, and the
+//   Reset          — moved from Drawer. Reset reading state, and the
 //                    build this page runs (PR1r).
 //
 // Tab navigation: the URL holds the open tab via
@@ -83,7 +83,8 @@ type Props = {
   onSourceAdded?: (row: Source) => void
   onSourceDeleted?: (id: number) => void
   onEditSource?: (id: number) => void
-  // Reset hooks. Wipes local namespaced keys; App owns the
+  // Reset hooks. Wipes local namespaced keys and the reading-state
+  // preferences (saves, hides and saved views stay); App owns the
   // reload so every component's state mirrors reset in lockstep.
   onResetLocalState: () => void
   // List of currently-hidden entry ids. Shown on the Hidden tab
@@ -487,18 +488,17 @@ export function Settings({
             <div className="pt-4 px-4 space-y-3">
               <div className="rounded-ios bg-bg-surface border border-hairline p-3">
                 <div className="text-ios-body text-label-primary">
-                  Clear local state
+                  Reset reading state
                 </div>
                 <p className="text-ios-caption text-label-secondary mt-1">
-                  Wipes read marks, column preferences, last-viewed timestamps, and
-                  the last-selected mobile column. Server data (entries, sources,
-                  briefs) is untouched — a refresh re-fetches everything.
+                  Clears read marks, each tab&apos;s sort and filter, last-visit times and folded
+                  sections on all your devices, and this device&apos;s own settings. Saved and hidden
+                  stories, votes, saved views, feeds and briefs stay.
                 </p>
                 {confirmReset ? (
                   <div className="mt-3 rounded-ios border border-red-500/40 p-3 space-y-2">
                     <p className="text-ios-body text-label-primary">
-                      Clear local state on this device? Read marks, column preferences and last-viewed times go.
-                      This can&apos;t be undone.
+                      Reset reading state on all your devices? This can&apos;t be undone.
                     </p>
                     <div className="flex flex-wrap gap-2">
                       <button
@@ -509,7 +509,7 @@ export function Settings({
                         }}
                         className="min-h-[44px] px-3 rounded-ios bg-red-500 text-white text-ios-body active:opacity-80"
                       >
-                        Clear
+                        Reset
                       </button>
                       <button
                         type="button"
@@ -526,7 +526,7 @@ export function Settings({
                     onClick={() => setConfirmReset(true)}
                     className="mt-3 w-full min-h-[44px] rounded-ios bg-red-500/15 border border-red-500/40 text-red-300 active:opacity-60"
                   >
-                    Clear local state
+                    Reset reading state
                   </button>
                 )}
               </div>
@@ -1287,26 +1287,22 @@ function HistoryTabContent({ onError }: { onError: (msg: string) => void }) {
         <div className="rounded-ios bg-bg-surface border border-hairline p-3">
           <div className="text-ios-body text-label-primary">No history yet</div>
           <div className="text-ios-caption text-label-secondary mt-0.5">
-            Mark a card read (✓), hide it (the eye) or save it (☆) and it shows up here, grouped into Read,
-            Hidden and Saved.
+            Stories you hide or save show up here.
           </div>
         </div>
       </div>
     )
   }
 
-  // Group items by type into Read / Hidden / Saved buckets.
-  // The "View" type fires on every card mark-read so the
-  // Read group is the dense one. The "never" type fires on
-  // eye-button hide so the Hidden group is smaller. The
-  // "bookmark" type fires on star so the Saved group is
-  // the small one.
+  // Group items by type into Hidden / Saved buckets. The
+  // "never" type fires on hide, "bookmark" on save. Views
+  // (reads) are no longer listed: the server leaves them out
+  // unless asked for them, so a Read group would always be
+  // empty.
   type Group = { label: string; color: string; items: Item[] }
-  const read: Item[] = items.filter((i) => i.type === 'view')
   const hidden: Item[] = items.filter((i) => i.type === 'never')
   const saved: Item[] = items.filter((i) => i.type === 'bookmark')
   const groups: Group[] = [
-    { label: 'Read', color: 'text-green-500', items: read },
     { label: 'Hidden', color: 'text-red-400', items: hidden },
     { label: 'Saved', color: 'text-amber-400', items: saved },
   ].filter((g) => g.items.length > 0)
@@ -1340,7 +1336,7 @@ function HistoryTabContent({ onError }: { onError: (msg: string) => void }) {
                 >
                   <div className="flex items-start gap-2">
                     <span className={`shrink-0 mt-0.5 text-ios-caption ${g.color}`} aria-hidden="true">
-                      {g.label === 'Read' ? '✓' : g.label === 'Hidden' ? <TabIcon name="eye-off" active={false} /> : '☆'}
+                      {g.label === 'Hidden' ? <TabIcon name="eye-off" active={false} /> : '☆'}
                     </span>
                     <div className="min-w-0 flex-1">
                       <div className="text-ios-body text-label-primary line-clamp-2 break-words">

@@ -1,31 +1,37 @@
-import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { Entry } from '../api'
 import { Card } from './Card'
 import { categoryLabel } from '../lib/labels'
+import { SAVED_KEY, type ColKey } from '../lib/columns'
+import { normalizeSort, type Sort, type TabPrefs } from '../lib/sorting'
 
 // Per-column sort/filter preferences. Owned by App (so it persists
 // across columns and across renders) and passed in here for the
 // popover to read/write. ``maxAgeHours === null`` means "no max-age
-// filter" — the popover's "all" option. Same shape is persisted to
-// localStorage in App.
-export type ColumnPrefs = {
-  sort: 'top' | 'newest' | 'oldest'
-  minScore: number
-  maxAgeHours: number | null
-}
+// filter" — the popover's "all" option. The shape is ``lib/sorting``'s
+// ``TabPrefs`` (``sort`` may still hold an older build's ``top`` or
+// ``oldest``; ``normalizeSort`` reads it). ``minScore`` stays in the
+// stored shape but nothing filters on it any more.
+//
+// App reads a tab's prefs through ``prefsFor`` (lib/sorting), which
+// returns module constants for a tab with no stored row, because the
+// memo below compares prefs by reference.
+export type ColumnPrefs = TabPrefs
 
-export const DEFAULT_PREFS: ColumnPrefs = {
-  sort: 'top',
-  minScore: 0,
-  maxAgeHours: null,
-}
+const SORTS: ReadonlyArray<{ value: Sort; label: string }> = [
+  { value: 'newest', label: 'Newest' },
+  { value: 'best', label: 'Best' },
+]
 
 type Props = {
   name: string
+  // The tab's key (lib/columns): which sort it defaults to, and whether
+  // it has a sort at all (Saved doesn't).
+  tabKey: ColKey
   // Pre-split entry lists. App owns the "what's new" semantics
   // (derived from per-column lastViewed timestamps + the manual
-  // readEntries set), and ships the two slices down pre-sorted
-  // newest-first. The Column only renders — the split and the
+  // readEntries set), and ships the two slices down in the tab's
+  // order (Newest or Best). The Column only renders — the split and the
   // sort are data-layer concerns, not visual ones.
   //
   // When a slice is empty, its section (header + divider) is
@@ -48,8 +54,8 @@ type Props = {
   // last visit to this column". Rendered as a chip in the header so
   // the user knows to come look. ``undefined`` means we haven't
   // computed it yet (initial mount) and we show nothing. The
-  // chip count and the New section count may differ (e.g. when a
-  // minScore filter hides some new entries) — that's intentional:
+  // chip count and the New section count may differ (e.g. when the
+  // age filter hides some new entries) — that's intentional:
   // the chip is the feed-level signal, the section is the
   // post-filter view.
   newCount?: number
@@ -77,8 +83,8 @@ type Props = {
   // clicked entry id up so the keyboard ``m`` shortcut and the
   // button on each card share one code path.
   onMarkEntryRead?: (entryId: number) => void
-  // Prefs + setter for the ⋯ popover. For You column passes
-  // ``undefined`` — no popover, just the chip + count.
+  // Prefs + setter for the ⋯ popover (Newest | Best, and the age
+  // filter). Without a setter there is no ⋯.
   prefs?: ColumnPrefs
   onPrefsChange?: (next: ColumnPrefs) => void
   // The total number of entries before prefs filtering. We render
@@ -177,6 +183,7 @@ type Props = {
 // the memo even with this comparator.
 export function ColumnInner({
   name,
+  tabKey,
   sections,
   sourcesById,
   // Slice 19: optional sourcesByName map for context-aware empty-state.
@@ -209,6 +216,7 @@ export function ColumnInner({
   scrollerRef,
 }: Props) {
   const [popoverOpen, setPopoverOpen] = useState(false)
+  const sortLabelId = useId()
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const prefsButtonRef = useRef<HTMLButtonElement | null>(null)
 
@@ -294,9 +302,9 @@ export function ColumnInner({
   // action), so it should be a button. role="button" + tabIndex={0}
   // matches the pattern BriefCard uses for its collapse header.
   //
-  // Same guard as onHeaderClick: Space on a focused <select> (the
-  // sort / max-age dropdowns) or arrow-key interaction with the
-  // min-score range slider is exactly "Enter or Space" from the
+  // Same guard as onHeaderClick: Space or Enter on a focused control
+  // in the popover (the Newest | Best buttons, the max-age dropdown)
+  // is exactly "Enter or Space" from the
   // header's point of view once it bubbles, so without this check
   // adjusting the sort from the keyboard would ALSO mark the column
   // read (and Space would fight the select for its default
@@ -385,12 +393,9 @@ export function ColumnInner({
           </span>
         </div>
 
-        {/* Sort/filter popover trigger. Hidden for For You because
-            the backend already pre-sorts by composite_score. We
-            identify For You by name rather than a prop because the
-            column already gets the name anyway and we'd be adding
-            ceremony for a single special case. */}
-        {onPrefsChange && name !== 'For You' && (
+        {/* Sort/filter popover trigger. Every tab has one: For You
+            sorts too (its Best is the server's order). */}
+        {onPrefsChange && (
           <button
             ref={prefsButtonRef}
             data-column-action="prefs"
@@ -416,57 +421,52 @@ export function ColumnInner({
             data-column-popover
             // Position relative to the header so it lands just below
             // the more-button on the right edge. min-w-[240px] keeps
-            // the slider readable. z-20 puts it above cards but
+            // the controls readable. z-20 puts it above cards but
             // below the Drawer (z-30+). The popover is the only
             // place we still render a popover-shaped surface — the
             // rest of the dashboard uses sheets / grouped lists.
             className="absolute right-0 top-full mt-2 z-20 min-w-[240px] rounded-ios-lg bg-bg-elevated shadow-2xl p-3 text-ios-body space-y-3"
             onClick={(e) => e.stopPropagation()}
           >
-            <div>
-              <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
-                Sort
-              </label>
-              <select
-                value={prefs.sort}
-                onChange={(e) =>
-                  onPrefsChange({ ...prefs, sort: e.target.value as ColumnPrefs['sort'] })
-                }
-                className="select-ios w-full min-h-[44px] rounded-ios bg-bg-surface border border-hairline pl-3 pr-8 text-ios-body text-label-primary"
-              >
-                <option value="top">Best first</option>
-                <option value="newest">Newest first</option>
-                <option value="oldest">Oldest first</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
-                Minimum score: {prefs.minScore}
-              </label>
-              <input
-                type="range"
-                min={0}
-                max={100}
-                step={5}
-                value={prefs.minScore}
-                onChange={(e) => {
-                  // ``type=range`` always returns a
-                  // finite number, but the
-                  // ``Number(...)`` wrapper on
-                  // arbitrary strings can produce
-                  // NaN. Defensive clamp + isFinite
-                  // so a future code path can't put
-                  // a bad value in localStorage and
-                  // silently empty the column.
-                  const n = Number(e.target.value)
-                  const safe = Number.isFinite(n)
-                    ? Math.max(0, Math.min(100, n))
-                    : 0
-                  onPrefsChange({ ...prefs, minScore: safe })
-                }}
-                className="w-full accent-accent"
-              />
-            </div>
+            {/* Newest | Best. Not on Saved, which keeps its own order
+                (lib/sorting), so a control there would do nothing. */}
+            {tabKey !== SAVED_KEY && (
+              <div>
+                <div
+                  id={sortLabelId}
+                  className="text-ios-caption uppercase tracking-wide text-label-tertiary mb-1"
+                >
+                  Sort
+                </div>
+                <div
+                  role="group"
+                  aria-labelledby={sortLabelId}
+                  className="grid grid-cols-2 rounded-ios overflow-hidden border border-hairline"
+                >
+                  {SORTS.map((o) => {
+                    const active = normalizeSort(prefs.sort, tabKey) === o.value
+                    return (
+                      <button
+                        key={o.value}
+                        type="button"
+                        data-sort={o.value}
+                        aria-pressed={active}
+                        onClick={() => {
+                          if (!active) onPrefsChange({ ...prefs, sort: o.value })
+                        }}
+                        className={`min-h-[44px] text-ios-body transition ${
+                          active
+                            ? 'bg-bg-elevated text-accent'
+                            : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
+                        }`}
+                      >
+                        {o.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
             <div>
               <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
                 Hide if older than
@@ -522,8 +522,8 @@ export function ColumnInner({
                 the header visible so the user can re-expand. */}
             {/* Fresh section \u2014 the column's primary view. Apollo
                 terminology: "Fresh" is what the user hasn't
-                acted on yet, ordered by recency (newest first
-                via App's byNewest comparator). The user can
+                acted on yet, in the tab's order (Newest or Best,
+                sorted in App's columns memo). The user can
                 collapse the section but the per-column History
                 sub-section was removed \u2014 history now lives in
                 the Drawer's "History" tab where the user can
@@ -902,6 +902,7 @@ function EmptyColumnMessage({
 function _columnPropsEqual(prev: Props, next: Props): boolean {
   return (
     prev.name === next.name &&
+    prev.tabKey === next.tabKey &&
     prev.sections === next.sections &&
     prev.sourcesById === next.sourcesById &&
     prev.sourcesByName === next.sourcesByName &&
