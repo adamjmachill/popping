@@ -12,6 +12,7 @@
 //   - votedEntries    per-user entry id -> up / down
 //   - filterPresets   user-saved filter+prefs views
 //   - historyGroupBy  History tab grouping (``entry`` or ``none``)
+//   - categoryLayout  the tab order and the hidden tabs
 //
 // They used to live in localStorage. They were per-device there, so a
 // phone and a laptop saw different read state, different sort orders,
@@ -54,7 +55,7 @@
 // ``last_viewed:<columnId>``, ``column_prefs:<columnId>``,
 // ``column_sections:<columnId>``, ``hidden_entries``,
 // ``starred_entries``, ``voted_entries``, ``filter_presets``,
-// ``history_group_by``) on the server's allowlist
+// ``history_group_by``, ``category_layout``) on the server's allowlist
 // (routes/preferences.py). The constant ``PREFERENCE_KEYS`` below is
 // the source of truth for which keys exist.
 
@@ -79,6 +80,7 @@ import {
   type Vote,
 } from './prefSync'
 import { safeGetItem, safeRemoveItem } from './storage'
+import { normalizeLayout, type CategoryLayout } from './categories'
 import { toast } from '../components/Toast'
 
 // ---------------------------------------------------------------------------
@@ -117,6 +119,11 @@ export type ColumnSectionsValue = {
 
 /** The History tab's group-by mode. */
 export type HistoryGroupByValue = 'entry' | 'none'
+
+/** The tab order and the hidden tabs (``lib/categories.ts``). One whole
+ *  value, written by PUT on every change; a stale read can't undo a
+ *  change still on its way (PR2b's per-key write sequence). */
+export type CategoryLayoutValue = CategoryLayout
 
 /**
  * Per-entry vote direction. Keyed by entry id (as a string — JSON
@@ -161,6 +168,9 @@ export type PreferencesState = {
   // Per-user singletons (one value, not a map).
   filterPresets: FilterPresetValue[]
   historyGroupBy: HistoryGroupByValue
+  // Null until the tabs have been reordered or hidden once (every
+  // device then shows the default order).
+  categoryLayout: CategoryLayoutValue | null
 }
 
 /** Helper: which server-side keys exist, and what TS type each holds. */
@@ -174,6 +184,7 @@ export const PREFERENCE_KEYS = {
   votedEntries: 'voted_entries',
   filterPresets: 'filter_presets',
   historyGroupBy: 'history_group_by',
+  categoryLayout: 'category_layout',
 } as const
 
 /** A key whose value is a set of story ids: changed with ``addIds`` /
@@ -263,6 +274,7 @@ function decodeState(rows: Rows, prev: Decoded | null): PreferencesState {
   single('votedEntries', PREFERENCE_KEYS.votedEntries, (v) => (v === undefined ? NO_VOTES : coerceVotes(v)))
   single('filterPresets', PREFERENCE_KEYS.filterPresets, (v) => (Array.isArray(v) ? (v as FilterPresetValue[]) : NO_PRESETS))
   single('historyGroupBy', PREFERENCE_KEYS.historyGroupBy, (v) => (v === 'none' ? 'none' : 'entry'))
+  single('categoryLayout', PREFERENCE_KEYS.categoryLayout, normalizeLayout)
   return same && prev ? prev.state : next
 }
 
@@ -441,6 +453,9 @@ export interface PreferencesContextValue {
   /** Set the History tab's group-by mode. */
   setHistoryGroupBy: (mode: HistoryGroupByValue) => void
 
+  /** Replace the tab order and hidden tabs (one PUT per change). */
+  setCategoryLayout: (layout: CategoryLayoutValue) => void
+
   /** Read the server's rows: by default only those changed since the
    *  last read (each poll), with ``full`` all of them, which is also how
    *  deleted rows arrive (the page coming back to the front). One read
@@ -587,6 +602,10 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     (mode: HistoryGroupByValue) => sync.put(PREFERENCE_KEYS.historyGroupBy, mode),
     [sync],
   )
+  const setCategoryLayout = useCallback(
+    (layout: CategoryLayoutValue) => sync.put(PREFERENCE_KEYS.categoryLayout, layout),
+    [sync],
+  )
 
   const value = useMemo<PreferencesContextValue>(
     () => ({
@@ -604,6 +623,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setColumnSections,
       setFilterPresets,
       setHistoryGroupBy,
+      setCategoryLayout,
       resync: sync.resync,
       flushPending: sync.flushPending,
       registerBeforeFlush: sync.registerBeforeFlush,
@@ -624,6 +644,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       setColumnSections,
       setFilterPresets,
       setHistoryGroupBy,
+      setCategoryLayout,
       sync,
     ],
   )

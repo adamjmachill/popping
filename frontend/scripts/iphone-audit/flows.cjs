@@ -538,6 +538,51 @@ async function prefWrites(page) {
 // The ids a recorded PATCH body adds to (or removes from) its key.
 const patched = (writes, key, op) => writes.filter((w) => w.method === 'PATCH' && w.key === key).flatMap((w) => w.body[op] || [])
 
+// --- PR7a: tab order and hiding -----------------------------------------------
+
+const TABS_EDITOR = '[role="dialog"][aria-label="edit tabs"]'
+const editPill = (page) => page.locator('button[data-edit-tabs]')
+const editorButton = (page, name) => page.locator(TABS_EDITOR).getByRole('button', { name, exact: true })
+const showSwitch = (page, label) => page.locator(TABS_EDITOR).getByRole('switch', { name: `Show ${label}`, exact: true })
+const focusedLabel = (page) => page.evaluate(() => (document.activeElement && document.activeElement.getAttribute('aria-label')) || '')
+const announced = async (page) => ((await page.locator(`${TABS_EDITOR} [aria-live="polite"]`).textContent()) || '').trim()
+// The strip's tab labels, without their counts.
+const stripLabels = async (page) => (await tabTexts(page)).map((t) => t.replace(/\d+$/, '').trim())
+// The Menu's Jump to column rows, in order (the Menu is open).
+const jumpLabels = async (page) =>
+  (await page.locator(MENU).locator('h3:text-matches("jump to column", "i")').locator('xpath=../..').getByRole('button').allTextContents()).map((t) => t.trim())
+// The desktop grid's column headings, in order.
+const gridLabels = async (page) => (await page.locator('main.grid section header h2').allTextContents()).map((t) => t.trim())
+const layoutWrites = (writes) => writes.filter((w) => w.key === 'category_layout')
+// The tab order a move stores, as every tab but Brief in the default
+// order: Saved, For You, then the fixture's categories with stories by
+// label (CATEGORY_40 has none until PR4d).
+const DEFAULT_ORDER = ['meta:saved', 'meta:foryou', 'cat:deals', 'cat:nhl', 'cat:news', 'cat:podcast', 'cat:security', 'cat:video']
+
+async function openTabsEditor(page) {
+  await tap(page, editPill(page))
+  await page.locator(TABS_EDITOR).waitFor({ state: 'visible' })
+}
+async function closeTabsEditor(page) {
+  await tap(page, editorButton(page, 'Done'))
+  await page.locator(TABS_EDITOR).waitFor({ state: 'detached' })
+}
+
+// Moves the podcast feed (11) into a new "Hockey" category from its
+// editor, then back to the dashboard: the new category's tab appears.
+async function newHockeyCategory(page, fail, id) {
+  page._patches11 = page._patches11 || []
+  await openEditor(page, 11)
+  await rowButton(page, 11, 'New category').click()
+  await page.fill('#fe-category-11', 'Hockey')
+  await rowButton(page, 11, 'Add').click()
+  if (!(await waitFor(() => page._patches11.length === 1))) return fail(id, 'no PATCH for the new category')
+  await waitFor(() => savedShown(page, 11), 3000)
+  await closeSettings(page)
+  if (!(await waitFor(async () => (await stripLabels(page)).includes('Hockey'), 3000))) return fail(id, `no Hockey tab after the move: ${JSON.stringify(await stripLabels(page))}`)
+  return true
+}
+
 module.exports = [
   flow('flow-fj-youtube-handle', {
     before: async ({ page }) => {
@@ -1121,16 +1166,16 @@ module.exports = [
 
   // --- PR1b: tabs by key ------------------------------------------------------
 
-  // Saving a story adds the Saved tab in front of News: the phone stays on
-  // News, stores it by key, and opens it again after a reload.
+  // Saving a story fills the Saved tab in front of News: the phone stays
+  // on News, stores it by key, and opens it again after a reload.
   dashFlow('flow-tab-stays-on-star', {
     run: async ({ page, fail, shot }) => {
       await tap(page, phoneTab(page, /^news/i))
       if (!/^news/i.test(await selectedTab(page))) return fail('TAB-STAR', 'could not select the News tab')
-      if ((await tabTexts(page)).some((t) => /^saved/i.test(t))) return fail('TAB-STAR', 'a Saved tab before anything was saved')
       const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
       await tap(page, card.locator('button[aria-label="save for later"]'))
-      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('TAB-STAR', 'no Saved tab after saving')
+      const saving = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
+      if (!(await waitFor(saving, 3000))) return fail('TAB-STAR', 'the save sent no PATCH')
       await sleep(300)
       const now = await selectedTab(page)
       if (!/^news/i.test(now)) fail('TAB-STAR', `saving moved the phone to ${JSON.stringify(now)}`)
@@ -1139,45 +1184,50 @@ module.exports = [
       await shot('saved')
       if ((await storedTab(page)) !== 'cat:news') fail('TAB-STAR', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
       // The save is in the store before the reload.
-      const sent = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
-      if (!(await waitFor(sent, 3000))) return fail('TAB-STAR', 'the save sent no PATCH')
-      await sleep(300)
+      if (!(await waitFor(() => (prefMock(page.context()).value('starred_entries') || []).length === 1, 3000))) return fail('TAB-STAR', 'the save never reached the store')
       await page.reload()
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
-      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('TAB-STAR', 'no Saved tab after the reload')
+      // The preferences read back: Saved holds the story.
+      if (!(await waitFor(() => page.evaluate(() => !!document.querySelector('[aria-label="remove from saved"]')), 3000))) return fail('TAB-STAR', 'the save was not read back after the reload')
       await sleep(300)
       const reloaded = await selectedTab(page)
       if (!/^news/i.test(reloaded)) fail('TAB-STAR', `the reload opened ${JSON.stringify(reloaded)}`)
     },
   }),
 
-  // Unsaving the only saved story takes the Saved tab away: the phone
-  // moves to the tab now in its place (For You), that becomes its tab,
-  // and a save from there brings Saved back without moving the phone.
+  // Unsaving the only saved story empties Saved, which stays (PR7a): the
+  // phone stays on it, it says "No stories yet", and a save from For You
+  // fills it again without moving the phone.
   dashFlow('flow-unsave-last-saved', {
     before: async ({ context }) => {
       prefMock(context).seed({ starred_entries: [103] })
     },
     run: async ({ page, fail, shot }) => {
-      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
-      if (!(await waitFor(hasSaved, 3000))) return fail('UNSAVE', 'no Saved tab for the saved story')
+      const savedTab = phoneTab(page, /^saved/i)
+      if (!(await waitFor(() => answered(page, 'GET', '/api/preferences'), 3000))) return fail('UNSAVE', 'the preferences were not read')
       // A new phone opens on For You, even with Saved in front of it.
       const first = await selectedTab(page)
       if (!/^for you/i.test(first)) fail('UNSAVE', `a new phone opened on ${JSON.stringify(first)}`)
-      await tap(page, phoneTab(page, /^saved/i))
+      await tap(page, savedTab)
       const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
       if ((await cards.count()) !== 1) return fail('UNSAVE', `Saved shows ${await cards.count()} stories, expected 1`)
       await tap(page, cards.first().locator('button[aria-label="remove from saved"]'))
-      if (!(await waitFor(async () => !(await hasSaved()), 3000))) return fail('UNSAVE', 'the Saved tab stayed after unsaving its only story')
+      if (!(await waitFor(async () => (await cards.count()) === 0, 3000))) return fail('UNSAVE', 'Saved still shows the story after unsaving it')
       await sleep(300)
-      const moved = await selectedTab(page)
-      if (!/^for you/i.test(moved)) return fail('UNSAVE', `after unsaving, the phone shows ${JSON.stringify(moved)}, expected For You`)
-      if ((await storedTab(page)) !== 'meta:foryou') fail('UNSAVE', `the stored tab is ${JSON.stringify(await storedTab(page))} after Saved went`)
+      if (!(await savedTab.count())) return fail('UNSAVE', 'the Saved tab went with its last story')
+      const stayed = await selectedTab(page)
+      if (!/^saved/i.test(stayed)) return fail('UNSAVE', `after unsaving, the phone shows ${JSON.stringify(stayed)}, expected Saved`)
+      if ((await storedTab(page)) !== 'meta:saved') fail('UNSAVE', `the stored tab is ${JSON.stringify(await storedTab(page))} after unsaving`)
+      if (!(await page.locator(MOBILE_MAIN).getByText('No stories yet', { exact: true }).isVisible())) fail('UNSAVE', 'the empty Saved tab does not say "No stories yet"')
+      // Feeds of your own: no first-feed button.
+      if (await page.locator(`${MOBILE_MAIN} [data-first-feed]`).count()) fail('UNSAVE', 'an empty Saved offers "Add your first feed" although there are feeds')
+      await shot('empty')
+      await tap(page, phoneTab(page, /^for you/i))
       await tap(page, cards.first().locator('button[aria-label="save for later"]'))
-      if (!(await waitFor(hasSaved, 3000))) return fail('UNSAVE', 'no Saved tab after saving from For You')
       await sleep(300)
       const now = await selectedTab(page)
       if (!/^for you/i.test(now)) fail('UNSAVE', `saving from For You moved the phone to ${JSON.stringify(now)}`)
+      if ((await storedTab(page)) !== 'meta:foryou') fail('UNSAVE', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
       await shot('end')
     },
   }),
@@ -1266,9 +1316,9 @@ module.exports = [
     },
   }),
 
-  // A For You request that fails takes the tab away for one refresh: the
-  // phone shows its neighbour but keeps For You as its tab, and goes back to
-  // it when For You loads again.
+  // A For You request that fails empties the tab for one refresh, but it
+  // stays (PR7a): the phone stays on For You, keeps it as its tab, and
+  // shows its stories again when For You loads.
   dashFlow('flow-foryou-fails-keeps-tab', {
     expectedFailedLoads: ['/api/foryou'],
     run: async ({ page, fail }) => {
@@ -1279,24 +1329,26 @@ module.exports = [
         (u) => new URL(u).pathname === '/api/foryou',
         (route) => (failing ? route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' }) : route.fallback()),
       )
-      const hasForYou = async () => (await tabTexts(page)).some((t) => /^for you/i.test(t))
+      const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
       await startPoll(page)
-      if (!(await waitFor(async () => !(await hasForYou()), 3000))) return fail('FY-FAIL', 'For You stayed after its request failed')
+      if (!(await waitFor(async () => (await cards.count()) === 0, 3000))) return fail('FY-FAIL', 'For You kept its stories after its request failed')
       await sleep(300)
+      if (!(await tabTexts(page)).some((t) => /^for you/i.test(t))) fail('FY-FAIL', 'the For You tab went while its request fails')
+      if (!/^for you/i.test(await selectedTab(page))) fail('FY-FAIL', `while For You fails the phone shows ${JSON.stringify(await selectedTab(page))}`)
       if ((await storedTab(page)) !== 'meta:foryou') fail('FY-FAIL', `a failed For You request stored ${JSON.stringify(await storedTab(page))}`)
       failing = false
       await startPoll(page)
-      if (!(await waitFor(hasForYou, 3000))) return fail('FY-FAIL', 'For You did not come back')
+      if (!(await waitFor(async () => (await cards.count()) > 0, 3000))) return fail('FY-FAIL', 'For You did not show its stories again')
       await sleep(300)
       const now = await selectedTab(page)
       if (!/^for you/i.test(now)) fail('FY-FAIL', `when For You came back the phone stayed on ${JSON.stringify(now)}`)
     },
   }),
 
-  // While For You stays down, only what hangs on it waits: a new phone
-  // shows its first tab without storing it, but a tab the phone stored
-  // still gives way to its neighbour when it goes, so Saved coming back
-  // can't pull the phone to it.
+  // While For You stays down (an empty tab, PR7a), only what hangs on it
+  // waits: a new phone shows its first tab with stories without storing
+  // it, but a tap stores a tab at once, and unsaving Saved's last story
+  // leaves the phone on Saved.
   dashFlow('flow-foryou-down-settles', {
     expectedFailedLoads: ['/api/foryou'],
     before: async ({ page, context }) => {
@@ -1307,35 +1359,29 @@ module.exports = [
       prefMock(context).seed({ starred_entries: [103] })
     },
     run: async ({ page, fail, shot }) => {
-      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
-      if (!(await waitFor(hasSaved, 3000))) return fail('FY-DOWN', 'no Saved tab for the saved story')
-      if ((await tabTexts(page)).some((t) => /^for you/i.test(t))) return fail('FY-DOWN', 'a For You tab although its request fails')
+      const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
+      if (!(await waitFor(() => page.evaluate(() => !!document.querySelector('[aria-label="remove from saved"]')), 3000))) return fail('FY-DOWN', 'the saved story was not read')
+      if (!(await tabTexts(page)).some((t) => /^for you/i.test(t))) return fail('FY-DOWN', 'no For You tab while its request fails')
       await sleep(500)
       const first = await selectedTab(page)
       if (!/^saved/i.test(first)) fail('FY-DOWN', `with For You down a new phone opened on ${JSON.stringify(first)}, expected Saved`)
       if ((await storedTab(page)) !== null) fail('FY-DOWN', `a new phone stored ${JSON.stringify(await storedTab(page))} while For You is down`)
       await tap(page, phoneTab(page, /^saved/i))
       if ((await storedTab(page)) !== 'meta:saved') return fail('FY-DOWN', `a tap on Saved stored ${JSON.stringify(await storedTab(page))}`)
-      const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
       await tap(page, cards.first().locator('button[aria-label="remove from saved"]'))
-      if (!(await waitFor(async () => !(await hasSaved()), 3000))) return fail('FY-DOWN', 'the Saved tab stayed after unsaving its only story')
-      await sleep(300)
-      const moved = await selectedTab(page)
-      const stored = await storedTab(page)
-      if (stored === 'meta:saved') return fail('FY-DOWN', `Saved went but stays the stored tab; the phone shows ${JSON.stringify(moved)}`)
-      if (!stored || !stored.startsWith('cat:')) fail('FY-DOWN', `after Saved went the stored tab is ${JSON.stringify(stored)}`)
-      await shot('moved')
-      await tap(page, cards.first().locator('button[aria-label="save for later"]'))
-      if (!(await waitFor(hasSaved, 3000))) return fail('FY-DOWN', 'no Saved tab after saving again')
+      if (!(await waitFor(async () => (await cards.count()) === 0, 3000))) return fail('FY-DOWN', 'Saved still shows the story after unsaving it')
       await sleep(300)
       const now = await selectedTab(page)
-      if (now !== moved) fail('FY-DOWN', `saving moved the phone from ${JSON.stringify(moved)} to ${JSON.stringify(now)}`)
+      if (!/^saved/i.test(now)) fail('FY-DOWN', `unsaving moved the phone to ${JSON.stringify(now)}`)
+      if ((await storedTab(page)) !== 'meta:saved') fail('FY-DOWN', `after unsaving the stored tab is ${JSON.stringify(await storedTab(page))}`)
+      await shot('empty')
     },
   }),
 
   // While For You stays down, a phone with nothing stored (or only the old
-  // index) shows a tab without storing it. Saving a story there adds Saved
-  // in front of it; the phone stays on that tab and still stores nothing.
+  // index) shows a tab without storing it. Saving a story there fills
+  // Saved in front of it; the phone stays on that tab and still stores
+  // nothing.
   ...[
     ['flow-foryou-down-holds-fresh', null],
     ['flow-foryou-down-holds-index', '1'],
@@ -1350,16 +1396,14 @@ module.exports = [
         )
       },
       run: async ({ page, fail }) => {
-        const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
-        if ((await tabTexts(page)).some((t) => /^for you/i.test(t))) return fail('FY-HOLD', 'a For You tab although its request fails')
-        if (await hasSaved()) return fail('FY-HOLD', 'a Saved tab before anything was saved')
+        if (!(await tabTexts(page)).some((t) => /^for you/i.test(t))) return fail('FY-HOLD', 'no For You tab while its request fails')
         await sleep(500)
         const before = await selectedTab(page)
-        if (/^brief/i.test(before)) return fail('FY-HOLD', 'the phone opened on Brief')
+        if (/^(brief|saved|for you)/i.test(before)) return fail('FY-HOLD', `the phone opened on ${JSON.stringify(before)}, an empty tab`)
         if ((await storedTab(page)) !== null) fail('FY-HOLD', `stored ${JSON.stringify(await storedTab(page))} while For You is down`)
         const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
         await tap(page, card.locator('button[aria-label="save for later"]'))
-        if (!(await waitFor(hasSaved, 3000))) return fail('FY-HOLD', 'no Saved tab after saving')
+        if (!(await waitFor(() => (prefMock(page.context()).value('starred_entries') || []).length === 1, 3000))) return fail('FY-HOLD', 'the save never reached the store')
         await sleep(300)
         const now = await selectedTab(page)
         if (now !== before) fail('FY-HOLD', `saving moved the phone from ${JSON.stringify(before)} to ${JSON.stringify(now)}`)
@@ -1373,9 +1417,12 @@ module.exports = [
   ),
 
   // A failed GET /api/preferences leaves Saved unread, not gone: a phone
-  // that stored Saved keeps it stored, and shows another tab meanwhile.
+  // that stored Saved keeps it stored, and (from PR7a, where Saved is
+  // always a tab) shows it, empty, until the preferences load.
   dashFlow('flow-prefs-fail-keeps-saved', {
     expectedFailedLoads: ['/api/preferences'],
+    // Saved is empty while its preferences are unread: no card to wait for.
+    wait: `${STRIP} [aria-selected="true"]`,
     before: async ({ page }) => {
       await page.addInitScript(() => localStorage.setItem('popping.v1.mobileTab', 'meta:saved'))
       await page.route(
@@ -1387,10 +1434,9 @@ module.exports = [
       )
     },
     run: async ({ page, fail }) => {
-      if ((await tabTexts(page)).some((t) => /^saved/i.test(t))) return fail('PREFS-FAIL', 'a Saved tab although the preferences failed')
       await sleep(1000)
       const now = await selectedTab(page)
-      if (!now || /^brief/i.test(now)) fail('PREFS-FAIL', `the phone shows ${JSON.stringify(now)}`)
+      if (!/^saved/i.test(now)) fail('PREFS-FAIL', `the phone shows ${JSON.stringify(now)}, expected Saved`)
       if ((await storedTab(page)) !== 'meta:saved') fail('PREFS-FAIL', `a failed preferences load stored ${JSON.stringify(await storedTab(page))}`)
       // A later poll doesn't settle it either.
       await startPoll(page)
@@ -1682,7 +1728,10 @@ module.exports = [
       await sleep(800)
       if (bookmarksFor(page, id) !== 1) fail('BOOKMARK', `the menu's Unsave sent a bookmark (${bookmarksFor(page, id)} in all)`)
 
-      // Keyboard: select a card, then b (save) and b (unsave).
+      // Keyboard: select a card, then b (save) and b (unsave). The arrow
+      // keys walk the grid's columns, and the first is Saved, empty again
+      // (PR7a keeps it): step to the next column first.
+      await page.keyboard.press('ArrowRight')
       await page.keyboard.press('ArrowDown')
       const sel = 'article[data-card-id][tabindex="0"]'
       if (!(await waitFor(async () => (await page.locator(sel).count()) > 0, 3000))) return fail('BOOKMARK', 'ArrowDown selected no card')
@@ -1966,8 +2015,8 @@ module.exports = [
     },
     run: async ({ page, context, fail, shot }) => {
       const writes = await prefWrites(page)
-      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
-      if (await hasSaved()) return fail('PREFS-FAIL-SAVE', 'a Saved tab although the preferences failed')
+      // Unread: no story shows as saved.
+      if (await page.locator('[aria-label="remove from saved"]').count()) return fail('PREFS-FAIL-SAVE', 'a story shows as saved although the preferences failed')
       const card = page.locator(`${MOBILE_MAIN} article[data-card-id]:not([data-card-id="103"])`).first()
       const id = Number(await card.getAttribute('data-card-id'))
       await tap(page, card.locator('button[aria-label="save for later"]'))
@@ -1979,7 +2028,6 @@ module.exports = [
       // The server is back: the next return reads every save in.
       page._prefsDown = false
       await startPoll(page)
-      if (!(await waitFor(hasSaved, 3000))) return fail('PREFS-FAIL-SAVE', 'no Saved tab once the preferences loaded')
       await tap(page, phoneTab(page, /^saved/i))
       for (const want of [103, id]) {
         if (!(await waitFor(() => page.locator(`${MOBILE_MAIN} article[data-card-id="${want}"]`).count().then((n) => n > 0), 3000))) fail('PREFS-FAIL-SAVE', `story ${want} is not in Saved`)
@@ -2895,6 +2943,262 @@ module.exports = [
       // reload is still being fetched would throw in smoke's CSP route.
       await page.locator('main.grid article[data-card-id]').first().waitFor({ state: 'visible', timeout: 20000 })
       if (await button.count()) fail('RELOAD-DESKTOP', 'the Reload button is still there after the reload')
+    },
+  }),
+  // --- PR7a: tab order and hiding ---------------------------------------------
+
+  // Edit, ↑, Done moves a tab one place in 3 taps and one PUT; Edit, Move
+  // to top, Done takes the last tab to second place (after Brief). Focus
+  // stays on the pressed arrow, or goes to the opposite one when the
+  // pressed one is now disabled, and the live line says where the tab is.
+  dashFlow('flow-tabs-reorder', {
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      const before = await stripLabels(page)
+      const at = before.indexOf('News')
+      if (at < 2) return fail('TABS-REORDER', `unexpected strip ${JSON.stringify(before)}`)
+      await openTabsEditor(page)
+      if ((await announced(page)) !== '') fail('TABS-REORDER', `the live line reads ${JSON.stringify(await announced(page))} before any move`)
+      await tap(page, editorButton(page, 'Move News up'))
+      await sleep(200)
+      if ((await focusedLabel(page)) !== 'Move News up') fail('TABS-REORDER', `after ↑ focus is on ${JSON.stringify(await focusedLabel(page))}`)
+      const live = `News, ${at} of ${before.length}`
+      if ((await announced(page)) !== live) fail('TABS-REORDER', `the live line reads ${JSON.stringify(await announced(page))}, expected ${JSON.stringify(live)}`)
+      await shot('editor')
+      await closeTabsEditor(page)
+      taps(page, 3, 'TABS-REORDER')
+      const want = [...before]
+      want.splice(at - 1, 0, ...want.splice(at, 1))
+      const after = await stripLabels(page)
+      if (JSON.stringify(after) !== JSON.stringify(want)) fail('TABS-REORDER', `the strip reads ${JSON.stringify(after)}, expected ${JSON.stringify(want)}`)
+      if (!(await waitFor(() => layoutWrites(writes).length >= 1, 3000))) return fail('TABS-REORDER', 'the move sent no category_layout write')
+      await sleep(500)
+      const sent = layoutWrites(writes).map((w) => w.method)
+      if (sent.join() !== 'PUT') fail('TABS-REORDER', `the move sent ${JSON.stringify(sent)}, expected one PUT`)
+      // A move stores the whole order (every tab but Brief).
+      const order = (prefMock(page.context()).value('category_layout') || {}).order || []
+      const keyOf = (l) => (l === 'Saved' ? 'meta:saved' : l === 'For You' ? 'meta:foryou' : `cat:${l.toLowerCase()}`)
+      if (JSON.stringify(order) !== JSON.stringify(want.slice(1).map(keyOf))) fail('TABS-REORDER', `the stored order is ${JSON.stringify(order)}, the strip ${JSON.stringify(want)}`)
+      if ((await focusedLabel(page)) !== 'Edit tabs') fail('TABS-REORDER', `after Done focus is on ${JSON.stringify(await focusedLabel(page))}, expected the Edit pill`)
+
+      // The last tab to second place.
+      page._taps = 0
+      const last = after[after.length - 1]
+      await openTabsEditor(page)
+      await tap(page, editorButton(page, `Move ${last} to top`))
+      await sleep(200)
+      if ((await focusedLabel(page)) !== `Move ${last} down`) fail('TABS-REORDER', `after Move to top focus is on ${JSON.stringify(await focusedLabel(page))}, expected Move ${last} down`)
+      const top = `${last}, 2 of ${after.length}`
+      if ((await announced(page)) !== top) fail('TABS-REORDER', `the live line reads ${JSON.stringify(await announced(page))}, expected ${JSON.stringify(top)}`)
+      if (!(await editorButton(page, `Move ${last} up`).isDisabled())) fail('TABS-REORDER', `Move ${last} up is enabled at the top`)
+      await closeTabsEditor(page)
+      taps(page, 3, 'TABS-REORDER-TOP')
+      const moved = await stripLabels(page)
+      if (moved[0] !== 'Brief' || moved[1] !== last) fail('TABS-REORDER', `after Move to top the strip reads ${JSON.stringify(moved)}`)
+      await sleep(500)
+      if (layoutWrites(writes).length !== 2) fail('TABS-REORDER', `${layoutWrites(writes).length} category_layout writes for two moves`)
+      await shot('end')
+    },
+  }),
+
+  // The desktop grid and the Jump list follow the same order. The tab
+  // editor opens from the Menu there (no strip), and focus goes back to ≡.
+  dashFlow('flow-tabs-reorder-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    run: async ({ page, fail, shot }) => {
+      const before = await gridLabels(page)
+      if (before[0] !== 'Saved' || before.includes('For You')) fail('TABS-DESK', `the grid reads ${JSON.stringify(before)}`)
+      await openMenu(page)
+      await page.locator(MENU).getByRole('button', { name: 'Edit tabs' }).click()
+      await page.locator(TABS_EDITOR).waitFor({ state: 'visible' })
+      await page.locator(TABS_EDITOR).getByRole('button', { name: 'Move News to top', exact: true }).click()
+      await page.locator(TABS_EDITOR).getByRole('button', { name: 'Done', exact: true }).click()
+      await page.locator(TABS_EDITOR).waitFor({ state: 'detached' })
+      await sleep(300)
+      if ((await focusedLabel(page)) !== 'open menu') fail('TABS-DESK', `after Done focus is on ${JSON.stringify(await focusedLabel(page))}, expected ≡`)
+      const grid = await gridLabels(page)
+      const want = ['News', ...before.filter((l) => l !== 'News')]
+      if (JSON.stringify(grid) !== JSON.stringify(want)) fail('TABS-DESK', `the grid reads ${JSON.stringify(grid)}, expected ${JSON.stringify(want)}`)
+      await openMenu(page)
+      const jump = await jumpLabels(page)
+      const wantJump = ['News', 'Saved', 'For You', ...before.filter((l) => l !== 'News' && l !== 'Saved')]
+      if (JSON.stringify(jump) !== JSON.stringify(wantJump)) fail('TABS-DESK', `Jump to column reads ${JSON.stringify(jump)}, expected ${JSON.stringify(wantJump)}`)
+      await shot('end')
+    },
+  }),
+
+  // Show off hides a tab from the strip and Jump to column, keeps its
+  // stories in For You, and keeps its place: Show on brings it back there.
+  dashFlow('flow-tab-hide', {
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      const before = await stripLabels(page)
+      await openTabsEditor(page)
+      const sw = showSwitch(page, 'News')
+      if ((await sw.getAttribute('aria-checked')) !== 'true') return fail('TAB-HIDE', 'News starts hidden')
+      await tap(page, sw)
+      if ((await sw.getAttribute('aria-checked')) !== 'false') fail('TAB-HIDE', 'the switch did not turn off')
+      await closeTabsEditor(page)
+      taps(page, 3, 'TAB-HIDE')
+      const after = await stripLabels(page)
+      if (JSON.stringify(after) !== JSON.stringify(before.filter((l) => l !== 'News'))) fail('TAB-HIDE', `the strip reads ${JSON.stringify(after)}`)
+      if (!(await waitFor(() => layoutWrites(writes).length === 1, 3000))) return fail('TAB-HIDE', 'hiding sent no category_layout write')
+      const stored = prefMock(page.context()).value('category_layout') || {}
+      if (JSON.stringify(stored.hidden) !== '["cat:news"]') fail('TAB-HIDE', `the stored hidden list is ${JSON.stringify(stored.hidden)}`)
+      // Hiding orders nothing: with no move, the order stays the default.
+      if ((stored.order || []).length) fail('TAB-HIDE', `hiding stored an order: ${JSON.stringify(stored.order)}`)
+      // Its stories stay in For You (101 is a News story).
+      await tap(page, phoneTab(page, /^for you/i))
+      if (!(await page.locator(`${MOBILE_MAIN} article[data-card-id="101"]`).count())) fail('TAB-HIDE', 'a News story left For You with its tab')
+      await openMenu(page)
+      const jump = await jumpLabels(page)
+      if (jump.includes('News')) fail('TAB-HIDE', `Jump to column still offers News: ${JSON.stringify(jump)}`)
+      if (JSON.stringify(jump) !== JSON.stringify(after.slice(1))) fail('TAB-HIDE', `Jump to column reads ${JSON.stringify(jump)}, the strip ${JSON.stringify(after)}`)
+      await page.locator('button[aria-label="close menu"]').click()
+      await sleep(500)
+      await shot('hidden')
+      // Shown again, in its old place.
+      await openTabsEditor(page)
+      await tap(page, showSwitch(page, 'News'))
+      await closeTabsEditor(page)
+      const back = await stripLabels(page)
+      if (JSON.stringify(back) !== JSON.stringify(before)) fail('TAB-HIDE', `shown again, the strip reads ${JSON.stringify(back)}, expected ${JSON.stringify(before)}`)
+    },
+  }),
+
+  // The arrow keys (desktop) never stop on a hidden tab, and the grid
+  // leaves it out.
+  dashFlow('flow-tab-hide-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ context }) => {
+      prefMock(context).seed({ category_layout: { v: 1, order: [], hidden: ['cat:news'] } })
+    },
+    run: async ({ page, fail }) => {
+      const grid = await gridLabels(page)
+      if (grid.includes('News')) return fail('TAB-HIDE-DESK', `the grid still shows News: ${JSON.stringify(grid)}`)
+      // One ArrowRight per grid column, each followed by ArrowDown: the
+      // selected card's column, null where nothing is selected (Saved is
+      // first and empty). For You, the row above the grid, is no stop.
+      const visited = []
+      for (let i = 0; i < grid.length + 1; i++) {
+        if (i > 0) await page.keyboard.press('ArrowRight')
+        await page.keyboard.press('ArrowDown')
+        await sleep(150)
+        visited.push(
+          await page.evaluate(() => {
+            const card = document.querySelector('main.grid article[data-card-id][tabindex="0"]')
+            const h = card && card.closest('section') && card.closest('section').querySelector('header h2')
+            return h ? h.textContent.trim() : null
+          }),
+        )
+      }
+      if (visited.includes('News')) fail('TAB-HIDE-DESK', `the arrow keys reached the hidden News: ${JSON.stringify(visited)}`)
+      // The last press stays on the last column.
+      const want = [null, ...grid.slice(1), grid[grid.length - 1]]
+      if (grid[0] !== 'Saved') fail('TAB-HIDE-DESK', `the grid starts with ${JSON.stringify(grid[0])}`)
+      if (JSON.stringify(visited) !== JSON.stringify(want)) fail('TAB-HIDE-DESK', `the arrow keys visited ${JSON.stringify(visited)}, expected ${JSON.stringify(want)}`)
+    },
+  }),
+
+  // With a stored order, a new category goes at the end of the strip and
+  // of Jump to column; the feed editor's category picker lists categories
+  // in that order.
+  dashFlow('flow-new-category-at-end', {
+    before: async ({ page, context }) => {
+      page._patches11 = await record(page, 'PATCH', '/api/sources/11')
+      prefMock(context).seed({ category_layout: { v: 1, order: ['cat:video', ...DEFAULT_ORDER.filter((k) => k !== 'cat:video')], hidden: [] } })
+    },
+    run: async ({ page, fail }) => {
+      const before = await stripLabels(page)
+      if (before[1] !== 'Video') return fail('NEWCAT-END', `the stored order was not applied: ${JSON.stringify(before)}`)
+      await openEditor(page, 11)
+      const picked = await page.locator('#fe-category-11 optgroup[label="Your categories"] option').evaluateAll((els) => els.map((o) => o.value))
+      if (picked[0] !== 'video' || picked.indexOf('deals') > picked.indexOf('news')) fail('NEWCAT-END', `the category picker lists ${JSON.stringify(picked)}, not in tab order`)
+      await closeSettings(page)
+      if ((await newHockeyCategory(page, fail, 'NEWCAT-END')) !== true) return
+      const after = await stripLabels(page)
+      if (after[after.length - 1] !== 'Hockey') fail('NEWCAT-END', `the new category is not last: ${JSON.stringify(after)}`)
+      await openMenu(page)
+      const jump = await jumpLabels(page)
+      if (jump[jump.length - 1] !== 'Hockey') fail('NEWCAT-END', `Jump to column ends with ${JSON.stringify(jump[jump.length - 1])}`)
+    },
+  }),
+
+  // With no stored order, a new category lands in label order, as it
+  // always did.
+  dashFlow('flow-new-category-alpha', {
+    before: async ({ page }) => {
+      page._patches11 = await record(page, 'PATCH', '/api/sources/11')
+    },
+    run: async ({ page, fail }) => {
+      if ((await newHockeyCategory(page, fail, 'NEWCAT-ALPHA')) !== true) return
+      const after = await stripLabels(page)
+      if (after.indexOf('Hockey') !== after.indexOf('Deals') + 1) fail('NEWCAT-ALPHA', `the new category is out of label order: ${JSON.stringify(after)}`)
+    },
+  }),
+
+  // Saved and For You are always tabs, right after Brief: empty, Saved
+  // says "No stories yet" (no first-feed button: there are feeds).
+  dashFlow('flow-saved-always', {
+    run: async ({ page, fail, shot }) => {
+      const tabs = await stripLabels(page)
+      if (tabs[0] !== 'Brief' || tabs[1] !== 'Saved' || tabs[2] !== 'For You') return fail('SAVED-ALWAYS', `the strip reads ${JSON.stringify(tabs)}`)
+      await tap(page, phoneTab(page, /^saved/i))
+      if (await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()) return fail('SAVED-ALWAYS', 'Saved shows stories before anything was saved')
+      if (!(await page.locator(MOBILE_MAIN).getByText('No stories yet', { exact: true }).isVisible())) fail('SAVED-ALWAYS', 'the empty Saved does not say "No stories yet"')
+      if (await page.locator(`${MOBILE_MAIN} [data-first-feed]`).count()) fail('SAVED-ALWAYS', 'an empty Saved offers "Add your first feed" although there are feeds')
+      if ((await storedTab(page)) !== 'meta:saved') fail('SAVED-ALWAYS', `a tap on the empty Saved stored ${JSON.stringify(await storedTab(page))}`)
+      await shot('empty')
+    },
+  }),
+
+  // A new device opens on For You whatever the stored order puts first.
+  dashFlow('flow-fresh-device-opens-foryou', {
+    before: async ({ context }) => {
+      prefMock(context).seed({
+        starred_entries: [103],
+        category_layout: { v: 1, order: ['cat:news', 'meta:saved', 'meta:foryou'], hidden: [] },
+      })
+    },
+    run: async ({ page, fail }) => {
+      if (!(await waitFor(async () => (await stripLabels(page))[1] === 'News', 3000))) return fail('FRESH-FY', `the stored order was not applied: ${JSON.stringify(await stripLabels(page))}`)
+      if (!(await waitFor(async () => (await storedTab(page)) !== null, 3000))) return fail('FRESH-FY', 'a new device stored no tab')
+      const now = await selectedTab(page)
+      if (!/^for you/i.test(now)) fail('FRESH-FY', `a new device opened on ${JSON.stringify(now)}`)
+      if ((await storedTab(page)) !== 'meta:foryou') fail('FRESH-FY', `a new device stored ${JSON.stringify(await storedTab(page))}`)
+    },
+  }),
+
+  // Only built-in feeds and no stories: For You (where a new device
+  // opens) says "No stories yet" with "Add your first feed", which opens
+  // Settings → Feeds.
+  dashFlow('flow-first-feed-empty-meta', {
+    wait: `${STRIP} [aria-selected="true"]`,
+    before: async ({ page }) => {
+      const builtIns = ['bbc_news', 'hn_top', 'nvd_recent', 'cisa_kev', 'rfd_hot_deals']
+      const json = (body) => ({ status: 200, contentType: 'application/json', body: JSON.stringify(body) })
+      await page.route(
+        (u) => new URL(u).pathname === '/api/sources',
+        (route) => (route.request().method() === 'GET' ? route.fulfill(json(F.SOURCES.filter((src) => builtIns.includes(src.name)))) : route.fallback()),
+      )
+      await page.route((u) => /^\/api\/(entries|foryou)(\/|$)/.test(new URL(u).pathname), (route) => route.fulfill(json([])))
+    },
+    run: async ({ page, fail, shot }) => {
+      const button = page.locator(`${MOBILE_MAIN} [data-first-feed]`)
+      if (!(await waitFor(() => button.isVisible(), 3000))) return fail('FIRST-FEED', 'no "Add your first feed" button')
+      const now = await selectedTab(page)
+      if (!/^for you/i.test(now)) fail('FIRST-FEED', `a new device opened on ${JSON.stringify(now)}`)
+      if (!(await page.locator(MOBILE_MAIN).getByText('No stories yet', { exact: true }).isVisible())) fail('FIRST-FEED', 'For You does not say "No stories yet"')
+      const box = await button.boundingBox()
+      if (!box || box.height < 43.5) fail('FIRST-FEED', `the button is ${box ? box.height : 0}px tall`)
+      await shot('empty')
+      await tap(page, button)
+      await page.locator(SETTINGS).waitFor({ state: 'visible' })
+      const tab = await page.evaluate(() => new URLSearchParams(location.search).get('tab'))
+      if (tab !== 'feeds') fail('FIRST-FEED', `the button opened Settings on ${JSON.stringify(tab)}`)
+      taps(page, 1, 'FIRST-FEED')
     },
   }),
 ]

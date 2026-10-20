@@ -77,12 +77,13 @@ def test_empty_state_branches_on_source_lookup():
       - source found + last_error: show error
       - source found + error_count >= threshold: show auto-disabled
       - source found + last_fetch_at: show "last fetched Xh ago"
-      - source not found (meta column): show original generic message
+      - source not found (meta column): show "No stories yet"
     """
     src = _read_column()
-    # The original message must still exist (preserved for meta columns).
-    assert "no entries in this column yet" in src, (
-        "original generic message should be preserved for meta columns"
+    # The meta columns' message (PR7a: an empty Saved or For You says
+    # "No stories yet", with the first-feed button on a fresh install).
+    assert "No stories yet" in src, (
+        "the meta-column empty message should be present"
     )
     # Source-aware messages should be present.
     assert "last_error" in src, "empty-state should reference last_error"

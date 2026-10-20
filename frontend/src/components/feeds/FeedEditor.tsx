@@ -11,6 +11,7 @@ import { CategoryPicker } from './CategoryPicker'
 import { HeadersEditor } from './HeadersEditor'
 import { FieldError, SaveStatus } from './SaveStatus'
 import { useSaveState } from '../../lib/useSaveState'
+import { usePreferences } from '../../lib/preferences'
 import { REFRESH_PRESETS, isBuiltIn, normalizeFeedInput, refreshLabel } from '../../lib/feedRules'
 import { BROWSER_USER_AGENT, type HeaderMap } from '../../lib/headers'
 import { errorMessage, fieldSaveMessage, lastErrorMessage } from '../../lib/apiErrors'
@@ -221,6 +222,8 @@ export function FeedEditor({
   const id = source.id
   const builtIn = isBuiltIn(source)
   const type = source.type
+  // The category picker lists categories in tab order.
+  const tabOrder = usePreferences().state.categoryLayout?.order
   const takesHeaders = !builtIn && HEADER_TYPES.includes(type)
   const label = source.display_name || slugLabel(source.name)
 
@@ -399,6 +402,7 @@ export function FeedEditor({
           value={pending(categoryState, source.category)}
           sources={sources}
           onChange={(v) => commitField(id, 'category', v, 'category')}
+          order={tabOrder}
         />
         {categoryState.status === 'error' && categoryState.message && (
           <FieldError

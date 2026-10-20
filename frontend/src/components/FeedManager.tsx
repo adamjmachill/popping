@@ -50,6 +50,7 @@ import { CATEGORY_OPTIONS, resolveNewCategory } from '../lib/categories'
 import { type HeaderMap } from '../lib/headers'
 import { fieldSaveMessage, friendlyTestError, parseApiError } from '../lib/apiErrors'
 import { toast } from './Toast'
+import { usePreferences } from '../lib/preferences'
 
 type Props = {
   sources: Source[]
@@ -766,6 +767,8 @@ function AddCustomTab({
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [category, setCategory] = useState('news')
+  // The category picker lists categories in tab order.
+  const tabOrder = usePreferences().state.categoryLayout?.order
   const [refresh, setRefresh] = useState<number>(3600)
   // Subtype selector — drives the address label, the validation and
   // the request. ``"rss"`` (default) takes a feed URL; ``"reddit"`` a
@@ -1223,6 +1226,7 @@ function AddCustomTab({
           onChange={setCategory}
           defaultInSuggestions
           onDraftChange={setCategoryDraft}
+          order={tabOrder}
         />
       </div>
       <div>

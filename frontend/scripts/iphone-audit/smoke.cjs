@@ -73,7 +73,7 @@ const MUTATING_RULES = ['C2b', 'C6']
 // C7 scopes: controls inside these are measured (the phone's cards from PR7).
 const C7_SCOPES = ['[role="dialog"]', 'aside[aria-label="menu"]', 'header', '[role="tablist"]', 'main.md\\:hidden article']
 // C12 scopes: the phone's content surfaces.
-const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]', 'aside[aria-label="menu"]']
+const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]', 'aside[aria-label="menu"]', '[role="dialog"][aria-label="edit tabs"]']
 
 // ---------------------------------------------------------------------------
 // States. Each PR adds its own. Fields:
@@ -189,6 +189,36 @@ const STATES = [
       // hidden desktop grid of every column.
       const columns = await page.locator('main section').count()
       if (columns !== 1) fail('PHONE', `${columns} Column sections under <main>, expected 1 (the phone's)`)
+      // PR7a: the Edit pill is pinned at the strip's trailing edge, outside
+      // the tablist, in full view at every width (312 included).
+      const pill = await page.evaluate(() => {
+        const b = document.querySelector('button[data-edit-tabs]')
+        if (!b) return null
+        const r = b.getBoundingClientRect()
+        const at = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
+        return { left: r.left, right: r.right, height: r.height, inTablist: !!b.closest('[role="tablist"]'), onTop: !!at && b.contains(at) }
+      })
+      if (!pill) fail('EDIT-PILL', 'no Edit pill')
+      else {
+        if (pill.inTablist) fail('EDIT-PILL', 'the Edit pill is inside the tablist')
+        if (pill.left < 0 || pill.right > (await page.evaluate(() => innerWidth))) fail('EDIT-PILL', `the Edit pill is off screen (${pill.left}-${pill.right})`)
+        if (pill.height < 43.5) fail('EDIT-PILL', `the Edit pill is ${pill.height}px tall`)
+        if (!pill.onTop) fail('EDIT-PILL', 'the Edit pill is covered')
+      }
+    },
+  },
+  {
+    // PR7a: the tab editor, opened from the Edit pill.
+    name: 'tabs-editor',
+    setup: async ({ page }) => {
+      await page.locator('button[data-edit-tabs]').click()
+      const editor = '[role="dialog"][aria-label="edit tabs"]'
+      await page.locator(editor).waitFor({ state: 'visible' })
+      // Wait for the slide-up to finish.
+      await page.waitForFunction((sel) => {
+        const d = document.querySelector(sel)
+        return !!d && d.getAnimations().every((a) => a.playState !== 'running') && Math.abs(d.getBoundingClientRect().bottom - innerHeight) < 1
+      }, editor, { timeout: 5000 })
     },
   },
   {
