@@ -11,6 +11,7 @@ produce junk stories today (About pages, a home-page redirect, a soft
 from __future__ import annotations
 
 import datetime as dt
+import re
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,30 @@ def _accepted(html: str, url: str, **kwargs) -> bool:
     return score >= ACCEPT_SCORE
 
 
+STORY_URL = "https://www.example.com/news/council-approves-river-trail"
+
+
+def _page(
+    *,
+    title: str = "Council approves the river trail | Example Town News",
+    site_name: str = "Example Town News",
+    og_type: str | None = "article",
+    published: str | None = "2026-10-18T09:30:00+00:00",
+    jsonld: str | None = None,
+    body: str = "<p>The extension adds four kilometres of path.</p>",
+) -> str:
+    """A small inline page. Pass ``text=`` to ``score_page`` to set its
+    length, so each test controls exactly which rules fire."""
+    head = [f"<title>{title}</title>", f'<meta property="og:site_name" content="{site_name}">']
+    if og_type:
+        head.append(f'<meta property="og:type" content="{og_type}">')
+    if published:
+        head.append(f'<meta property="article:published_time" content="{published}">')
+    if jsonld:
+        head.append(f'<script type="application/ld+json">{jsonld}</script>')
+    return f"<html><head>{''.join(head)}</head><body>{body}</body></html>"
+
+
 # ---------------------------------------------------------------------------
 # url_ok
 # ---------------------------------------------------------------------------
@@ -75,6 +100,24 @@ def _accepted(html: str, url: str, **kwargs) -> bool:
         # A query string courlan's strict mode would strip still passes,
         # and the URL is never rewritten.
         "https://www.example.com/article.php?id=42&ref=home",
+        # WordPress Plain and Numeric permalinks.
+        "https://www.example.com/?p=123",
+        "https://www.example.com/index.php?p=123",
+        "https://www.example.com/archives/123",
+        # An article under an archive section (The Atlantic's shape).
+        "https://www.example.com/technology/archive/2024/01/ai-chatbots/677123/",
+        "https://www.example.com/magazine/archive/2023/10/some-story/675123/",
+        # News sections named like static pages or records (Reuters'
+        # /legal/), with an article under them.
+        "https://www.example.com/legal/government/judge-blocks-rule-2026-07-27/",
+        "https://www.example.com/help/how-to-reset-a-router",
+        "https://www.example.com/blog/products/new-launch",
+        "https://www.example.com/news/profiles/mayor-retires",
+        # Year-shaped numeric ids (Drupal's /node/<id>).
+        "https://www.example.com/node/2015",
+        "https://www.example.com/p/2041",
+        # "page" is pagination only when a number follows it.
+        "https://www.example.com/page/how-we-report",
     ],
 )
 def test_url_ok_keeps_articles(url):
@@ -98,6 +141,26 @@ def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():
         "https://www.example.com/category/news/local/",
         "https://www.example.com/author/dana/",
         "https://www.example.com/blog/page/2/",
+        "https://www.example.com/page/2/",
+        "https://www.example.com/archive/",
+        "https://www.example.com/archives/",
+        "https://www.example.com/archives/2026/07/",
+        "https://www.example.com/users/dana",
+        "https://www.example.com/forum/users",
+        "https://www.example.com/?page_id=2",
+        "https://www.example.com/?s=x",
+        "https://www.example.com/index.php?page_id=2",
+        "https://www.example.com/help",
+        "https://www.example.com/legal/",
+        "https://www.example.com/2026/",
+        "https://www.example.com/2026/07/",
+        "https://www.example.com/blog/2026/",
+        # Without the slash courlan accepts a year, so the rule is ours.
+        "https://www.example.com/2026",
+        "https://www.example.com/blog/2026",
+        "https://www.example.com/archives/2015",
+        "https://www.example.com/blog/2026/07/",
+        "https://www.example.com/news/2026/10/18/",
         "https://www.example.com/about/",
         "https://www.example.com/about/team",
         "https://www.example.com/contact-us",
@@ -183,6 +246,19 @@ def test_a_lone_page_sitemap_is_kept_and_its_entries_still_filtered():
     assert not _accepted(_fixture("yoast-about.html"), "https://www.example.com/our-history/")
 
 
+def test_a_page_sitemap_reads_after_an_unknown_sitemap():
+    # No post sitemap, so the page sitemap stays, but as the last
+    # fallback: an unknown sitemap may hold the posts.
+    assert order_sitemaps([
+        "https://www.example.com/wp-sitemap-posts-page-1.xml",
+        "https://www.example.com/sitemap-1.xml",
+        "https://www.example.com/wp-sitemap-users-1.xml",
+    ]) == [
+        "https://www.example.com/sitemap-1.xml",
+        "https://www.example.com/wp-sitemap-posts-page-1.xml",
+    ]
+
+
 def test_shopify_sitemaps_keep_only_the_blogs():
     locs = [loc for loc, _ in _locs("shopify-sitemap.xml")]
     assert [classify_sitemap(loc) for loc in locs] == ["product", "page", "taxonomy", "post"]
@@ -212,6 +288,11 @@ def test_news_sitemap_reads_first():
         ("https://www.example.com/blog/sitemap.xml", "post"),
         # Whole words only: "heritage" holds no "tag".
         ("https://www.example.com/heritage-sitemap.xml", "other"),
+        # WordPress core under Plain permalinks: the class is in the query.
+        ("https://www.example.com/?sitemap=posts&sitemap-subtype=page", "page"),
+        ("https://www.example.com/?sitemap=posts&sitemap-subtype=post&paged=2", "post"),
+        ("https://www.example.com/?sitemap=taxonomies&sitemap-subtype=category", "taxonomy"),
+        ("https://www.example.com/?sitemap=users", "author"),
     ],
 )
 def test_classify_sitemap_edge_cases(url, cls):
@@ -254,6 +335,148 @@ def test_yoast_about_page_with_og_article_is_rejected():
     # WebPage node's datePublished is not an article date.
     assert not any(r.startswith("+3") for r in reasons)
     assert "-1 no date" in reasons
+    assert "-3 json-ld aboutpage/website, undated" in reasons
+
+
+def test_og_article_post_without_json_ld_is_accepted():
+    # Undated, so og:type=article is what carries it: 3 - 1 + 1.
+    score, reasons = score_page(
+        _fixture("og-article-post.html"), "https://www.example.com/posts/squeaky-bike-chain/"
+    )
+    assert "+3 og:type article" in reasons
+    assert "-1 no date" in reasons
+    assert score >= ACCEPT_SCORE, reasons
+
+
+def test_undated_og_article_with_a_site_wide_json_ld_website_is_rejected():
+    # The spec's -3 for a JSON-LD WebSite applies even next to
+    # og:type=article when the page is undated: 3 - 3 - 1 + 1 = 0. This
+    # is the false negative left open for PR10b's review and the owner's
+    # VPS probe (docs/ux-notes/PR10a.md, "Open items"). Changing it is a
+    # spec change, so this test pins today's rule on purpose.
+    html = _page(
+        published=None,
+        jsonld='{"@context":"https://schema.org","@type":"WebSite","name":"Example Town News"}',
+    )
+    score, reasons = score_page(html, STORY_URL, text="x" * 650)
+    assert reasons == [
+        "+3 og:type article", "-3 json-ld website, undated", "-1 no date", "+1 650 characters",
+    ]
+    assert score == 0
+
+
+def test_prefixed_json_ld_types_count():
+    for prefix in ("https://schema.org/", "http://schema.org/", "schema:"):
+        html = _page(
+            og_type=None,
+            published=None,
+            jsonld=(
+                '{"@context":"https://schema.org","@type":"' + prefix + 'NewsArticle",'
+                '"datePublished":"2026-07-27"}'
+            ),
+        )
+        score, reasons = score_page(html, STORY_URL, text="x" * 450)
+        assert reasons == ["+3 json-ld newsarticle", "+1 dated 2026-07-27"], prefix
+        assert score >= ACCEPT_SCORE
+
+
+def test_long_listing_with_dated_cards_is_rejected():
+    # Six cards, each with a time.entry-date.published and a full
+    # excerpt: the first card's date is not the listing's.
+    html = _fixture("listing-long.html")
+    score, reasons = score_page(html, "https://www.example.com/blog/")
+    assert any(r.startswith("+1") and r.endswith("characters") for r in reasons)
+    assert "-3 og:type website, undated" in reasons
+    assert score < ACCEPT_SCORE
+    # The same cards as divs, with no <article> and no <h1>: their dates
+    # disagree, so none is the page's.
+    divs = (
+        html.replace("<article", "<div").replace("</article>", "</div>")
+        .replace('<header class="page-header"><h1 class="page-title">Blog</h1></header>', "")
+    )
+    score, reasons = score_page(divs, "https://www.example.com/blog/")
+    assert "-1 no date" in reasons
+    assert score < ACCEPT_SCORE
+    # Cards all from one day still make a listing: more than one
+    # <article>, and no <h1> to say which is the page's.
+    no_h1 = html.replace('<header class="page-header"><h1 class="page-title">Blog</h1></header>', "")
+    same_day = re.sub(r'datetime="[^"]+"', 'datetime="2026-10-18T09:30:11-07:00"', no_h1)
+    _, reasons = score_page(same_day, "https://www.example.com/blog/")
+    assert "-1 no date" in reasons
+    # A theme that titles every card with an <h1>.
+    h1_cards = no_h1.replace('<h2 class="entry-title">', '<h1 class="entry-title">').replace(
+        "</a></h2>", "</a></h1>"
+    )
+    _, reasons = score_page(h1_cards, "https://www.example.com/blog/")
+    assert "-1 no date" in reasons
+
+
+def test_a_post_with_related_cards_keeps_its_own_date():
+    # The post's <h1> and date sit in its <article>; the related posts
+    # below are <article>s with dates of their own.
+    related = "".join(
+        f'<article class="related"><h3><a href="/news/older-{n}">Older {n}</a></h3>'
+        f'<time class="entry-date published" datetime="2026-09-0{n}">Sep {n}</time></article>'
+        for n in range(1, 4)
+    )
+    html = _page(og_type="website", published=None, body=(
+        '<main><article class="post"><header><h1>Council approves the trail</h1>'
+        '<time class="entry-date published" datetime="2026-10-14">Oct 14</time></header>'
+        f'<p>Story.</p></article><section class="related-posts">{related}</section></main>'
+    ))
+    score, reasons = score_page(html, STORY_URL, text="x" * 650)
+    assert "+1 dated 2026-10-14" in reasons
+    assert score >= ACCEPT_SCORE
+
+
+def test_listing_microdata_dates_are_not_the_pages():
+    cards = "".join(
+        f'<div itemscope itemtype="https://schema.org/BlogPosting">'
+        f'<h2 itemprop="headline"><a href="/blog/post-{n}">Post {n}</a></h2>'
+        f'<meta itemprop="datePublished" content="2026-10-{10 + n}"></div>'
+        for n in range(4)
+    )
+    html = _page(og_type="website", published=None, body=f"<main>{cards}</main>")
+    _, reasons = score_page(html, "https://www.example.com/blog/", text="x" * 650)
+    assert "-1 no date" in reasons
+    # One microdata date on a one-article page is the page's.
+    single = _page(og_type="website", published=None, body=(
+        '<div itemscope itemtype="https://schema.org/BlogPosting"><h1>Post</h1>'
+        '<meta itemprop="datePublished" content="2026-10-11"></div>'
+    ))
+    _, reasons = score_page(single, STORY_URL, text="x" * 650)
+    assert "+1 dated 2026-10-11" in reasons
+
+
+def test_a_date_in_the_url_counts_as_dated():
+    html = _page(og_type="website", published=None)
+    score, reasons = score_page(
+        html, "https://www.example.com/2026/10/18/council-approves-river-trail", text="x" * 650
+    )
+    assert "+1 date in URL" in reasons
+    assert not any("website" in r for r in reasons)
+    assert score >= ACCEPT_SCORE, reasons
+
+
+@pytest.mark.parametrize(
+    ("body", "dated"),
+    [
+        # A class-less <time> in the article's header is its date.
+        (('<article><header><h1>Council approves the trail</h1>'
+          '<time datetime="2026-10-14">Oct 14</time></header><p>Story.</p></article>'), True),
+        # In the article's footer it is not ("updated", comment times).
+        (('<article><header><h1>Council approves the trail</h1></header><p>Story.</p>'
+          '<footer><time datetime="2026-10-14">Oct 14</time></footer></article>'), False),
+        # Nor outside the article.
+        (('<article><header><h1>Council approves the trail</h1></header><p>Story.</p></article>'
+          '<div class="sidebar"><time datetime="2026-10-14">Oct 14</time></div>'), False),
+    ],
+)
+def test_a_class_less_time_counts_only_in_the_articles_header(body, dated):
+    html = _page(og_type="website", published=None, body=body)
+    _, reasons = score_page(html, STORY_URL, text="x" * 650)
+    assert ("+1 dated 2026-10-14" in reasons) is dated
+    assert ("-1 no date" in reasons) is not dated
 
 
 def test_home_page_redirect_is_rejected():
@@ -281,6 +504,53 @@ def test_soft_404_is_rejected():
     score, reasons = score_page(_fixture("soft-404.html"), "https://www.example.com/news/gone/")
     assert score < ACCEPT_SCORE
     assert "-3 soft 404 title" in reasons
+
+
+# 450 characters: neither +1 nor -2 for length, so a dated og:type=article
+# page scores 4 and only the title can reject it. (At 600+ a fully
+# marked-up page scores 5, and the -3 alone leaves it at 2.)
+_MID_TEXT = "x" * 450
+
+
+@pytest.mark.parametrize("owner_configured", [False, True])
+@pytest.mark.parametrize(
+    "title",
+    [
+        "404",
+        "404 – Example Town News",
+        "Error 404 | Example Town News",
+        "Example Town News | 404",
+        "404 Not Found",
+        "404: Page not found",
+        "404 Error",
+    ],
+)
+def test_a_404_title_is_a_soft_404(title, owner_configured):
+    html = _page(title=title)
+    assert _accepted(_page(), STORY_URL, text=_MID_TEXT, owner_configured=owner_configured)
+    score, reasons = score_page(html, STORY_URL, text=_MID_TEXT, owner_configured=owner_configured)
+    assert "-3 soft 404 title" in reasons
+    assert score < ACCEPT_SCORE
+
+
+@pytest.mark.parametrize("owner_configured", [False, True])
+@pytest.mark.parametrize(
+    ("title", "site_name", "jsonld"),
+    [
+        ("404 errors: how to fix them | Town News", "Town News", None),
+        ("Error 404 explained | Town News", "Town News", None),
+        # A site whose own name reads as a not-found title.
+        ("Our autumn issue | Not Found", "Not Found", None),
+        ("FBI story | 404 Media", "404 Media",
+         ('{"@context":"https://schema.org","@type":"NewsArticle",'
+          '"datePublished":"2026-07-27T12:00:00Z"}')),
+    ],
+)
+def test_a_title_that_only_mentions_404_is_not_a_soft_404(title, site_name, jsonld, owner_configured):
+    html = _page(title=title, site_name=site_name, jsonld=jsonld)
+    score, reasons = score_page(html, STORY_URL, text=_MID_TEXT, owner_configured=owner_configured)
+    assert not any("404" in r for r in reasons)
+    assert score >= ACCEPT_SCORE, reasons
 
 
 def test_foreign_canonical_counts_against_a_page():
@@ -329,6 +599,22 @@ def test_owner_configured_rejects_a_page_under_300_characters():
     assert "-2 only 21 characters" in reasons
     # Kind and date scoring are skipped entirely.
     assert not any("date" in r or "og:type" in r for r in reasons)
+
+
+@pytest.mark.parametrize(
+    ("length", "accepted"),
+    [(150, False), (299, False), (300, True), (450, True)],
+)
+def test_a_short_page_loses_two_points(length, accepted):
+    # An undated JSON-LD Article: 3 - 1 = 2 before the length rule.
+    html = _page(
+        og_type=None,
+        published=None,
+        jsonld='{"@context":"https://schema.org","@type":"Article","headline":"Trail"}',
+    )
+    score, reasons = score_page(html, STORY_URL, text="x" * length)
+    assert (f"-2 only {length} characters" in reasons) is not accepted
+    assert (score >= ACCEPT_SCORE) is accepted, reasons
 
 
 def test_text_passed_in_is_used_instead_of_extracting():
@@ -429,4 +715,45 @@ def test_listing_links_keeps_post_card_headers_without_main():
         "https://www.example.com/news/alpha",
         "https://www.example.com/news/beta",
         "https://www.example.com/news/gamma",
+    ]
+
+
+@pytest.mark.parametrize("role_main", [True, False])
+def test_listing_links_keeps_div_card_headers(role_main):
+    # Div cards with their own <header><h2><a> and <time>, under a div
+    # with role="main" (an ARIA scope), or under no scope at all (their
+    # headers repeat card by card, unlike the page's one header).
+    html = _fixture("div-cards-listing.html")
+    if not role_main:
+        html = html.replace(' role="main"', "")
+    links = listing_links(html, "https://www.example.com/blog/")
+    base = "https://www.example.com/blog/"
+    assert [(c.url, c.title) for c in links] == [
+        (base + "council-approves-river-trail", "Council approves the river trail extension"),
+        (base + "harvest-market-returns", "The harvest market returns to the square"),
+        (base + "new-bus-routes", "Three new bus routes start Monday"),
+        (base + "school-garden-wins-grant", "School garden wins a provincial grant"),
+        (base + "rowing-club-hosts-regatta", "Rowing club hosts its first regatta"),
+    ]
+    assert [c.published.date().isoformat() for c in links] == [
+        "2026-10-18", "2026-10-12", "2026-09-30", "2026-09-22", "2026-09-15",
+    ]
+
+
+def test_listing_links_keeps_a_header_inside_an_aria_main_region():
+    # ARIA scopes a header by role as well as by tag: under role="main"
+    # it is the region's header, not the page's banner.
+    html = """<html><body>
+      <header><a href="/news/menu-one">M1</a><a href="/news/menu-two">M2</a>
+        <a href="/news/menu-three">M3</a><a href="/news/menu-four">M4</a></header>
+      <div id="content" role="main">
+        <header class="top-stories"><ul>
+          <li><a href="/news/alpha">Alpha story</a></li>
+          <li><a href="/news/beta">Beta story</a></li>
+          <li><a href="/news/gamma">Gamma story</a></li>
+        </ul></header>
+      </div>
+    </body></html>"""
+    assert [c.title for c in listing_links(html, "https://www.example.com/news/")] == [
+        "Alpha story", "Beta story", "Gamma story",
     ]

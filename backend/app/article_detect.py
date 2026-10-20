@@ -87,19 +87,42 @@ def same_site(url: str, site: str) -> bool:
 # ---------------------------------------------------------------------------
 
 # Whole path segments that mark a page as not an article wherever they
-# appear: listings (tag, category, author, pagination), CMS plumbing and
-# shop pages. Whole segments, not substrings: ``/pets/fat-cat/...`` and
+# appear: taxonomy and author listings, CMS plumbing, account and cart
+# pages. Whole segments, not substrings: ``/pets/fat-cat/...`` and
 # ``/news/power-user/...`` are articles.
 _NON_ARTICLE_SEGMENTS = frozenset({
     "tag", "tags", "category", "categories", "author", "authors",
-    "user", "users", "profile", "profiles", "member", "members",
-    "page", "archive", "archives", "attachment", "uploads",
+    "attachment", "uploads",
     "wp-admin", "wp-content", "wp-includes", "wp-json", "cdn-cgi",
-    "feed", "rss", "atom", "comments", "trackback",
+    "feed", "rss", "atom", "trackback",
     "cart", "checkout", "basket", "wishlist", "account", "my-account",
     "login", "logout", "signin", "sign-in", "signup", "sign-up", "register",
-    "shop", "product", "products", "collections",
+    "shop", "collections",
 })
+
+# Words that name a listing or a record only in some positions. As the
+# last segment they are the listing itself (``/forum/users``,
+# ``/blog/products/``); as the first segment with one identifier after
+# them they are one record (``/users/dana``, ``/products/canvas-tote``,
+# ``/members/123``). A news section of the same name with an article
+# under it (``/blog/products/new-launch``,
+# ``/news/profiles/mayor-retires``) is fine.
+_RECORD_SEGMENTS = frozenset({
+    "user", "users", "profile", "profiles", "member", "members",
+    "comments", "product", "products",
+})
+
+# Archive listings: the archive itself (``/archive/``) or a date
+# archive under it (``/archives/2026/07/``). An article under it is
+# fine: WordPress's numeric permalinks (``/archives/123``) and The
+# Atlantic's ``/<section>/archive/2024/01/<slug>/<id>/``.
+_ARCHIVE_SEGMENTS = frozenset({"archive", "archives"})
+
+# Sections whose bare year is a year archive (``/blog/2026/``), unlike
+# a numeric id elsewhere (``/node/2015``, ``/p/2041``).
+_YEAR_ARCHIVE_PARENTS = _ARCHIVE_SEGMENTS | {
+    "blog", "blogs", "news", "posts", "articles", "stories",
+}
 
 # Static pages, rejected when they are the page itself (the last
 # segment): ``/about/``, ``/blog/contact``, ``/search``. A search
@@ -117,22 +140,30 @@ _STATIC_SLUGS = frozenset({
 })
 
 # Sections whose every page is a static page: Shopify's ``/pages/``,
-# ``/policies/``, and ``/about/team``-style trees.
+# ``/policies/``, and ``/about/team``-style trees. Not ``legal``,
+# ``help`` or ``support``: news sites file stories under those
+# (Reuters' ``/legal/government/...``). As the page itself they are
+# still static slugs above.
 _STATIC_SECTIONS = frozenset({
     "pages", "policies", "about", "about-us", "contact", "contact-us",
-    "legal", "help", "support",
 })
 
 # Query keys of pages that aren't articles: a WordPress search
-# (``?s=``), comment-reply and share links, cart actions, paging.
+# (``?s=``), static page and attachment ids, comment-reply and share
+# links, cart actions, paging.
 _NON_ARTICLE_QUERY_KEYS = frozenset({
-    "s", "replytocom", "share", "add-to-cart", "add_to_cart", "paged",
+    "s", "page_id", "attachment_id", "replytocom", "share",
+    "add-to-cart", "add_to_cart", "paged",
 })
 
-# A path that ends in a date archive: /2026/, /2026/07/, /2026/07/27/.
-_DATE_ARCHIVE_RE = re.compile(
-    r"/(?:19|20)\d{2}(?:/(?:0?[1-9]|1[0-2])(?:/(?:0?[1-9]|[12]\d|3[01]))?)?/?$"
-)
+# Query keys that make the site root a post: WordPress's Plain
+# permalinks (``/?p=123``), which its core sitemap lists for every post.
+_ROOT_POST_QUERY_KEYS = frozenset({"p"})
+
+_YEAR_RE = re.compile(r"(?:19|20)\d{2}")
+_MONTH_RE = re.compile(r"0?[1-9]|1[0-2]")
+_DAY_RE = re.compile(r"0?[1-9]|[12]\d|3[01]")
+_NUMBER_RE = re.compile(r"\d+")
 
 # courlan only judges the host, the page's own name and the query (see
 # ``url_ok``); this stands in for the source's own host and for the
@@ -144,15 +175,58 @@ def _segments(path: str) -> list[str]:
     return [unquote(s).lower() for s in path.split("/") if s]
 
 
+def _is_date_tail(segments: list[str]) -> bool:
+    """True for ``[YYYY]``, ``[YYYY, MM]`` or ``[YYYY, MM, DD]``."""
+    if not 1 <= len(segments) <= 3:
+        return False
+    return all(
+        pattern.fullmatch(s) for pattern, s in zip((_YEAR_RE, _MONTH_RE, _DAY_RE), segments, strict=False)
+    )
+
+
+def _date_archive(segments: list[str]) -> bool:
+    """A path that ends in a date archive. ``/YYYY/MM/`` and
+    ``/YYYY/MM/DD/`` are archives at any depth. A lone year is one only
+    as the whole path (``/2026/``) or under a blog, news or archive
+    section (``/blog/2026/``); elsewhere it is a numeric id
+    (``/node/2015``, ``/p/2041``)."""
+    if any(len(segments) >= n and _is_date_tail(segments[-n:]) for n in (3, 2)):
+        return True
+    if _YEAR_RE.fullmatch(segments[-1]):
+        return len(segments) == 1 or segments[-2] in _YEAR_ARCHIVE_PARENTS
+    return False
+
+
+def _listing_path(segments: list[str]) -> bool:
+    """A path whose segments name a listing, a record or CMS plumbing
+    rather than an article (see the segment sets above)."""
+    for i, segment in enumerate(segments):
+        rest = segments[i + 1:]
+        if segment in _NON_ARTICLE_SEGMENTS:
+            return True
+        if segment in _RECORD_SEGMENTS and (not rest or (i == 0 and len(rest) == 1)):
+            return True
+        if segment in _ARCHIVE_SEGMENTS and (not rest or _is_date_tail(rest)):
+            return True
+        # Pagination: /blog/page/2/.
+        if segment == "page" and len(rest) == 1 and _NUMBER_RE.fullmatch(rest[0]):
+            return True
+    return False
+
+
 def url_ok(url: str, site: str) -> bool:
     """Cheap test of whether ``url`` could be an article on ``site``
     (the source's URL or host). Same-site http(s) URLs only.
 
     Two checks, each on what it reads well:
 
-    - **The path above the page is ours**, by whole segment
-      (``_NON_ARTICLE_SEGMENTS``, ``_STATIC_SECTIONS``, date archives).
-      courlan's own structure filter matches substrings: it reads
+    - **The path above the page is ours**, by whole segment and by
+      position (``_NON_ARTICLE_SEGMENTS`` anywhere; record, archive and
+      pagination words only where they are the listing or one record;
+      ``_STATIC_SECTIONS`` first; date archives last). The site root is
+      the home page unless its query names a post (WordPress's
+      ``/?p=123``). courlan's own structure filter matches substrings:
+      it reads
       ``/pets/fat-cat/how-to-feed`` as a category page,
       ``/news/power-user/tips`` as a user page, and any ``/search/``
       as a search page.
@@ -176,26 +250,29 @@ def url_ok(url: str, site: str) -> bool:
         return False
 
     segments = _segments(parts.path)
-    if not segments:
-        return False  # the home page
-    if any(s in _NON_ARTICLE_SEGMENTS for s in segments):
-        return False
-    if segments[-1] in _STATIC_SLUGS or segments[0] in _STATIC_SECTIONS:
-        return False
-    if _DATE_ARCHIVE_RE.search(parts.path):
-        return False
     query_keys = {k.lower() for k, _ in parse_qsl(parts.query, keep_blank_values=True)}
+    if not segments and not query_keys & _ROOT_POST_QUERY_KEYS:
+        return False  # the home page
+    if _listing_path(segments):
+        return False
+    if segments and (segments[-1] in _STATIC_SLUGS or segments[0] in _STATIC_SECTIONS):
+        return False
+    if segments and _date_archive(segments):
+        return False
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
 
     own_host = parts.hostname.lower().rstrip(".") == _host(site)
     netloc = _PROBE_HOST if own_host else parts.netloc
     # Keep the page's own segment (and its trailing slash); every
-    # segment above it was judged above.
-    page = parts.path.rstrip("/").rsplit("/", 1)[-1]
-    trailing = "/" if parts.path.endswith("/") else ""
-    above = "x/" * (len(segments) - 1)
-    probe = f"{parts.scheme}://{netloc}/{above}{page}{trailing}"
+    # segment above it was judged above. A root post (/?p=123) keeps
+    # the bare root.
+    path = ""
+    if segments:
+        page = parts.path.rstrip("/").rsplit("/", 1)[-1]
+        trailing = "/" if parts.path.endswith("/") else ""
+        path = "x/" * (len(segments) - 1) + page + trailing
+    probe = f"{parts.scheme}://{netloc}/{path}"
     if parts.query:
         probe += "?" + parts.query
     return courlan.check_url(probe, strict=True) is not None
@@ -280,19 +357,24 @@ def classify_sitemap(url: str) -> str:
     sitemaps ``wp-sitemap-<provider>-<subtype>-<n>.xml``, so
     ``wp-sitemap-posts-page-1.xml`` contains "posts" but lists pages.
     The page class also covers Yoast's ``page-sitemap*.xml`` and
-    Shopify's ``sitemap_pages_*.xml``. Only the path is read: the
-    ``?page=2`` of a paged Drupal sitemap is not a page sitemap.
+    Shopify's ``sitemap_pages_*.xml``. Of the query, only WordPress
+    core's Plain-permalink form is read
+    (``/?sitemap=posts&sitemap-subtype=page``): the ``?page=2`` of a
+    paged Drupal sitemap is not a page sitemap.
     """
     try:
-        path = urlsplit(url.strip()).path
+        parts = urlsplit(url.strip())
     except ValueError:
         return SITEMAP_OTHER
-    segments = [s for s in path.lower().split("/") if s]
-    if not segments:
-        return SITEMAP_OTHER
-    name = _SITEMAP_EXT_RE.sub("", segments[-1])
+    segments = [s for s in parts.path.lower().split("/") if s]
+    name = _SITEMAP_EXT_RE.sub("", segments[-1]) if segments else ""
 
     cls = _class_of_tokens(_sitemap_tokens(name))
+    if cls:
+        return cls
+    query = {k.lower(): v for k, v in parse_qsl(parts.query)}
+    wp_plain = [query[k] for k in ("sitemap-subtype", "sitemap") if k in query]
+    cls = _class_of_tokens(t for value in wp_plain for t in _sitemap_tokens(value))
     if cls:
         return cls
     # A sitemap filed under its section: /blog/sitemap.xml.
@@ -410,8 +492,12 @@ _URL_DATE_RE = re.compile(
 
 # Title separators: "Post title – Site", "Site | Post title".
 _TITLE_SPLIT_RE = re.compile(r"\s+[|–—·»:\-]+\s+")
+# Each alternative is a whole title part: "404", "Error 404",
+# "404 Not Found", "404: Page not found". A title that only starts with
+# 404 ("404 errors: how to fix them") or a site named "404 Media" is not
+# one.
 _SOFT_404_RE = re.compile(
-    r"^(?:error\s*)?404\b"
+    r"^(?:error\s*)?404(?:\s*[:\-–—]?\s*(?:error|(?:page\s+)?not\s+found))?$"
     r"|^(?:page\s+)?not\s+found$"
     r"|^nothing\s+(?:was\s+)?found$"
     r"|^(?:oops[!.,]?\s*)?(?:sorry[!.,]?\s*)?(?:that\s+|the\s+|this\s+)?page\s+"
@@ -457,16 +543,94 @@ def _jsonld_nodes(data) -> Iterable[dict]:
                     yield sub
 
 
+# "schema:NewsArticle" and "https://schema.org/NewsArticle" are both
+# "NewsArticle".
+_SCHEMA_PREFIX_RE = re.compile(r"^(?:schema:|https?://(?:www\.)?schema\.org/)", re.IGNORECASE)
+
+
 def _node_types(node: dict) -> set[str]:
     raw = node.get("@type")
     values = raw if isinstance(raw, list) else [raw]
-    return {v.lower() for v in values if isinstance(v, str)}
+    return {
+        _SCHEMA_PREFIX_RE.sub("", v.strip()).lower() for v in values if isinstance(v, str)
+    }
+
+
+def _marked_dates(doc) -> list[tuple[object, dt.datetime]]:
+    """Every element that marks a published date in the body, with its
+    date: a ``<time datetime>`` marked as published (``pubdate``,
+    ``itemprop``, a published class) or inside an article's header, and
+    microdata ``itemprop="datePublished"`` on any element. Not a
+    footer's "updated" ``<time>``."""
+    out = []
+    for el in doc.iter():
+        if not isinstance(el.tag, str):
+            continue
+        itemprop = (el.get("itemprop") or "").strip().lower() == "datepublished"
+        if el.tag == "time":
+            stamp = el.get("datetime") or (el.get("content") if itemprop else None)
+            if not stamp:
+                continue
+            classes = set((el.get("class") or "").lower().split())
+            above = [a.tag for a in el.iterancestors()]
+            in_article_header = "header" in above and "article" in above[above.index("header"):]
+            if not (
+                el.get("pubdate") is not None or itemprop or classes & _TIME_CLASSES
+                or in_article_header
+            ):
+                continue
+        elif itemprop:
+            stamp = el.get("content") or el.get("datetime")
+        else:
+            continue
+        parsed = parse_date(stamp)
+        if parsed:
+            out.append((el, parsed))
+    return out
+
+
+def _body_date(doc) -> dt.datetime | None:
+    """The page's published date from its body, only when the page is
+    one article. A listing's post cards each carry a marked date, and
+    the first card's is not the listing's.
+
+    - When the first ``<h1>`` sits in an ``<article>`` (else a
+      ``<header>``), a marked date inside that element is the page's.
+      Not when several articles hold an ``<h1>``: that is a listing
+      whose cards use one.
+    - Otherwise a marked date counts only when the page has at most one
+      ``<article>`` and all its marked dates agree.
+    """
+    marked = _marked_dates(doc)
+    if not marked:
+        return None
+    h1 = doc.find(".//h1")
+    if h1 is not None:
+        ancestors = list(h1.iterancestors())
+        scope = next((a for a in ancestors if a.tag == "article"), None)
+        if scope is not None and sum(
+            1 for a in doc.iter("article") if a.find(".//h1") is not None
+        ) > 1:
+            return None
+        if scope is None:
+            scope = next((a for a in ancestors if a.tag == "header"), None)
+        if scope is not None:
+            for el, parsed in marked:
+                if scope in el.iterancestors():
+                    return parsed
+    if len(doc.findall(".//article")) > 1:
+        return None
+    if len({parsed for _, parsed in marked}) > 1:
+        return None
+    return marked[0][1]
 
 
 def _page_facts(doc, url: str) -> _PageFacts:
+    # Head metadata by property or name. Microdata (``itemprop``) can
+    # sit on every card of a listing, so ``_body_date`` reads it.
     meta: dict[str, str] = {}
     for el in doc.iter("meta"):
-        key = (el.get("property") or el.get("name") or el.get("itemprop") or "").strip().lower()
+        key = (el.get("property") or el.get("name") or "").strip().lower()
         content = el.get("content")
         if key and content is not None and key not in meta:
             meta[key] = content.strip()
@@ -497,24 +661,7 @@ def _page_facts(doc, url: str) -> _PageFacts:
                 if published:
                     break
     if published is None:
-        # A <time> counts only when it is marked as the published date
-        # or sits in an article's header, not a footer's "updated".
-        for el in doc.iter("time"):
-            stamp = el.get("datetime")
-            if not stamp:
-                continue
-            classes = set((el.get("class") or "").lower().split())
-            above = [a.tag for a in el.iterancestors()]
-            in_article_header = "header" in above and "article" in above[above.index("header"):]
-            if (
-                el.get("pubdate") is not None
-                or (el.get("itemprop") or "").lower() == "datepublished"
-                or classes & _TIME_CLASSES
-                or in_article_header
-            ):
-                published = parse_date(stamp)
-                if published:
-                    break
+        published = _body_date(doc)
 
     titles = [_clean_text(meta.get("og:title"))]
     title_el = doc.find(".//title")
@@ -544,8 +691,16 @@ def _title_parts(title: str) -> list[str]:
 
 
 def _soft_404(facts: _PageFacts) -> bool:
+    """True when a whole title part (of ``og:title``, ``<title>`` or
+    the first ``<h1>``) is a not-found title. A part that is the site's
+    own name is skipped, whatever it says."""
+    name = facts.site_name.casefold()
     for title in [*facts.titles, facts.h1]:
-        if any(_SOFT_404_RE.search(part) for part in _title_parts(title)):
+        if any(
+            _SOFT_404_RE.search(part)
+            for part in _title_parts(title)
+            if not (name and part.casefold() == name)
+        ):
             return True
     return False
 
@@ -678,28 +833,42 @@ def score_page(
 # ---------------------------------------------------------------------------
 
 # Page chrome: nav and aside always; header and footer only when they
-# belong to the page, which is when no article, aside, main, nav or
-# section holds them (the ARIA rule for the banner and contentinfo
-# roles). So a post card's own <header><h2><a> stays.
+# belong to the page. That is the ARIA rule for the banner and
+# contentinfo roles: no article, aside, main, nav or section element,
+# and no element with an article, complementary, feed, main, navigation
+# or region role, holds them. Themes that build cards from divs give
+# their cards headers too, so an unscoped header or footer that repeats
+# at one tag path as often as a listing's cards do is a card's, not the
+# page's. So a post card's own <header><h2><a> stays.
 _CHROME_TAGS = frozenset({"nav", "aside"})
 _EDGE_TAGS = frozenset({"header", "footer"})
 _SCOPING_TAGS = frozenset({"article", "aside", "main", "nav", "section"})
+_SCOPING_ROLES = frozenset({
+    "article", "complementary", "feed", "main", "navigation", "region",
+})
 _CHROME_ROLES = frozenset({"navigation", "banner", "contentinfo", "complementary"})
 _MIN_GROUP = 3
 
 
+def _role(el) -> str:
+    return (el.get("role") or "").strip().lower()
+
+
 def _drop_chrome(doc) -> None:
     doomed = []
+    unscoped_edges: dict[tuple[str, ...], list] = defaultdict(list)
     for el in doc.iter():
         if not isinstance(el.tag, str):
             continue
-        role = (el.get("role") or "").strip().lower()
-        if el.tag in _CHROME_TAGS or role in _CHROME_ROLES:
+        if el.tag in _CHROME_TAGS or _role(el) in _CHROME_ROLES:
             doomed.append(el)
         elif el.tag in _EDGE_TAGS and not any(
-            a.tag in _SCOPING_TAGS for a in el.iterancestors()
+            a.tag in _SCOPING_TAGS or _role(a) in _SCOPING_ROLES for a in el.iterancestors()
         ):
-            doomed.append(el)
+            unscoped_edges[_tag_path(el)].append(el)
+    for edges in unscoped_edges.values():
+        if len(edges) < _MIN_GROUP:
+            doomed.extend(edges)
     for el in doomed:
         el.drop_tree()
 

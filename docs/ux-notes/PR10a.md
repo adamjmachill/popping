@@ -13,13 +13,27 @@ states, and no change in behaviour.
     - Same site only, by registrable domain from `tld`'s bundled public-suffix list
       (`news.example.com` and `www.example.com` are one site; two `*.blogspot.com` blogs are
       not). An IP or `localhost` has no registrable domain, so the host itself is the site.
-    - The path above the page is judged by whole segment, not substring:
-      - listing, CMS and shop segments anywhere (`tag`, `category`, `author`, `page`, `feed`,
-        `wp-content`, `cart`, `products`, …);
-      - static-page slugs as the last segment (`about`, `contact`, `privacy-policy`, `search`, …);
-      - static sections as the first segment (`pages`, `policies`, `about`, …);
-      - a trailing date archive (`/2026/`, `/2026/10/`);
-      - query keys of non-articles (`s`, `replytocom`, `share`, `add-to-cart`, `paged`).
+    - The path above the page is judged by whole segment, not substring, and by position:
+      - taxonomy, CMS, account and cart segments anywhere (`tag`, `category`, `author`, `feed`,
+        `wp-content`, `cart`, `collections`, …);
+      - record words (`user(s)`, `profile(s)`, `member(s)`, `comments`, `product(s)`) only as the
+        last segment, or as the first segment with one identifier after them (`/users/dana`,
+        `/products/canvas-tote`). `/blog/products/new-launch` is an article;
+      - `archive`/`archives` only as the last segment or before a date archive
+        (`/archives/2026/07/`). `/archives/123` and `/technology/archive/2024/01/slug/677123/` are
+        articles;
+      - `page` only before a page number (`/blog/page/2/`);
+      - static-page slugs as the last segment (`about`, `contact`, `privacy-policy`, `search`,
+        `legal`, `help`, …);
+      - static sections as the first segment (`pages`, `policies`, `about`, `contact`). Not
+        `legal`, `help` or `support`: Reuters files news under `/legal/`;
+      - a trailing date archive: `/YYYY/MM/` and `/YYYY/MM/DD/` at any depth, and a lone year only
+        as the whole path (`/2026/`) or under `archive(s)`, `blog(s)`, `news`, `posts`, `articles`
+        or `stories`. `/node/2015` and `/p/2041` are numeric ids;
+      - query keys of non-articles (`s`, `page_id`, `attachment_id`, `replytocom`, `share`,
+        `add-to-cart`, `paged`).
+    - The site root is the home page unless its query has `p` (WordPress Plain permalinks,
+      `/?p=123`, which its core sitemap lists for every post).
     - Then `courlan.check_url(strict=True)` judges the host, the page's own segment and the
       query (file types, feeds, contact, login and index pages, bad hosts). It is called on a
       probe URL whose path above the page is neutral segments. Its verdict is used as yes/no only;
@@ -27,7 +41,8 @@ states, and no change in behaviour.
     - When the URL's host is the source's own host, the probe uses a placeholder host, so
       courlan's host check is skipped (loopback servers with a port).
   - **`classify_sitemap(url)`** returns `news`, `post`, `page`, `taxonomy`, `author`, `product`,
-    `media` or `other`, from the path only. The file name is split into whole tokens on `-_.`,
+    `media` or `other`, from the path, plus WordPress core's Plain-permalink query
+    (`/?sitemap=posts&sitemap-subtype=page`). The file name is split into whole tokens on `-_.`,
     with page numbers and the word "sitemap" removed (also when glued on: `newssitemap`). The
     classes are checked in a fixed order (taxonomy, author, product, media, page, news, post), so
     the subtype wins: `wp-sitemap-posts-page-1` is page, `post_tag-sitemap` is taxonomy,
@@ -57,8 +72,11 @@ states, and no change in behaviour.
     order. A `Candidate` unpacks as `(url, published, title)`, the shape PR10b gives sitemap
     entries.
     - It honours `<base href>`.
-    - It drops nav, aside and `role` chrome, and drops header and footer when no article, aside,
-      main, nav or section holds them (ARIA's banner and contentinfo rule).
+    - It drops nav, aside and `role` chrome. It drops a header or footer only when it is the
+      page's: no article, aside, main, nav or section element and no element with an article,
+      complementary, feed, main, navigation or region role holds it (ARIA's banner and
+      contentinfo rule), and it doesn't repeat 3 or more times at one tag path the way div post
+      cards' headers do.
     - It keeps only links that pass `url_ok` against the page, and never the page itself.
     - It groups links by tag path and takes the largest group with 3 or more distinct URLs. On a
       tie, the group with longer link text wins, so titles beat thumbnail or "Read more" links.
@@ -80,10 +98,13 @@ states, and no change in behaviour.
     - a Yoast post (`yoast-post.html`), a Yoast About page (`yoast-about.html`) and a plain About
       page (`about.html`);
     - a dated `og:type=website` post (`dated-website-post.html`);
+    - a six-card blog section with full excerpts and a published `<time>` on every card
+      (`listing-long.html`), and a div-card listing under `role="main"` (`div-cards-listing.html`);
+    - an undated `og:type=article` post with no JSON-LD (`og-article-post.html`);
     - an undated ollama-style `/library/<model>` page (`ollama-library-model.html`);
     - the home page a dead link redirects to (`home.html`), a soft 404 (`soft-404.html`), and a
       wire story with a foreign canonical (`foreign-canonical.html`).
-- **`backend/tests/test_article_detect.py` (new, `no_db`, 63 tests).**
+- **`backend/tests/test_article_detect.py` (new, `no_db`, 138 tests after the review fixes).**
   - `url_ok`: the spec's must-pass slugs (`/pets/fat-cat/how-to-feed`, `/news/power-user/tips`,
     `/search/best-laptops-2026`), everyday article shapes, a query string, a loopback host equal
     to the source's own host (and a different loopback host rejected), and 20 shapes that must be
@@ -135,10 +156,14 @@ states, and no change in behaviour.
   one score with one threshold. The spec's rules are unchanged: only the hard rejects and the
   under-300 rule apply.
 - **What counts as a date** isn't spelled out in the spec. The library counts:
-  - published-date metadata only: `article:published_time` and its peers, and `datePublished`
-    on JSON-LD Article-family nodes;
-  - a `<time datetime>` marked as published (`pubdate`, `itemprop`, `published`, `entry-date` or
-    `dt-published`) or inside an article's header;
+  - published-date metadata only: `article:published_time` and its peers (by `property` or
+    `name`), and `datePublished` on JSON-LD Article-family nodes;
+  - a body date, only when the page is one article: a `<time datetime>` marked as published
+    (`pubdate`, `itemprop`, `published`, `entry-date` or `dt-published`) or inside an article's
+    header, or microdata `itemprop="datePublished"`. When the first `<h1>` sits in an
+    `<article>` (else a `<header>`), a marked date inside it is the page's, unless several
+    articles hold an `<h1>`. Otherwise one counts only when the page has at most one `<article>`
+    and all its marked dates agree. So a listing's cards don't date the listing;
   - a dated URL path (`/2026/10/slug`, `2026-10-18`).
 
   It does not count modified times (Yoast gives every page `article:modified_time`), the
@@ -147,9 +172,16 @@ states, and no change in behaviour.
 - **JSON-LD is read at the top level, in `@graph`, and in `mainEntity`, and no deeper.** So a
   listing's `ItemList` of BlogPostings doesn't make the listing an article. The Article family
   includes schema.org's subtypes (TechArticle, LiveBlogPosting, the NewsArticle subtypes, …).
-- **Soft-404 titles** cover "404", "Page not found", "Not found", "Nothing found" and WordPress's
-  "Oops! That page can't be found." The checks run on each part of `<title>` and `og:title` split
-  on separators (`|`, `–`, `-`, …), and on the first `<h1>`. "Title is the site name" means every
+- **Soft-404 titles** cover "404", "Error 404", "404 Not Found", "404: Page not found", "Page not
+  found", "Not found", "Nothing found" and WordPress's "Oops! That page can't be found." Each must
+  be a whole part of `<title>` or `og:title` split on separators (`|`, `–`, `-`, …), or of the
+  first `<h1>`. A part that equals the site name is skipped. So "404 errors: how to fix them" and
+  "FBI story | 404 Media" are not soft 404s.
+- **JSON-LD `@type` prefixes** (`schema:NewsArticle`, `https://schema.org/NewsArticle`) are
+  stripped before matching.
+- **`/archives/123` passes `url_ok`,** though courlan's strict filter alone would reject any
+  `/archives/` path. That is WordPress's built-in Numeric permalink, so rejecting it would empty
+  every such site. "Title is the site name" means every
   part equals `og:site_name`, or the JSON-LD WebSite name. So "Example Blog | My post" does not
   count.
 - **`listing_links` filters with `url_ok` before grouping,** not just by same site. Without that,
@@ -202,11 +234,101 @@ states, and no change in behaviour.
   | group minimum 2 | `test_listing_links_needs_three_distinct_links` |
   | date read from the link instead of its card | `test_listing_links_takes_the_repeating_post_list` |
 
+  This table covered the first commit. The review found that it had no row for the
+  `og:type=article` +3 or the JSON-LD site −3, and no default-mode test for the under-300 rule. Those
+  rows are in "Review fixes" below.
+
   On the first run, three mutations survived, and each one was fixed:
   - **The query-key rule.** The test URL `/?s=trail` was already rejected as the home page. The
     test now uses `/blog/?s=trail` and a `?replytocom=` link.
   - **Two malformed mutations** were rewritten to break the intended line: reading the query into
     the sitemap name, and owner mode still scoring kind and date.
+
+## Review fixes (second commit)
+
+The `/code-review` findings, each fixed, with tests:
+
+- **A listing page counted as dated.** On a listing, every card's `<time class="entry-date
+  published">` matched, and the first one became the page's date. So a blog section with long
+  excerpts scored +2 and was accepted. Body dates now count only when the page is one article (see
+  "What counts as a date"), and microdata `itemprop` dates are read with them, not as head
+  metadata. `listing-long.html` now scores −3. Its div variant (no `<article>`, no `<h1>`), a
+  same-day variant and an `<h1>`-per-card variant are rejected too. A post with dated related-post
+  `<article>` cards keeps its own date.
+- **Soft-404 matched any title starting with 404.** Anchored to a whole title part, and site-name
+  parts are skipped. Tested in both modes: seven not-found titles get −3, and "404 errors: how to
+  fix them", "Error 404 explained", a site named "Not Found" and "FBI story | 404 Media" don't.
+  - These tests use 450 characters of text, so a dated `og:type=article` page scores 4 (owner
+    mode: 2) and only the title can reject it. At 600+ characters a fully marked-up page scores
+    3 + 1 + 1 = 5, and the −3 leaves it at 2, still accepted. That is the spec's arithmetic; see
+    Open items.
+- **`url_ok` rejected real article sections.** The fixes are listed in "What changed": record and
+  archive words by position, `page` only before a number, `legal`, `help` and `support` no longer
+  static sections, and a lone year an archive only at the root or under a blog, news or archive
+  section. New must-pass cases: `/archives/123`, The Atlantic's and Reuters' shapes, `/help/how-to-…`,
+  `/blog/products/new-launch`, `/news/profiles/…`, `/node/2015`, `/p/2041`, `/page/how-we-report`.
+  New must-reject cases: `/archive/`, `/archives/`, `/archives/2026/07/`, `/archives/2015`,
+  `/page/2/`, `/users/dana`, `/forum/users`, `/2026`, `/2026/07/`, `/blog/2026`, `/blog/2026/07/`,
+  `/news/2026/10/18/`, `/help`, `/legal/`. courlan itself rejects a year with a trailing slash, so
+  the slash-less forms are what pin the lone-year rule.
+- **WordPress Plain permalinks.** `/?p=123` passes; `/?page_id=2`, `/index.php?page_id=2`, `/` and
+  `/?s=x` don't. `classify_sitemap` reads WordPress core's plain sitemap query
+  (`?sitemap=posts&sitemap-subtype=page` is page, `?sitemap=taxonomies&…` is taxonomy,
+  `?sitemap=users` is author).
+- **`_drop_chrome` dropped div-card headers.** Role scoping and the repeat rule (see "What
+  changed"). `div-cards-listing.html` gives all five titles and dates, both under `role="main"`
+  and with the role removed. A header inside a `role="main"` region is kept.
+- **Prefixed JSON-LD types.** Stripped; `https://schema.org/`, `http://schema.org/` and `schema:`
+  NewsArticle are each accepted with their `datePublished`. The finding's trafilatura-date part
+  needed no change: trafilatura's guessed date still doesn't count.
+- **Untested rules, now pinned:**
+  - `og:type=article` +3: `og-article-post.html`, undated, scores 3 − 1 + 1 = 3 and is accepted.
+  - The JSON-LD site −3: the Yoast About test asserts `-3 json-ld aboutpage/website, undated`. A
+    new test pins the open PR10b edge case: an undated `og:type=article` page with only a JSON-LD
+    WebSite node, at 650 characters, scores exactly 0.
+  - The −2 under-300 rule in default mode: an undated JSON-LD Article stub (3 − 1 = 2 before
+    length) is rejected at 150 and 299 characters and accepted at 300 and 450. The finding
+    suggested `yoast-post.html` with 150 characters, but that page is dated, so it scores
+    3 + 1 − 2 = 2 and stays accepted. The stub is undated so the rule decides the result.
+  - A date in the URL: an undated `og:type=website` page at `/2026/10/18/slug` gets
+    `+1 date in URL`, no website −3, and is accepted.
+  - A class-less `<time>` counts in the article's header, but not in its footer or outside the
+    article.
+  - Sitemap fallback order: an unknown `sitemap-1.xml` reads before a lone page sitemap.
+
+**Mutation check for the review fixes.** A script applied each mutation to
+`article_detect.py`, ran `tests/test_article_detect.py`, required the named test to fail, and
+restored the file byte for byte (checked by SHA-256). All 34 were caught:
+
+| Broken line | Failing test |
+|---|---|
+| body date: first marked date always / no article-count rule / no distinct-dates rule / no `<h1>`-per-card rule | `test_long_listing_with_dated_cards_is_rejected` |
+| body date: no `<h1>` scope | `test_a_post_with_related_cards_keeps_its_own_date` |
+| microdata read as head meta / microdata on non-`<time>` ignored | `test_listing_microdata_dates_are_not_the_pages` |
+| no in-article-header `<time>` | `test_a_class_less_time_counts_only_in_the_articles_header` |
+| URL date ignored (`url_dated=False`) | `test_a_date_in_the_url_counts_as_dated` |
+| old prefix-matching 404 regex / site-name part not skipped | `test_a_title_that_only_mentions_404_is_not_a_soft_404` |
+| no 404 alternative | `test_a_404_title_is_a_soft_404` |
+| JSON-LD prefix kept | `test_prefixed_json_ld_types_count` |
+| no `og:type=article` +3 (`elif False`) | `test_og_article_post_without_json_ld_is_accepted` |
+| no JSON-LD site −3 (`elif False`) | `test_undated_og_article_with_a_site_wide_json_ld_website_is_rejected`, `test_yoast_about_page_with_og_article_is_rejected` |
+| −2 rule only in owner mode | `test_a_short_page_loses_two_points` |
+| other and page sitemap ranks swapped | `test_a_page_sitemap_reads_after_an_unknown_sitemap` |
+| plain-permalink sitemap query ignored | `test_classify_sitemap_edge_cases` |
+| record words / archive / `page` rejected anywhere; `legal`, `help`, `support` as sections; lone year always an archive; root always home | `test_url_ok_keeps_articles` |
+| record words / archive / `page` never rejected; lone year never an archive; no `/YYYY/MM/` rule; root never home; no `page_id` key | `test_url_ok_rejects_pages_that_are_not_articles` |
+| no role scoping in `_drop_chrome` | `test_listing_links_keeps_a_header_inside_an_aria_main_region` |
+| no repeat rule (drop every unscoped header) | `test_listing_links_keeps_div_card_headers` |
+| unscoped headers never dropped | `test_listing_links_takes_the_repeating_post_list` and four more |
+
+On the first run, two mutations survived and were fixed with new tests: the `<h1>` scope (now
+`test_a_post_with_related_cards_keeps_its_own_date`) and "lone year never an archive". courlan
+already rejects `/2026/` and `/blog/2026/`, so the slash-less `/2026`, `/blog/2026` and
+`/archives/2015` were added.
+
+**Checks after the fixes:** `tests/test_article_detect.py`: 138 passed. Full backend pytest on
+`popping_test`: 13 failed, 1135 passed (1060 + 75 new tests). The 13 failures diff clean against
+the DNS-only baseline. `ruff check --select F,E9,B` on both files: clean.
 
 ## Risks and data-compatibility notes
 
@@ -237,6 +359,13 @@ states, and no change in behaviour.
   is rejected. This follows the spec's −3 rule literally. If the owner's VPS probe shows such
   feeds losing stories, the fix is to stop counting the WebSite node against a page that earned
   +3 from `og:type=article`. That needs a spec change.
+  `test_undated_og_article_with_a_site_wide_json_ld_website_is_rejected` pins today's result
+  (score 0), so changing it means updating that test on purpose.
+- **Soft-404 arithmetic to watch in PR10b's review:** the spec's −3 for a 404 or site-name title
+  doesn't reject a page that earns everything else (`og:type=article` or JSON-LD article, a date
+  and 600+ characters: 5 − 3 = 2). A soft 404 rarely carries article markup and a published
+  date, so this is left as specified. If the probe shows such pages, making the title rules an
+  outright reject is a spec change.
 
 ## Device checks
 
