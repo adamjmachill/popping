@@ -8,7 +8,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | H1 Test harness groundwork and local loop | F | merged | #29 |
 | PR1r Build stamp and reload on a new build | F | merged | #32 |
 | PR1a Scheduler defaults, extraction off the loop, Reddit Test, History | B | merged | #27 |
-| PR1b Tab keys, resolveTab, tap-to-top, phone scroller | F | in progress | |
+| PR1b Tab keys, resolveTab, tap-to-top, phone scroller | F | in review | #36 |
 | PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | not started | |
 | PR2a Preference PATCH routes | B | merged | #28 |
 | PR2b prefSync client and sync rules | F | not started | |
