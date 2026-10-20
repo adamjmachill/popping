@@ -36,8 +36,9 @@ import { toast } from '../components/Toast'
 export const RETURN_CHECK_MS = 10 * 60_000
 const OPEN_GUARD_MS = 2_000
 const FLUSH_CAP_MS = 3_000
-// A request that hangs (a dead connection after a resume) gives up, so
-// the next return can check again.
+// A request that hangs (a dead connection after a resume) gives up.
+// Hiding the page also calls off the check's requests, so a check cut off
+// by a suspension never holds up the next return's.
 const FETCH_TIMEOUT_MS = 10_000
 // sessionStorage: the build id this tab last reloaded for.
 const RELOADED_FOR_KEY = 'popping.v1.reloadedFor'
@@ -81,15 +82,24 @@ function pageBusy(): boolean {
 }
 
 // One request and reading its answer, given up on (rejected) after
-// FETCH_TIMEOUT_MS.
-async function fetchWithin<T>(url: string, init: RequestInit, read: (res: Response) => Promise<T> | T): Promise<T> {
+// FETCH_TIMEOUT_MS or when `cancel` aborts.
+async function fetchWithin<T>(
+  url: string,
+  init: RequestInit,
+  read: (res: Response) => Promise<T> | T,
+  cancel?: AbortSignal,
+): Promise<T> {
   const ctrl = new AbortController()
-  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+  const abort = () => ctrl.abort()
+  const timer = setTimeout(abort, FETCH_TIMEOUT_MS)
+  if (cancel?.aborted) abort()
+  else cancel?.addEventListener('abort', abort, { once: true })
   try {
     const res = await fetch(url, { ...init, cache: 'no-store', credentials: 'same-origin', signal: ctrl.signal })
     return await read(res)
   } finally {
     clearTimeout(timer)
+    cancel?.removeEventListener('abort', abort)
   }
 }
 
@@ -97,9 +107,9 @@ type Served = { id: string; entry: string }
 
 // The build the server serves now, or null when it can't be told (offline,
 // an error page, an index.html without an entry script under /static/).
-async function servedBuild(): Promise<Served | null> {
+async function servedBuild(cancel?: AbortSignal): Promise<Served | null> {
   try {
-    const html = await fetchWithin('/', {}, (res) => (res.ok ? res.text() : null))
+    const html = await fetchWithin('/', {}, (res) => (res.ok ? res.text() : null), cancel)
     if (html == null) return null
     const id = buildIdFromHtml(html)
     const entry = entryScriptFromHtml(html)
@@ -111,12 +121,13 @@ async function servedBuild(): Promise<Served | null> {
 
 // The new entry script is served, as JavaScript. (vite preview answers an
 // unknown path with index.html and a 200, hence the type.)
-async function entryServed(entry: string): Promise<boolean> {
+async function entryServed(entry: string, cancel?: AbortSignal): Promise<boolean> {
   try {
     return await fetchWithin(
       entry,
       { method: 'HEAD' },
       (res) => res.status === 200 && /javascript|ecmascript/i.test(res.headers.get('content-type') || ''),
+      cancel,
     )
   } catch {
     return false
@@ -164,14 +175,19 @@ export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
     // Bumped by every hide and every input, so a check under way can
     // tell that it has to give up.
     let epoch = 0
-    let checking = false
+    // The check under way: the epoch it started on, and what aborts its
+    // requests. A hide aborts them, so a check that iOS suspended mid-
+    // request settles at once on resume instead of on a timer that was
+    // frozen meanwhile; and only a check from the current epoch keeps a
+    // return from starting another.
+    let running: { epoch: number; cancel: AbortController } | null = null
 
-    const check = async () => {
+    const check = async (cancel: AbortSignal) => {
       const mine = epoch
       const stale = () => epoch !== mine
       const live = liveBuildId()
       if (!live) return
-      const next = await servedBuild()
+      const next = await servedBuild(cancel)
       if (!next) return
       if (next.id === live) {
         nextRef.current = null
@@ -185,7 +201,7 @@ export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
         return
       }
       if (stale() || pageBusy()) return
-      if (!(await entryServed(next.entry)) || stale()) return
+      if (!(await entryServed(next.entry, cancel)) || stale()) return
       const saved = await flushWrites(flushRef.current)
       if (!saved || stale() || pageBusy() || !rememberReload(next.id)) return
       window.location.reload()
@@ -193,6 +209,7 @@ export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
 
     const onHidden = () => {
       epoch++
+      running?.cancel.abort()
       if (hiddenAt == null) hiddenAt = Date.now()
     }
     const onShown = () => {
@@ -202,10 +219,13 @@ export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
       // itself, so the guard is the phone's.
       const justOpened = !desktopRef.current && hiddenAt - lastStoryOpenAt() <= OPEN_GUARD_MS
       hiddenAt = null
-      if (away < RETURN_CHECK_MS || justOpened || checking) return
-      checking = true
-      void check().finally(() => {
-        checking = false
+      if (away < RETURN_CHECK_MS || justOpened || running?.epoch === epoch) return
+      const mine = { epoch, cancel: new AbortController() }
+      running = mine
+      void check(mine.cancel.signal).finally(() => {
+        // A check from an earlier epoch that settles late leaves a newer
+        // one's marker alone.
+        if (running === mine) running = null
       })
     }
     const onVisibility = () => (document.visibilityState === 'hidden' ? onHidden() : onShown())

@@ -68,6 +68,7 @@ import {
   type ReactNode,
 } from 'react'
 import { api } from '../api'
+import { isRetryable } from './apiErrors'
 import { safeGetItem, safeRemoveItem } from './storage'
 import { toast } from '../components/Toast'
 
@@ -433,11 +434,18 @@ export interface PreferencesContextValue {
   setHistoryGroupBy: (mode: HistoryGroupByValue) => void
 
   /** Send every write still waiting for its debounce, and every value
-   *  the server refused, now; wait for those and the writes already on
-   *  the way. True when all of them were saved. The reload onto a new
-   *  build runs it first and doesn't reload on false (PR1r). */
+   *  that didn't get through (a network error, a timeout, a 5xx), now;
+   *  wait for those and the writes already on the way. True when none of
+   *  them is left to retry: each was saved, or refused for good (a 4xx),
+   *  which a reload onto the matching build is the cure for. The reload
+   *  onto a new build runs it first and doesn't reload on false (PR1r). */
   flushPending: () => Promise<boolean>
 }
+
+// How one PUT ended: saved; refused for good (a 4xx, not retried or
+// kept); or unsaved (it didn't get through and is kept for a retry, or a
+// newer value for its key replaced it).
+type PutResult = 'saved' | 'refused' | 'unsaved'
 
 const PreferencesContext = createContext<PreferencesContextValue | null>(null)
 
@@ -525,12 +533,15 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   // When the last "couldn't save" toast showed: one per burst.
   const failureToastAt = useRef(0)
   // Writes on the way, so the flush before a reload can wait for them
-  // (``flushPending``). Each resolves, true when it was saved, once its
-  // error handling has run.
-  const inFlightRef = useRef<Set<Promise<boolean>>>(new Set())
-  // Values the server refused and nothing newer has replaced: waiting 2 s
-  // for their retry (``retry`` names that timer), or given up on after
-  // it. The flush before a reload and the tab-close flush send them again.
+  // (``flushPending``). Each resolves once its error handling has run.
+  const inFlightRef = useRef<Set<Promise<unknown>>>(new Set())
+  // Values that didn't get through (a network error, a timeout, a 5xx)
+  // and nothing newer has replaced: waiting 2 s for their retry
+  // (``retry`` names that timer), or given up on after it. The flush
+  // before a reload and the tab-close flush send them again. A value the
+  // server refused for good (a 4xx) is never kept here: resending it
+  // would be refused again, and would hold the reload onto the build
+  // that accepts it.
   const unsavedRef = useRef<Map<string, { value: unknown; retry: number | null }>>(new Map())
   // Per key, the latest write sent; an older one that fails afterwards
   // is out of date and is dropped.
@@ -548,35 +559,39 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     return seq
   }, [])
 
-  const track = useCallback((sent: Promise<boolean>) => {
+  const track = useCallback((sent: Promise<unknown>) => {
     inFlightRef.current.add(sent)
     void sent.then(() => inFlightRef.current.delete(sent))
   }, [])
 
-  // One PUT, retried once after 2 s. A newer value for the key, queued
-  // or sent, replaces both the retry and the failure notice.
-  const put = useCallback((key: string, value: unknown, retried = false): Promise<boolean> => {
+  // One PUT. One that didn't get through is retried once after 2 s; one
+  // the server refused (a 4xx: a key or shape it doesn't take, a sign-in
+  // that ran out, a 409 asking for a reload) is not, since it would be
+  // refused again. A newer value for the key, queued or sent, replaces
+  // both the retry and the failure notice.
+  const put = useCallback((key: string, value: unknown, retried = false): Promise<PutResult> => {
     const seq = supersede(key)
     const sent = api.setPreference(key, value).then(
-      () => true,
-      (err) => {
+      (): PutResult => 'saved',
+      (err): PutResult => {
         if (import.meta.env.DEV) console.warn(`preferences: PUT ${key} failed`, err)
-        if (pendingRef.current.has(key) || writeSeqRef.current.get(key) !== seq) return false
-        if (!retried) {
+        if (pendingRef.current.has(key) || writeSeqRef.current.get(key) !== seq) return 'unsaved'
+        const retryable = isRetryable(err)
+        if (retryable && !retried) {
           const retry = window.setTimeout(() => {
             // A newer value queued since goes out instead.
             if (unsavedRef.current.get(key)?.retry === retry && !pendingRef.current.has(key)) void put(key, value, true)
           }, 2000)
           unsavedRef.current.set(key, { value, retry })
-          return false
+          return 'unsaved'
         }
-        unsavedRef.current.set(key, { value, retry: null })
+        if (retryable) unsavedRef.current.set(key, { value, retry: null })
         const now = Date.now()
         if (now - failureToastAt.current > 30_000) {
           failureToastAt.current = now
           toast("Couldn't save your latest changes to Popping. They'll be lost when the app reloads.", 'error')
         }
-        return false
+        return retryable ? 'unsaved' : 'refused'
       },
     )
     track(sent)
@@ -596,16 +611,17 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   // Before a reload onto a new build (PR1r): everything still waiting
   // for the debounce, and everything the server refused, goes now as
   // ordinary PUTs (the page stays until they answer, and keepalive
-  // bodies share a 64 KB budget). True once all of it is saved and
-  // nothing is left unsaved; false means the reload should wait.
+  // bodies share a 64 KB budget). True once nothing is left to retry:
+  // all of it was saved or refused for good. False means the reload
+  // should wait.
   const flushPending = useCallback(async (): Promise<boolean> => {
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current)
       timerRef.current = null
     }
     const earlier = Array.from(inFlightRef.current)
-    // A refused value is on its second try; a queued one on its first.
-    const sends: Promise<boolean>[] = []
+    // An unsaved value is on its second try; a queued one on its first.
+    const sends: Promise<PutResult>[] = []
     for (const [key, { value }] of Array.from(unsavedRef.current)) {
       if (!pendingRef.current.has(key)) sends.push(put(key, value, true))
     }
@@ -613,13 +629,13 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     pendingRef.current.clear()
     const saved = await Promise.all(sends)
     await Promise.all(earlier)
-    return saved.every(Boolean) && unsavedRef.current.size === 0 && pendingRef.current.size === 0
+    return saved.every((r) => r !== 'unsaved') && unsavedRef.current.size === 0 && pendingRef.current.size === 0
   }, [put])
 
   // Flush on tab close. ``fetch`` with ``keepalive`` survives the
   // page unloading. (``sendBeacon`` can't be used: it always POSTs,
-  // and the preferences endpoint is PUT-only.) Values the server
-  // refused go too.
+  // and the preferences endpoint is PUT-only.) Values that didn't get
+  // through go too.
   useEffect(() => {
     const flush = () => {
       if (pendingRef.current.size === 0 && unsavedRef.current.size === 0) return

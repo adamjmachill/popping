@@ -28,6 +28,10 @@ saved first, and a page someone is using never reloads.
     after `RETURN_CHECK_MS` (10 min) or more by `Date.now`.
   - The check fetches `/` (`cache: 'no-store'`, 10 s timeout covering the
     body) and compares ids by inequality, so a revert counts too.
+  - A hide aborts the running check's requests (its `AbortController`), and
+    only a check started in the current epoch keeps a return from starting
+    another (`running`), so a check that iOS suspended mid-request never
+    holds up the next return's.
   - Desktop: sets `ready`; App shows a non-modal "New version · Reload"
     button in the desktop sub-row (not `role="status"`). The click asks for
     the new entry script, flushes, then reloads; if the writes don't all
@@ -41,15 +45,21 @@ saved first, and a page someone is using never reloads.
     id (or can't be written). Any of these leaves it for the next return.
 - `frontend/src/lib/preferences.tsx`:
   - `flushPending(): Promise<boolean>` on the context. It sends what waits
-    for the 250 ms debounce and every value the server refused, as ordinary
-    PUTs, waits for those and the writes already on the way, and is true
-    only when all of them were saved and nothing is left unsaved.
-  - `put` returns its promise and records refused values in `unsavedRef`
-    (with the retry timer, or given up after the retry). A newer write for
-    the key supersedes a retry, an "unsaved" mark and the late failure of
-    an older write (`writeSeqRef`). The retry timer still skips when a
-    newer value is queued.
-  - The tab-close keepalive flush also sends refused values.
+    for the 250 ms debounce and every value that didn't get through, as
+    ordinary PUTs, waits for those and the writes already on the way, and
+    is true only when none of them is left to retry: each was saved or
+    refused for good.
+  - `put` returns `'saved' | 'refused' | 'unsaved'` and sorts failures with
+    `isRetryable` (lib/apiErrors.ts). A network error, a timeout or a 5xx is
+    retried once after 2 s and kept in `unsavedRef` (with the retry timer,
+    or given up after the retry). A 4xx (400, 401, 404/405 after a revert,
+    409, 413, 422) is refused for good: no retry, never kept, so no flush
+    resends it or waits on it; the failure toast still shows. A newer
+    write for the key supersedes a retry, an "unsaved" mark and the late
+    failure of an older write (`writeSeqRef`). The retry timer still skips
+    when a newer value is queued.
+  - The tab-close keepalive flush also sends values that didn't get
+    through (never refused ones).
   - `clearLastViewed`'s DELETE is tracked and supersedes the key.
 - `frontend/src/lib/interactions.ts`: `flushNow()` waits for the batch it
   sends and every batch or immediate POST already on the way. `recordImmediate`
@@ -90,10 +100,14 @@ saved first, and a page someone is using never reloads.
   retry and error handling. Hitting the 3 s cap means no reload (the spec
   doesn't say what the cap leads to; reloading would cut the PUTs off).
   The flush also waits for feed saves (`whenAllIdle`) and in-flight
-  engagement POSTs. A value the server refused, including one given up on
-  after its retry, is sent again by the next flush and blocks the reload
-  until it is saved, so an automatic reload never drops a change the page
-  knows is unsaved.
+  engagement POSTs. A value that didn't get through (network, timeout,
+  5xx), including one given up on after its retry, is sent again by the
+  next flush and blocks the reload until it is saved, so an automatic
+  reload never drops a change the server might still take. A value the
+  server refused with a 4xx is lost either way, and is often refused
+  precisely because the page runs the wrong build (a reverted server's
+  400 for a new key, 405 for PATCH, PR2c's 409); it doesn't block the
+  reload, which is the cure.
 - **More reasons not to reload.** D22 says never while the page is visible;
   the check necessarily runs as the page becomes visible, so "visible" is
   read as "being used": input after the return calls the reload off, and so
@@ -112,8 +126,12 @@ saved first, and a page someone is using never reloads.
 - **Tests beyond the spec.** The phone flow has the spec's three checks
   (no reload under 10 min, one reload after 11 min with the flush first,
   no second reload for the same id) plus the open guard, input, a 404 entry
-  script, the open Menu, a refused save and a save refused twice. A desktop
-  flow covers the button. Mutation checks cover each rule.
+  script, the open Menu, text in the search field, a check cut off by a
+  hide, a save refused with 400 and a pending one refused with 409 (both
+  still reload), and a save that fails with 503 once and twice. The
+  desktop flow covers the button with and without input during the check,
+  and the button going when the server serves the page's own build.
+  Mutation checks cover each rule.
 - **Two device-check lines.** The build line (the merge condition), and the
   automatic reload after the next deploy, which no flow can test (iOS
   suspending a page).
@@ -146,6 +164,19 @@ again on the rebased tree.
   in 3.5, 3.3, 3.2, 3.7 and 3.5 s.
 - `settings-reset` passes C14 at 390 and 320 with the build line.
 
+After the review fixes (same container and database):
+
+- `npm run lint`: 0 errors (the same 6 warnings). `npm run build`: ok.
+  Unit tests: 72 passed. `git diff --exit-code package.json
+  package-lock.json`: clean.
+- No backend file changed; `test_oidc_route_gating.py`: 2 passed.
+- The two reload flows, 5 runs in a row: `flow-reload-on-new-build` ok in
+  23.9, 23.6, 23.9, 24.7 and 24.1 s (longer than before: steps 5b, 5c, 6
+  and 7 are new, and two of them reload); `flow-reload-desktop-button` ok
+  in 4.8, 4.9, 4.9, 5.2 and 4.6 s.
+- Strict smoke, every state and every flow, once: 105 runs, 0 failures and
+  0 warnings, 212 s.
+
 ### Mutation checks
 
 Each: break one line (on a copy), build, run `--only <flow>` (or the unit
@@ -156,17 +187,30 @@ test), restore from the pristine copy and compare byte for byte.
 | no check under 10 min | useUpdateCheck `away < RETURN_CHECK_MS` → `away < 0` | `RELOAD-AWAY`: "back after 9 min: the update check fetched / (2 checks, expected 0)" and "the page reloaded" |
 | open guard | `justOpened = false` | `RELOAD-OPEN`: "back 11 min after opening a story: … the page reloaded" |
 | input calls it off | `onInput` no longer bumps `epoch` | `RELOAD-INPUT`: "a key during the check still went on" |
-| entry script served | drop `entryServed(next.entry)` | `RELOAD-HEAD`: "no HEAD of the new entry script" |
+| entry script served | drop `entryServed(next.entry, cancel)` | `RELOAD-HEAD`: "no HEAD of the new entry script" |
 | open sheet | drop the first `pageBusy()` | `RELOAD-BUSY`: "reloading went on with the Menu open" |
-| flush first | `const saved = true` instead of `await flushWrites(…)` | `RELOAD-SAVED`: "reloaded although the pending save was refused" |
+| text in a field | the text-field check in `pageBusy()` → `return fields.length < 0` | `RELOAD-FIELD`: "reloading went on with text in the search field" |
+| a cut-off check doesn't block the next return | the first commit's guard back (no abort in `onHidden`, and `if (running) return` regardless of epoch) | `RELOAD-RECHECK`: "back again while the cut-off check was still on the way: no check" |
+| flush first | `const saved = true` instead of `await flushWrites(…)` | `RELOAD-SAVED`: "reloaded although the pending save did not get through" |
 | reload only when saved | drop `!saved` | `RELOAD-SAVED`: same |
 | prefs flush waits and reports | `flushPending` returns `true` at once | `RELOAD-SAVED`: same |
-| refused values are resent | drop the `unsavedRef` resend loop in `flushPending` | `RELOAD-FLUSH`: "coming back did not resend the refused save: 1 PUTs" |
-| a value given up on stays unsaved | drop `unsavedRef.set(key, { value, retry: null })` | `RELOAD-FLUSH`: "the reload started before the pending save was done: nav" and "2 PUTs of the save, expected 3" |
-| once per build | drop `reloadedFor() === next.id` | `RELOAD-ONCE`: "reloaded again for the same build (2 reloads)" |
-| desktop shows the button | `if (!desktopRef.current)` | `RELOAD-DESKTOP`: "no Reload button after 11 min away" |
-| desktop input doesn't hide it | `if (stale()) return` before the desktop branch | `RELOAD-DESKTOP`: same |
+| unsaved values are resent | drop the `unsavedRef` resend in `flushPending` | `RELOAD-FLUSH`: "coming back did not resend the unsaved save: 1 PUTs" |
+| a value given up on stays unsaved | drop `if (retryable) unsavedRef.current.set(key, { value, retry: null })` | `RELOAD-FLUSH`: "the reload started before the pending save was done: nav" and "2 PUTs of the save, expected 3" |
+| a 4xx is not retried | `retryable = isRetryable(err) \|\| true` (every refusal retryable) | `RELOAD-REFUSED`: "a save refused with 400 was sent again (2 PUTs)" |
+| a 4xx is not kept | keep a refused value in `unsavedRef` too | `RELOAD-REFUSED`: "a save refused with 400 kept the page from reloading" |
+| a refused send doesn't fail the flush | `flushPending` counts only `'saved'` as done | `RELOAD-REFUSED`: "a pending save refused with 409 kept the page from reloading" |
+| once per build | drop `reloadedFor() === next.id` | `RELOAD-ONCE`: "reloaded again for the same build (4 reloads)" |
+| desktop shows the button | `if (!desktopRef.current)` | `RELOAD-DESKTOP`: "the desktop reloaded by itself" (the no-input return now comes first) |
+| desktop input doesn't hide it | `if (stale()) return` before the desktop branch | `RELOAD-DESKTOP`: "no Reload button after 11 min away" (the return with input) |
+| desktop never reloads by itself | drop the desktop branch's `return` after `setReady(true)` | `RELOAD-DESKTOP`: "the desktop reloaded by itself" |
 | CSS counts | drop the stylesheet branch in `buildUrlsFromHtml` | unit: 6 of 9 `buildId.test.ts` tests fail, including "a CSS-only change changes the id" |
+
+Each half of the cut-off fix holds the rule alone, so breaking only one
+passes, as it should: aborting on hide with the epoch test dropped, or the
+epoch test with the abort dropped, both run the next return's check. Only
+breaking both (the first commit's behaviour) fails. The rows above were all
+re-run on the review-fix tree, apart from the unit-test row (`buildId.ts`
+is unchanged).
 
 ### Review
 
@@ -188,6 +232,54 @@ test), restore from the pristine copy and compare byte for byte.
   values waiting to retry; `clearLastViewed`'s DELETE wasn't awaited;
   `flush()` had two handlers for one promise. Not taken: checking a desktop
   tab that never hides (the spec's triggers are returns; an open item).
+- Review findings on the first commit (6, two of them the same issue), all
+  fixed in "PR1r: review fixes":
+  - A value the server refuses for good (400, 409, 422 …) stayed unsaved,
+    so every flush resent it, got the same refusal and returned false: the
+    phone never reloaded and the desktop Reload only toasted. That is the
+    version-skew case this unit bounds (a resumed newer bundle against a
+    reverted server, or PR2c's 409). `put` now sorts failures with
+    `isRetryable`; a 4xx is neither retried nor kept, its toast still
+    shows, and `flushPending` waits only on values that can still be
+    retried. Flow steps 6 (400) and 7 (409, pending at the hide) cover it.
+  - A check cut off by hiding (iOS suspends the page mid-fetch, its 10 s
+    timer frozen) left `checking` true, so the next return skipped its
+    check. A hide now aborts the check's requests, and only a check from
+    the current epoch blocks a new one. Flow step 5c.
+  - The desktop flow always sent input during the check, so a desktop that
+    reloaded by itself passed (the input tripped the phone path's
+    `stale()`). It now returns once with no input first, then with its own
+    build served (the button goes), then with input.
+  - The text-field half of `pageBusy()` had no test. Flow step 5b.
+  - No security checklist was recorded: see below.
+
+### Security checklist
+
+- No new routes and no backend change; `test_oidc_route_gating.py` passes
+  (2 passed).
+- The new fetches are same-origin and within `connect-src 'self'`: `GET /`
+  with `cache: 'no-store'` and `credentials: 'same-origin'`, and a `HEAD`
+  only of a module-script `src` from that HTML that starts with `/static/`
+  (`entryScriptFromHtml`; a `//host/…` src doesn't match). The HTML is only
+  scanned for attribute strings, never put in the DOM. The reload is
+  `location.reload()`, never a navigation to a URL from the response.
+- `sessionStorage` holds only the build id the tab reloaded for, compared
+  as a string. The build line renders as React text; `__BUILD_TIME__` is
+  only the build time.
+- Preference writes still go through the existing allowlisted
+  `PUT /api/preferences/{key}` (`current_user` + `resolve_user_id`, and
+  `_validate_key` refusing unknown keys with 400). The tab-close keepalive
+  flush uses the same route and body; its bodies share the browser's 64 KB
+  keepalive budget, and a send over it fails and is caught. A value
+  refused with a 4xx is no longer resent at all.
+- The server still coerces and caps the preference JSON it reads
+  (`_coerce_ids`, `_coerce_votes`, `_trim_ids`, `_trim_votes` in
+  `routes/preferences.py`); this unit doesn't change what it reads.
+- No server network I/O is added. `/security-review` could not run here:
+  its first step, `git diff origin/HEAD...`, fails because this clone has
+  no `origin/HEAD` ref. In its place a security-lens review was done in
+  this session against the Rules checklist, over the whole branch diff;
+  it found nothing to fix.
 
 ## Open items for later units
 
