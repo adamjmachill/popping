@@ -83,6 +83,7 @@ async def test_a_section_url_with_an_empty_page_reads_its_section_of_the_sitemap
     reads = _Reads(monkeypatch, sitemap=[f"{SITE}/news/a"], page=[])
     plan = await plan_candidates(f"{SITE}/news")
     assert plan.mode == "sitemap"
+    assert plan.fallback
     assert reads.order == ["page", "sitemap"]
     assert reads.args("sitemap")[0] == f"{SITE}/news"
     assert reads.kwargs("sitemap")["path_prefix"] == "/news/"
@@ -92,6 +93,7 @@ async def test_a_site_root_reads_its_sitemap_first_then_its_home_page(monkeypatc
     reads = _Reads(monkeypatch, sitemap=[], page=[f"{SITE}/post"])
     plan = await plan_candidates(f"{SITE}/")
     assert plan.mode == "page"
+    assert plan.fallback
     assert reads.order == ["sitemap", "page"]
     assert reads.kwargs("sitemap")["path_prefix"] is None
 
@@ -100,6 +102,7 @@ async def test_an_explicit_sitemap_url_is_read_first(monkeypatch):
     reads = _Reads(monkeypatch, sitemap=[f"{SITE}/news/a"], page=[f"{SITE}/news/b"])
     plan = await plan_candidates(f"{SITE}/news", sitemap_url=f"{SITE}/news-sitemap.xml")
     assert plan.mode == "sitemap"
+    assert not plan.fallback
     assert reads.order == ["sitemap"]
     assert reads.args("sitemap")[0] == f"{SITE}/news-sitemap.xml"
 
@@ -232,7 +235,7 @@ async def test_a_listing_page_is_parsed_off_the_event_loop(monkeypatch):
     async def fake_fetch(url, custom_headers=None, **kwargs):
         return "<html><body></body></html>", url
 
-    def slow_listing(html, page_url):
+    def slow_listing(html, page_url, **kwargs):
         time.sleep(0.3)  # a CPU-bound parse, as far as the loop can tell
         return [Candidate(f"{SITE}/news/a", None, None)]
 

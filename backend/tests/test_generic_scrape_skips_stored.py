@@ -320,13 +320,19 @@ async def test_an_undated_page_is_judged_by_its_place_in_the_sitemap_not_the_dat
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
+@pytest.mark.parametrize("listed", ["older first", "newer first"])
 @pytest.mark.parametrize("dated_by", ["lastmod", "url"])
-async def test_an_undated_page_below_any_stored_story_is_backlog(monkeypatch, fake_dns, dated_by):
-    """The stored stories' dates run against the sitemap's order (an
-    edit moved a ``<lastmod>``, or the sitemap lists oldest first), so
-    the newest-dated stored story is listed below the older one. An
-    undated page between them is listed below a stored story, the older
-    one: backlog, though it sits above the newest-dated one."""
+async def test_an_undated_page_below_any_stored_story_is_backlog(
+    monkeypatch, fake_dns, dated_by, listed
+):
+    """Two stored stories with different dates, and an undated page
+    listed between them. It is listed below a stored story, the first
+    one: backlog, whichever of the two is the older-dated. With the
+    older one first, the stories' dates run against the sitemap's order
+    (an edit moved a ``<lastmod>``, or the sitemap lists oldest first)
+    and the page sits above the newest-dated one; with the newer one
+    first (the usual newest-first order), it sits above the oldest-dated
+    one. So only "below any stored story" holds in both."""
     site = "https://example.com"
     if dated_by == "lastmod":
         older, newer = (f"{site}/notes/river-trail-{n}/" for n in ("a", "b"))
@@ -336,7 +342,9 @@ async def test_an_undated_page_below_any_stored_story_is_backlog(monkeypatch, fa
         lastmods = {}
     new, between = f"{site}/guides/harvest-market-plans/", f"{site}/guides/winter-road-closures/"
     stored = [older, newer]
-    calls, items = await _crawl_undated(monkeypatch, site, [new, older, between, newer], lastmods, stored)
+    above, below = (older, newer) if listed == "older first" else (newer, older)
+    urls = [new, above, between, below]
+    calls, items = await _crawl_undated(monkeypatch, site, urls, lastmods, stored)
     assert calls == [new, between]
     assert [i["url"] for i in items] == [new]
 

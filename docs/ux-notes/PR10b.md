@@ -107,7 +107,8 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
     the site's own order (round 3).
     - It orders and skips sitemaps with `article_detect.order_sitemaps`, both the robots.txt
       list and each index's nested list (newest first within a class).
-    - It keeps entries that pass `url_ok` against the crawl's site.
+    - It keeps entries that pass `url_ok` against the crawl's site, below the feed's section
+      (`section=path_prefix`, round 5).
     - Each document is parsed and filtered in `asyncio.to_thread` (`_read_sitemap`): `url_ok`
       costs about 90 µs per URL, so a 5000-entry sitemap would hold the event loop for about
       half a second.
@@ -134,13 +135,15 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   - `_looks_like_sitemap` is public as `looks_like_sitemap` (`generic_scrape` uses it).
 - **`backend/app/sources/generic_scrape.py`**
   - `plan_candidates(url, sitemap_url, link_pattern, headers, known_urls, *, limit,
-    raise_errors) -> Plan(mode, candidates, fresh)` serves `fetch` and `probe`.
+    raise_errors) -> Plan(mode, candidates, fresh, fallback)` serves `fetch` and `probe`.
+    `fallback` (round 5): the second read gave the candidates.
     - A section URL reads the page, then the sitemap. A site root, a feed with a
       `sitemap_url`, or a URL that looks like a sitemap reads the sitemap, then the page. The
       first read with candidates wins.
     - The page read (`_discover_page_links`) keeps today's prefix filter with a link pattern
       and uses `listing_links` without one. Every link passes `url_ok`, as the owner's choice
-      under the link pattern (`owner_pattern`). The page is fetched with
+      under the link pattern (`owner_pattern`), and judged below the feed's own section
+      (`section`: the pattern, else the address's section; round 5). The page is fetched with
       `raise_for_status`, because it is the feed's own address. `listing_links` resolves against
       the final URL when the page redirected within the site. The parse runs in a thread.
     - The sitemap read is scoped to the link pattern, else the URL's section. The whole-sitemap
@@ -173,8 +176,10 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
       backlog (`_backlog_rule`, see the review fixes). Pages it drops stay marked. A page left for
       a later poll while it was new keeps that verdict (`_deferred_new`, round 3);
     - `owner_configured` is worked out after the plan: the link pattern, or a `sitemap_url` whose
-      sitemap gave the candidates. A page read in a poll where the `sitemap_url` gave nothing is
-      marked `unvouched` and read once more when the sitemap lists it (round 2).
+      sitemap gave the candidates. A page read in a poll whose plan came from its second read
+      (`Plan.fallback`: the usual read failed or found nothing) is marked `unvouched` and read
+      once more when a poll's usual read lists it (round 2 for a `sitemap_url`, round 5 for
+      every feed).
   - `probe` uses the same plan without `raise_errors` and skips refused pages, so the Test
     route's preview never raises.
 - **`backend/app/sources/base.py`**: the `KnownUrls` type and `SourcePlugin.takes_ingest_hints`
@@ -260,19 +265,27 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   (review fix; the first cut used position everywhere): listed below a stored story on a
   listing page, and in a sitemap for a page with no `<lastmod>` (round 2), by its place in the
   sitemap's own order, not the candidates' date order (round 3), below any stored story whatever
-  the stored stories' own dates (round 4's test); in a sitemap, last modified
-  before the poll's backlog line. A page a poll left for later (refused, failed in a way that
-  passes, read without the owner's word) while it was new is still new when it is read, even
-  below a story stored in between (round 3). Pages the cap drops stay marked. PR4a's notes
+  the stored stories' own dates (round 4's test; round 5 tests both orders of the stored
+  stories' dates); in a sitemap, last modified before the poll's backlog line. A page a poll
+  left for later (refused, failed in a way that passes, read while the usual read gave nothing)
+  while it was new is still new when it is read, even below a story stored in between (round
+  3). The rule reads the order of the read that gave the poll's plan; a page dropped in a poll
+  whose usual read gave nothing is read once more when the usual read lists it, and judged by
+  that read's order and dates (round 5). Pages the cap drops stay marked. PR4a's notes
   suggested leaving them unmarked, but then every poll would fetch them again only to drop
   them again, up to 8 wasted fetches a poll on an undated site.
 - **`url_ok` applies under a link pattern too,** as the spec's raw-discovery rule says, but
   without courlan (review fix) or its 2-to-5-letter ending rule (round 3): the pattern is the
   owner's article signal. The prefix filter itself is unchanged, and our own path rules and file
-  endings still apply, so an owner pattern that targets record pages such as `/products/<x>` is
-  still filtered out (see Open items). A code word that ends a software name (`.js`, `.json`,
-  `.css`, `.xml`) is a file's ending only at the very end of the path, not before a `/` or under
-  `.html` (round 4).
+  endings still apply, but the segment rules (listing, record and static-section words) judge
+  only the segments below the section the feed reads: its link pattern, else its address's
+  section, is the owner's choice (round 5). So `/about/news/<slug>` on a feed pointed at
+  `/about/news`, and `/products/<x>` under a `/products/` pattern, are candidates, which
+  `score_page` judges; a page's own name, date archives and file endings are judged everywhere.
+  With no section to go by (a root feed, `/auto`), a static section (`/about/`, `/pages/`) with
+  a news section under it (`/about/news/<slug>`) is not static (round 5). A code word that ends
+  a software name (`.js`, `.json`, `.css`, `.xml`) is a file's ending only at the very end of the
+  path, not before a `/` or under `.html` (round 4).
 - **Article pages that fail in a way that passes are asked for again.** The first cut marked a
   page that timed out or answered 5xx, so a transient failure lost the story (review fix). Now
   only a page that was read (gone, not HTML, not an article, kept) is marked. A failed page is
@@ -560,7 +573,9 @@ reverted in place (Verification below). None was skipped.
    line now says the `sitemap_url` "gave no pages" (it said "listed nothing" after a 503 too).
    Test: `test_a_sitemap_url_that_fails_for_one_poll_keeps_its_pages` (503, 429, timeout,
    empty; the third poll fetches nothing). (Round 3, fix 4: such a page isn't backlog when it
-   comes back below a story stored meanwhile; fix 7: the test runs three failing polls.)
+   comes back below a story stored meanwhile; fix 7: the test runs three failing polls. Round 5,
+   fix 2: every feed whose usual read gives nothing for a poll, not only one with a
+   `sitemap_url`.)
 4. **A sitemap with no `<lastmod>` dropped every new undated page after the first fetch**
    (minor). In a sitemap, a page with no `<lastmod>` now uses the listing page's rule (above
    the first stored candidate is new, below is backlog); only a page with a `<lastmod>` is held
@@ -833,6 +848,128 @@ below). Neither was skipped.
 - **`ruff check --select F,E9,B`** on the changed files: clean (`article_detect.py` and the three
   test files).
 
+## Review fixes (round 5)
+
+The fifth review's four findings: two regressions against main and two tests that couldn't
+fail. Each was reproduced first with the reviewers' probes, against HEAD 39dd76b and main, and
+each fix has a test that fails when it is reverted in place (Verification below). None was
+skipped.
+
+1. **Articles under `/about/` (or `/about-us/`, `/pages/`) were dropped, even under the owner's
+   link pattern** (major; a regression against main). `url_ok` rejected every URL whose first
+   segment is a static section, and neither the feed's section nor its link pattern lifted the
+   rule. A council or university site that files its news under `/about/news/<slug>` read
+   `[no list]` on every poll in all four setups the reviewer tried (a section feed, a section
+   feed with a link pattern, a root feed with a `sitemap_url`, a root feed), and `/auto` found
+   nothing; main stored the 3 stories in each. Two changes, one for each kind of feed:
+   - `url_ok(..., section=)`: the section the feed reads (its link pattern, else its address's
+     section) is the owner's choice, so for a URL below it the segment rules (`_listing_path`
+     and the static-section rule) judge only the segments below it (`_own_segments`: a prefix
+     that ends inside a segment owns only the whole segments before it, and the section page
+     itself owns none). The sitemap read (`_read_sitemap`), the link pattern's page links and
+     `listing_links` pass it. A page's own name, date archives, file endings and courlan are
+     judged as before. So `/about/media-centre/<slug>` comes in on a feed pointed at that
+     section, and so do record-shaped pages below a section the owner chose (`/products/<x>`
+     under a `/products/` pattern, the old Open item), which `score_page` then judges, as main
+     fetched them.
+   - With no section to go by (a root feed, `/auto`), a static section with a news section
+     between it and the page (`_NEWS_SECTIONS`: `news`, `blog`, `press`, `newsroom`,
+     `press-releases` and the like) is not static (`_static_section`): `/about/news/<slug>` is a
+     candidate, while `/about/news` itself, `/about/team/<x>`, `/about/team/news` and
+     `/pages/our-story` are still rejected. The reviewer's 37 `url_ok` cases give the same
+     verdicts as at HEAD except `/about/news/council-approves` and `/pages/news/council-approves`.
+
+   Tests: `test_url_ok_reads_a_news_section_under_a_static_section`,
+   `test_url_ok_judges_only_the_segments_below_the_feeds_own_section` and
+   `test_url_ok_keeps_its_rules_outside_and_below_the_feeds_own_section` in
+   `test_article_detect.py`; in `test_generic_scrape_errors.py`,
+   `test_articles_under_an_about_section_are_articles` (the reviewer's four setups for
+   `/about/news/`, a root feed for `/about-us/news/`, and three setups that name
+   `/about/media-centre/` as the feed's section; through the real fetch path, each checking that
+   the feed's usual read found the stories alone and that `/about/` is never fetched) and
+   `test_auto_discovery_finds_a_sitemap_of_news_under_an_about_section`. The fake
+   `listing_links` in `test_a_listing_page_is_parsed_off_the_event_loop` takes `**kwargs`.
+2. **A one-poll failure of a feed's usual read lost pages its other read judged on weaker
+   evidence** (minor; a regression against main). Round 2's `unvouched` covered only a feed with
+   a `sitemap_url`. Any other feed whose usual read failed or came back empty for one poll read
+   the other one and marked its pages for good, though that read judges a page differently: the
+   home page's links carry no news sitemap date, so an `og:type=website` story was rejected; a
+   sticky post at the top of the home page made a new undated post backlog; and a section feed
+   whose listing page answered 503 read its sitemap (oldest first, no `<lastmod>`), where the
+   new post sat below the stored ones. main stored each of them when the usual read came back.
+   `plan_candidates` now reports `Plan.fallback` (the second read gave the candidates; it
+   defaults to False, so the `Plan(...)` values in tests and PR11a's use are unchanged), `fetch`
+   sets `unvouched` from it, and `_seen` lets a poll whose plan came from the usual read read
+   such a page once more. The `_deferred_new` verdict is kept for them, as for unvouched pages
+   before. A feed with a `sitemap_url` behaves as before (its sitemap is its usual read) and
+   keeps its INFO line; other feeds log the fallback at DEBUG. Tests, through the real fetch
+   path: `test_a_root_feed_whose_news_sitemap_fails_for_one_poll_keeps_its_new_story`,
+   `test_a_root_feed_whose_sitemap_fails_for_one_poll_does_not_drop_its_new_post` and
+   `test_a_section_feed_whose_listing_fails_for_one_poll_does_not_drop_its_new_post` (the new
+   story is rejected or dropped on the bad poll, stored on the next, and asked twice in all);
+   `Plan.fallback` asserts in three `test_generic_scrape_plan.py` cases.
+3. **The sitemap-place test couldn't tell "below any stored story" from "below the
+   oldest-dated one"** (minor; test only). Round 4's test listed the older-dated stored story
+   first, so the oldest-dated story was also the first listed. The test now also runs in the
+   usual newest-first order (`[new, newer, between, older]`), where the oldest-dated mutant
+   brings `between` in; the round-4 order still catches the newest-dated one. The rule's code is
+   unchanged.
+4. **A code word at the very end of the path under the owner's link pattern had no test**
+   (minor; test only). `/library/getting-started-with-three.js` and `/library/feed.xml` join the
+   reject list of `test_url_ok_keeps_its_own_rules_under_the_owners_link_pattern`. The code is
+   unchanged.
+
+README's "Website feeds" and ARCHITECTURE.md's `_extracted_urls` and `_deferred_new` rows
+follow fixes 1 and 2; the Deviations (the undated cap, `url_ok` under a link pattern), Risks
+and Open items above and below are corrected for them.
+
+### Verification of the round-5 fixes
+
+- **Reproduced first**, with the reviewers' probes (one plugin instance per scenario through the
+  real fetch path), against HEAD 39dd76b, main 619000f and this tree:
+  - `/about/news/` (pC): `[no list]` on both polls in all four setups at HEAD; main and this
+    tree store the 3 stories on poll 1 in each. `url_ok` (pU): only the two `/about/news/` and
+    `/pages/news/` verdicts change from HEAD.
+  - The fallback reads (pF2 news sitemap dates, pF sticky post, pF3 section listing 503): HEAD
+    asks for the new story once and never stores it; main and this tree store it when the usual
+    read is back (this tree asks for it twice). Without the outage (pF2b, pFb) HEAD and this
+    tree store it on poll 2 and ask once. The undated-stream probe (pS) gives the same counts
+    as HEAD: the oldest-first sitemap with no `<lastmod>` is the documented risk below.
+  - Findings 3 and 4 are test gaps: with HEAD's own tests, each reviewer's mutant (the
+    oldest-dated stored story; code words not files at the end of a path under the pattern)
+    leaves all 418 PR10b tests passing, as the reviewers found; below, they fail now.
+- **Revert in place.** A script applied each mutant, ran `test_article_detect.py`,
+  `test_generic_scrape_errors.py`, `test_generic_scrape_plan.py` and
+  `test_generic_scrape_skips_stored.py`, required a failure, and restored the file byte for byte
+  (SHA-256 of the file, and of `git diff` before and after). All 19 were caught:
+  - fix 1: HEAD's rules (neither change): 17 fail; no news-section lift: 9; no feed section:
+    9; the static-section rule judged inside the feed's section: 6; the listing rules judged
+    inside it: 3; a partial segment counted as owned: 2; the section page itself owned: 1; a
+    news word as the page itself lifting the rule: 3; the section left out of the sitemap read:
+    1, of the link pattern's page links: 1, of `listing_links`: 1;
+  - fix 2: `unvouched` set only for a `sitemap_url` (HEAD's rule): 3; `Plan.fallback` never
+    set: 10; fallback read as page mode: 3; unvouched pages read on every poll: 4; never read
+    again: 8;
+  - fix 3: the reviewer's oldest-dated mutant: 3 (both datings, and the sticky-post test);
+    round 4's newest-dated mutant: 2;
+  - fix 4: the reviewer's mutant (code words not files under the pattern): 2.
+
+  The first run had three survivors, the section left out of each read: the other read found
+  the stories, so the feed still stored them. The about-section test now checks that a section
+  feed never asks for the sitemap and a root feed never asks for its home page.
+- **Against HEAD 39dd76b's code** (a scratch export with this round's tests): 38 cases fail
+  there: the 5 accept cases of the news-section test, the 18 `section` cases of `url_ok` (on the
+  new argument), the 8 about-section crawls and the `/auto` case, the 3 fallback cases and the
+  3 `Plan.fallback` asserts. The 10 reject cases of the news-section test, fix 3's new order
+  and fix 4's cases pass there, as they should: they guard rules HEAD had right.
+- **PR10b test files** (the 12, `test_slice27_deferred_perf.py`, `test_feed_autodiscovery.py`
+  and `test_b1_b8_coverage_gaps.py`): 483 passed, 4 failed, the 4 DNS-only `/auto` route tests
+  in the baseline (434 before this round, plus the 49 new cases).
+- **Backend pytest** (database `popping_test_b`, worktree `PYTHONPATH`): **13 failed, 1489
+  passed**. The 13 are exactly the DNS-only baseline (`/root/popping-env/baseline.txt`).
+- **`ruff check --select F,E9,B`** on the changed files: clean (`article_detect.py`,
+  `feed_autodiscovery.py`, `generic_scrape.py` and the four test files).
+
 ## Risks and data-compatibility notes
 
 - **Some website feeds will pull fewer stories or show a new state.** This is the intended
@@ -860,6 +997,18 @@ below). Neither was skipped.
 - **A `sitemap_url` that is the site's own address** now leads to the site's sitemaps through
   robots.txt (round 2), and those sitemaps vouch for their pages as the owner's
   (`owner_configured`), as any sitemap the `sitemap_url` names does.
+- **A feed whose usual read never works** (a root blog with no sitemap, a section whose
+  listing page is gone but whose section of the sitemap works) reads every poll from its second
+  read (round 5). Its pages are marked `unvouched`, which costs nothing while that lasts; if the
+  usual read starts working, each of them is read once more (10 a poll at most), and those that
+  weren't backlog when read wait in `_deferred_new` (1000 at most) until then.
+- **The section a feed reads isn't judged by `url_ok`'s segment words** (round 5): a section
+  feed at `/category/news` takes a subcategory listing such as `/category/news/local/` as a
+  candidate, and a `/products/` pattern its product pages; `score_page` alone rejects the ones
+  that aren't articles (one fetch each, then marked), where main stored all of them. The words
+  below the section are still judged (`/category/news/tag/parks/`, `/category/news/page/2/`). A
+  static section with a news section under it is news on every feed (`/about/news/<slug>`); its
+  other pages (`/about/team/<x>`) are still dropped.
 - **After a restart,** pages that were fetched but not kept (not articles, too old, over the
   undated cap) are fetched once more, and pages that were failing start a new count of 3.
   Stored pages are not fetched. What a page left for later was (new, `_deferred_new`) is
@@ -885,10 +1034,12 @@ below). Neither was skipped.
 - **Scoring edge cases** from PR10a stand. A date in the URL earns +1 and cancels the
   `og:type=website` −3, so a static page at a dated URL scores 2 and is accepted (seen while
   writing these tests; not a real-world shape so far).
-- **`url_ok` under a link pattern** no longer asks courlan, but our own path rules still reject
-  record-shaped paths (`/products/<x>`, `/users/<x>`) even when the owner chose them. If a feed
-  needs that, the pattern should replace `url_ok`'s path rules for that feed; that is a spec
-  change.
+- **`url_ok` on a root feed** judges every segment: a site that files its stories under a static
+  section whose name is no news section's (`/about/media-centre/<slug>`) finds nothing there
+  from its root, and reads `[no list]` when nothing else lists articles, where main read its
+  whole sitemap. A feed pointed at that section, or a link pattern, brings them in (round 5).
+  `_NEWS_SECTIONS` can grow when such a site turns up. Record-shaped paths (`/products/<x>`,
+  `/users/<x>`) are candidates only below the section a feed reads.
 - **A date written only as text** ("Posted on October 14, 2026") with no `<time>`, no metadata
   and no listing card date still leaves an `og:type=website` page undated (−3), and such a page
   is rejected without a link pattern. Reading dates from text is a heuristic of its own.

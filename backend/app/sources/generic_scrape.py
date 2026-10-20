@@ -160,6 +160,9 @@ class Plan(NamedTuple):
     # The candidates not already stored (``known_urls``), in the same
     # order. All of them when no lookup was given.
     fresh: list[Candidate]
+    # The candidates came from the second read, because the first (the
+    # usual read for the feed's kind of address) failed or found none.
+    fallback: bool = False
 
 
 async def plan_candidates(
@@ -184,6 +187,9 @@ async def plan_candidates(
       that looks like a sitemap reads the sitemap first. The page comes
       second: an HTML sitemap page (``/sitemap/``) is a listing, and an
       XML one reads as no page at the cost of one fetch.
+
+    ``Plan.fallback`` says the second read gave the candidates (see
+    ``GenericScrapePlugin.fetch``).
 
     The sitemap read takes the owner's ``sitemap_url`` as the sitemap
     whatever its address looks like, so a 404 there is the feed's own
@@ -234,8 +240,8 @@ async def plan_candidates(
         reads = [("page", read_page), ("sitemap", read_sitemap)]
 
     failures: list[BaseException] = []
-    mode, found = "", []
-    for name, read in reads:
+    mode, found, fallback = "", [], False
+    for index, (name, read) in enumerate(reads):
         try:
             found = await read()
         except Exception as exc:  # noqa: BLE001 - kept: the other read may still find the list
@@ -243,7 +249,7 @@ async def plan_candidates(
             failures.append(exc)
             continue
         if found:
-            mode = name
+            mode, fallback = name, index > 0
             break
     if not found:
         if raise_errors:
@@ -253,7 +259,7 @@ async def plan_candidates(
             raise NoArticleListError("no sitemap or listing page with articles")
         return Plan("", [], [])
     stored = await known_urls([c.url for c in found]) if known_urls is not None else set()
-    return Plan(mode, found, [c for c in found if c.url not in stored])
+    return Plan(mode, found, [c for c in found if c.url not in stored], fallback)
 
 
 def _too_old(item: dict) -> bool:
@@ -586,19 +592,25 @@ def _page_links(html: str, page_url: str, final_url: str, pattern: str | None) -
     a link pattern, the links under it (``_extract_links_from_html``),
     undated and untitled, passing ``url_ok`` as the owner's choice;
     without, the page's repeating list of posts (``listing_links``),
-    each with its card's title and date, passing ``url_ok``. CPU-bound
-    (an HTML parse and a URL test per link), so ``_discover_page_links``
+    each with its card's title and date, passing ``url_ok``. Either way
+    ``url_ok`` judges a link below the feed's own section (the pattern,
+    else the page's section) by the segments below it. CPU-bound (an
+    HTML parse and a URL test per link), so ``_discover_page_links``
     runs it in a thread."""
     if pattern:
         return [
             Candidate(link, None, None)
             for link in _extract_links_from_html(html, page_url, pattern)
-            if url_ok(link, page_url, owner_pattern=True)
+            if url_ok(link, page_url, owner_pattern=True, section=pattern)
         ]
     # Resolve against where the page ended up (``/news`` redirecting to
     # ``/news/`` changes what a relative link means), unless it
     # redirected off the site.
-    return listing_links(html, final_url if same_site(final_url, page_url) else page_url)
+    return listing_links(
+        html,
+        final_url if same_site(final_url, page_url) else page_url,
+        section=_section_prefix(page_url),
+    )
 
 
 async def _discover_page_links(
@@ -645,8 +657,8 @@ class _Read(NamedTuple):
     # show that the site serves us (``_settle_refusals``). False for a
     # page that was gone, wasn't HTML, kept failing or refused everyone.
     served: bool = False
-    # Read in a poll whose candidates the owner never chose (see
-    # ``GenericScrapePlugin.fetch``).
+    # Read in a poll whose usual read gave nothing, on the other read's
+    # weaker evidence (see ``GenericScrapePlugin.fetch``).
     unvouched: bool = False
 
 
@@ -756,9 +768,9 @@ class GenericScrapePlugin(SourcePlugin):
         # that passes (see ``_page_failed``); bounded FIFO.
         self._page_failures: "OrderedDict[str, int]" = OrderedDict()
         # Pages a poll left for a later one (refused, failed in a way that
-        # passes, or read without the owner's word) while they weren't
-        # backlog. Their next read keeps that verdict (see ``fetch``);
-        # bounded FIFO.
+        # passes, or read while the usual read gave nothing) while they
+        # weren't backlog. Their next read keeps that verdict (see
+        # ``fetch``); bounded FIFO.
         self._deferred_new: "OrderedDict[str, None]" = OrderedDict()
 
     def _mark_extracted(self, url: str, *, served: bool = False, unvouched: bool = False) -> None:
@@ -767,9 +779,9 @@ class GenericScrapePlugin(SourcePlugin):
         O(1) and returns FIFO order.
 
         ``served``: the site answered with a page (``_Read.served``).
-        ``unvouched``: the page was read in a poll whose candidates the
-        owner never chose (see ``fetch``), so ``_seen`` lets a poll that
-        has the owner's word read it once more.
+        ``unvouched``: the page was read in a poll whose usual read gave
+        nothing (see ``fetch``), so ``_seen`` lets a poll whose usual
+        read lists it read it once more.
         """
         # ``setdefault`` would also work but ``__setitem__`` is faster
         # and we don't need the existing-value semantics.
@@ -780,13 +792,13 @@ class GenericScrapePlugin(SourcePlugin):
         while len(self._extracted_urls) > _MAX_EXTRACTED_URLS:
             self._extracted_urls.popitem(last=False)
 
-    def _seen(self, url: str, owner_configured: bool) -> bool:
+    def _seen(self, url: str, usual: bool) -> bool:
         """Whether this poll skips ``url`` as already read: it is marked,
         unless it was marked ``unvouched`` and this poll's candidates
-        have the owner's word (``owner_configured``)."""
+        came from the feed's usual read (``usual``)."""
         if url not in self._extracted_urls:
             return False
-        return not (owner_configured and self._extracted_urls[url].unvouched)
+        return not (usual and self._extracted_urls[url].unvouched)
 
     def _page_failed(self, url: str, exc: BaseException) -> None:
         """A page's fetch failed in a way that passes (a timeout, a
@@ -852,20 +864,29 @@ class GenericScrapePlugin(SourcePlugin):
         owner_configured = bool(self.link_pattern) or (
             bool(self.sitemap_url) and plan.mode == "sitemap"
         )
-        # So a page the home page's links brought in a poll like that is
-        # marked as read without the owner's word (``unvouched``). When
-        # the owner's sitemap lists it on a later poll, it is read once
-        # more: a sitemap that failed for one poll (a 503, a timeout, an
-        # empty answer while it rebuilds) mustn't lose the pages it lists.
-        unvouched = bool(self.sitemap_url) and not owner_configured
-        if unvouched:
+        # A poll whose usual read failed or found nothing (a 503, a
+        # timeout, an empty answer while a sitemap rebuilds) reads the
+        # other one (``Plan.fallback``), which judges a page on other
+        # evidence: a listing page's links carry no news sitemap date (nor
+        # a ``sitemap_url``'s word), a sitemap's entries no listing card's
+        # date, and the backlog rule reads another order. So each page it
+        # reads is marked as read on that evidence (``unvouched``), and a
+        # later poll whose usual read lists it reads it once more: one bad
+        # poll mustn't lose a page.
+        unvouched = plan.fallback
+        if unvouched and self.sitemap_url:
             logger.info(
                 "generic_scrape: %s: its sitemap_url %s gave no pages; read %s instead",
                 self.name, self.sitemap_url, self.url,
             )
+        elif unvouched:
+            logger.debug(
+                "generic_scrape: %s: its usual read gave no pages; read the %s instead",
+                self.name, plan.mode,
+            )
         batch: list[Candidate] = []
         for candidate in plan.fresh:
-            if self._seen(candidate.url, owner_configured):
+            if self._seen(candidate.url, not plan.fallback):
                 continue
             if len(batch) >= _MAX_NEW_PER_POLL:
                 # Leave the rest for the next poll — see
@@ -936,8 +957,8 @@ class GenericScrapePlugin(SourcePlugin):
             if result is not None and not _too_old(result):
                 items.append(result)
         # The pages this poll leaves for a later one (refused, failed in a
-        # way that passes, or read without the owner's word) while they
-        # are new stay new until they are read for good.
+        # way that passes, or read while the usual read gave nothing)
+        # while they are new stay new until they are read for good.
         for candidate in batch:
             read = self._extracted_urls.get(candidate.url)
             if (read is None or read.unvouched) and not backlog(candidate.url):
@@ -1026,9 +1047,9 @@ class GenericScrapePlugin(SourcePlugin):
         no publication date.
 
         A page in ``new_before`` was left for this poll by an earlier one
-        (refused, failed in a way that passes, or read without the
-        owner's word) while it wasn't backlog, so it isn't now: it would
-        have come in then, before the stories stored since.
+        (refused, failed in a way that passes, or read while the usual
+        read gave nothing) while it wasn't backlog, so it isn't now: it
+        would have come in then, before the stories stored since.
 
         Every page dropped here stays marked extracted: it was read and
         passed over, and fetching it again every poll would only drop it

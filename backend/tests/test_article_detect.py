@@ -203,12 +203,93 @@ def test_url_ok_reads_an_ending_only_at_the_end_of_the_path(path, ok):
         "https://www.example.com/library/2026/07/",
         "https://www.example.com/library/riverlm3.png",
         "https://www.example.com/library/riverlm3.zip/",
+        # A code word at the very end of the path is a file's ending,
+        # under the owner's pattern too.
+        "https://www.example.com/library/getting-started-with-three.js",
+        "https://www.example.com/library/feed.xml",
         "https://www.example.com/library/about",
         "https://www.other-site.com/library/riverlm3",
     ],
 )
 def test_url_ok_keeps_its_own_rules_under_the_owners_link_pattern(url):
     assert not url_ok(url, SITE, owner_pattern=True)
+
+
+@pytest.mark.parametrize(
+    ("path", "ok"),
+    [
+        # A news section filed under a static section (councils,
+        # universities, companies): its articles are articles ...
+        ("/about/news/council-approves-river-trail", True),
+        ("/about-us/news/harvest-market-returns/", True),
+        ("/about/press/2026/flu-shots-available", True),
+        ("/about/media/news-releases/new-library-hours", True),
+        ("/pages/blog/our-new-trail-map", True),
+        # ... but the section page itself, the static tree around it
+        # and the news section's own listings are not.
+        ("/about/news", False),
+        ("/about/news/", False),
+        ("/about/team/dana-smith", False),
+        ("/about/history", False),
+        ("/pages/our-story", False),
+        ("/about/team/news", False),
+        ("/about/news/page/2/", False),
+        ("/about/news/tag/parks/", False),
+        ("/about/news/2026/10/", False),
+        ("/about/news/contact", False),
+    ],
+)
+def test_url_ok_reads_a_news_section_under_a_static_section(path, ok):
+    assert url_ok("https://www.example.com" + path, SITE) is ok
+
+
+@pytest.mark.parametrize(
+    ("path", "section", "owner_pattern"),
+    [
+        ("/about/media-centre/council-approves-river-trail", "/about/media-centre/", False),
+        ("/about/media-centre/council-approves-river-trail", "/about/media-centre/", True),
+        ("/shop/journal/new-trail-shoes", "/shop/journal/", False),
+        ("/contact-us/notices/road-closure-on-main-street/", "/contact-us/notices/", False),
+        ("/products/canvas-tote", "/products/", True),
+        ("/members/dana", "/members/", True),
+    ],
+)
+def test_url_ok_judges_only_the_segments_below_the_feeds_own_section(path, section, owner_pattern):
+    """The feed reads a section the owner chose (its address's section,
+    or its link pattern), so the segment rules don't judge that
+    section's own segments: its pages are candidates, which
+    ``score_page`` judges. Without the section they are not."""
+    url = "https://www.example.com" + path
+    assert url_ok(url, SITE, owner_pattern=owner_pattern, section=section)
+    assert not url_ok(url, SITE, owner_pattern=owner_pattern)
+
+
+@pytest.mark.parametrize(
+    ("path", "section"),
+    [
+        # Outside the section the rules are whole.
+        ("/about/", "/about/media-centre/"),
+        ("/about/team", "/about/media-centre/"),
+        ("/shop/canvas-tote", "/shop/journal/"),
+        # The section page itself is the listing.
+        ("/about/media-centre/", "/about/media-centre/"),
+        ("/about/media-centre", "/about/media-centre/"),
+        # Below it, the segments below the section, the page's own name
+        # and the file endings are judged.
+        ("/about/media-centre/tag/parks/", "/about/media-centre/"),
+        ("/about/media-centre/page/2/", "/about/media-centre/"),
+        ("/about/media-centre/contact", "/about/media-centre/"),
+        ("/about/media-centre/2026/10/", "/about/media-centre/"),
+        ("/about/media-centre/annual-report.pdf", "/about/media-centre/"),
+        # A prefix that ends inside a segment owns only the whole
+        # segments before it.
+        ("/library/tags", "/library/ta"),
+        ("/library/tag/python", "/library/t"),
+    ],
+)
+def test_url_ok_keeps_its_rules_outside_and_below_the_feeds_own_section(path, section):
+    assert not url_ok("https://www.example.com" + path, SITE, section=section)
+    assert not url_ok("https://www.example.com" + path, SITE, owner_pattern=True, section=section)
 
 
 def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():

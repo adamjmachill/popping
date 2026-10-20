@@ -1088,6 +1088,119 @@ async def test_a_page_left_for_later_while_it_was_backlog_is_still_backlog(site)
     assert old_model in plugin._extracted_urls
 
 
+_BODY = "<p>" + "The council met on Tuesday and approved the plan for the trail. " * 14 + "</p>"
+
+
+def _undated_page(title: str, og_type: str) -> tuple[int, str, str]:
+    """A story page with no date of its own, tagged ``og_type``."""
+    return _html(
+        f'<html><head><meta property="og:type" content="{og_type}"><title>{title}</title></head>'
+        f"<body><main><article><h1>{title}</h1>{_BODY}</article></main></body></html>"
+    )
+
+
+def _list_of(*urls: str) -> tuple[int, str, str]:
+    """A listing page whose posts are ``urls``, in that order."""
+    links = "".join(f'<li><a href="{u}">The story at {u}</a></li>' for u in urls)
+    return _html(f"<html><body><main><ul>{links}</ul></main></body></html>")
+
+
+def _news_sitemap(*entries: tuple[str, str]) -> tuple[int, str, str]:
+    """A news sitemap: each ``(url, publication date)``, no ``<lastmod>``."""
+    urls = "".join(
+        f"<url><loc>{u}</loc><news:news><news:publication><news:name>Example</news:name>"
+        "<news:language>en</news:language></news:publication>"
+        f"<news:publication_date>{d}</news:publication_date>"
+        "<news:title>A story</news:title></news:news></url>"
+        for u, d in entries
+    )
+    return _xml(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" '
+        f'xmlns:news="http://www.google.com/schemas/sitemap-news/0.9">{urls}</urlset>'
+    )
+
+
+async def test_a_root_feed_whose_news_sitemap_fails_for_one_poll_keeps_its_new_story(site):
+    """Only the news sitemap dates the stories: their pages are tagged
+    og:type=website and carry no date. It answers 503 for one poll while
+    a new story is up, so the home page's links are read, where the new
+    story has no date and is rejected. That poll read it without its
+    usual read's evidence, so when the sitemap is back the story is read
+    once more and comes in. main stored it then too."""
+    older, old, new = (
+        f"{SITE}/news/{slug}/"
+        for slug in (
+            "council-approves-river-trail", "harvest-market-returns", "library-extends-hours"
+        )
+    )
+    for n, story in enumerate((older, old, new)):
+        site.routes[story] = _undated_page(f"Story {n} from the council", "website")
+    sitemap = f"{SITE}/news-sitemap.xml"
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {sitemap}\n")
+    listed = _news_sitemap((new, "2026-10-16"), (old, "2026-10-14"), (older, "2026-10-12"))
+    site.routes[sitemap] = _once(503, listed)
+    site.routes[f"{SITE}/"] = _list_of(new, old, older)
+    stored = _Stored(older, old)
+    plugin = _plugin(f"{SITE}/")
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 1
+    assert await stored.poll(plugin) == [new]
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 2
+
+
+async def test_a_root_feed_whose_sitemap_fails_for_one_poll_does_not_drop_its_new_post(site):
+    """Undated posts, a sitemap with no ``<lastmod>`` (newest first), and
+    a home page that keeps a sticky post at the top of its list. The
+    sitemap answers 503 for one poll while a new post is up. On the home
+    page the new post is listed below the sticky one, which is stored, so
+    that poll drops it as backlog. It was judged by the home page's order,
+    not the sitemap's, so when the sitemap is back the post is read once
+    more, listed above every stored post, and comes in. main stored it
+    then too."""
+    sticky, second, new = (
+        f"{SITE}/blog/{slug}/"
+        for slug in (
+            "welcome-to-the-trail-blog", "second-post-on-the-rivers", "new-post-on-the-markets"
+        )
+    )
+    for n, post in enumerate((sticky, second, new)):
+        site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
+    site.routes[f"{SITE}/sitemap.xml"] = _once(503, _xml(_urlset(new, second, sticky)))
+    site.routes[f"{SITE}/"] = _list_of(sticky, new, second)
+    stored = _Stored(sticky, second)
+    plugin = _plugin(f"{SITE}/")
+    assert await stored.poll(plugin) == []
+    assert new in plugin._extracted_urls
+    assert await stored.poll(plugin) == [new]
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 2
+
+
+async def test_a_section_feed_whose_listing_fails_for_one_poll_does_not_drop_its_new_post(site):
+    """The mirror case: a section feed's listing page answers 503 for one
+    poll while a new post is up, so its section of the sitemap is read.
+    That sitemap lists oldest first with no ``<lastmod>``, so the new
+    (undated) post is listed below the stored ones: backlog. When the
+    listing page is back, it lists the post first, and the post comes in.
+    main, which read the sitemap, stored it."""
+    first, second, third, new = (f"{SITE}/blog/post-on-the-trails-{n}/" for n in range(4))
+    for n, post in enumerate((first, second, third, new)):
+        site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(first, second, third, new))
+    site.routes[f"{SITE}/blog"] = _once(503, _list_of(new, third, second, first))
+    stored = _Stored(first, second, third)
+    plugin = _plugin(f"{SITE}/blog")
+    assert await stored.poll(plugin) == []
+    assert new in plugin._extracted_urls
+    assert await stored.poll(plugin) == [new]
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 2
+
+
 async def test_a_listing_cards_date_dates_a_page_that_carries_none(site):
     """A builder's post page tagged og:type=website with no date of its
     own: the listing card's ``<time datetime>`` is the site's date for
@@ -1145,6 +1258,85 @@ async def test_a_slug_that_ends_in_a_software_name_is_an_article(site, read):
         plugin = _plugin(f"{SITE}/", link_pattern=pattern)
     items = await plugin.fetch()
     assert sorted(i["url"] for i in items) == sorted(posts)
+
+
+def _news_under_about(site: _Site, section: str) -> list[str]:
+    """A council-style site that files its news under a static section:
+    robots.txt names a sitemap that lists three dated stories under
+    ``section`` and the About page itself, and both the section page and
+    the home page list the stories. Returns the stories, newest first."""
+    stories = [
+        f"{SITE}{section}{slug}"
+        for slug in ("council-approves-river-trail", "harvest-market-returns", "new-library-hours")
+    ]
+    dates = ["2026-10-18", "2026-10-15", "2026-10-12"]
+    astro = "https://www.example.com/blog/rebuilding-the-river-trail-bridge/"
+    for story in stories:
+        site.routes[story] = _html(_fixture("astro-post.html").replace(astro, story))
+    entries = "".join(
+        f"<url><loc>{u}</loc><lastmod>{d}</lastmod></url>"
+        for u, d in zip(stories, dates, strict=True)
+    )
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+        f"{entries}<url><loc>{SITE}/about/</loc><lastmod>2026-10-19</lastmod></url></urlset>"
+    )
+    cards = "".join(
+        f'<li><h2><a href="{u}">Story {n}</a></h2><time datetime="{d}">{d}</time></li>'
+        for n, (u, d) in enumerate(zip(stories, dates, strict=True))
+    )
+    listing = _html(
+        '<html><body><header><nav><a href="/">Home</a><a href="/about/">About</a></nav></header>'
+        f"<main><h1>News</h1><ul>{cards}</ul></main></body></html>"
+    )
+    site.routes[f"{SITE}{section.rstrip('/')}"] = listing
+    site.routes[f"{SITE}/"] = listing
+    return stories
+
+
+@pytest.mark.parametrize(
+    ("section", "feed"),
+    [
+        ("/about/news/", "section"),
+        ("/about/news/", "section and link pattern"),
+        ("/about/news/", "root and sitemap_url"),
+        ("/about/news/", "root"),
+        ("/about-us/news/", "root"),
+        # A section named like no news section: the owner's choice of
+        # section (its address or its link pattern) brings it in.
+        ("/about/media-centre/", "section"),
+        ("/about/media-centre/", "section and link pattern"),
+        ("/about/media-centre/", "link pattern"),
+    ],
+)
+async def test_articles_under_an_about_section_are_articles(site, section, feed):
+    """Councils, universities and companies file their news under a
+    static section (``/about/news/<slug>``). main stored those stories
+    in every one of these setups, because it never ran ``url_ok`` on a
+    sitemap or under a link pattern. Each feed's usual read finds them
+    on its own: a section feed never asks for the sitemap, and a root
+    feed never asks for its home page. The About page itself is still
+    never fetched."""
+    stories = _news_under_about(site, section)
+    pattern = section if "link pattern" in feed else None
+    url = f"{SITE}{section.rstrip('/')}" if feed.startswith("section") else f"{SITE}/"
+    sitemap_url = f"{SITE}/sitemap.xml" if feed == "root and sitemap_url" else None
+    plugin = _plugin(url, link_pattern=pattern, sitemap_url=sitemap_url)
+    items = await plugin.fetch()
+    assert [i["url"] for i in items] == stories
+    if feed.startswith("section"):
+        assert site.asked("/robots.txt") == site.asked("/sitemap.xml") == 0
+    else:
+        assert site.asked("/") == 0
+    assert site.asked("/about/") == 0
+    assert await plugin.fetch() == []
+
+
+async def test_auto_discovery_finds_a_sitemap_of_news_under_an_about_section(site):
+    stories = _news_under_about(site, "/about/news/")
+    assert await feed_autodiscovery.discover_sitemap_urls(f"{SITE}/", limit=1) == stories[:1]
 
 
 async def test_links_under_the_link_pattern_are_the_owners_choice(site):

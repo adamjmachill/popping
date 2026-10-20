@@ -157,13 +157,24 @@ _STATIC_SLUGS = frozenset({
     "wp-login.php", "xmlrpc.php",
 })
 
-# Sections whose every page is a static page: Shopify's ``/pages/``,
+# Sections whose pages are static pages: Shopify's ``/pages/``,
 # ``/policies/``, and ``/about/team``-style trees. Not ``legal``,
 # ``help`` or ``support``: news sites file stories under those
 # (Reuters' ``/legal/government/...``). As the page itself they are
-# still static slugs above.
+# still static slugs above. A news section under one is not static
+# (``_NEWS_SECTIONS``).
 _STATIC_SECTIONS = frozenset({
     "pages", "policies", "about", "about-us", "contact", "contact-us",
+})
+
+# News sections that sites file under a static section: a council's or
+# a university's ``/about/news/<slug>``, a company's
+# ``/about-us/press/<slug>``. A page below one is judged as any
+# article's path, not as the static tree's.
+_NEWS_SECTIONS = frozenset({
+    "news", "blog", "blogs", "posts", "articles", "stories", "press", "newsroom",
+    "press-releases", "news-releases", "media-releases", "announcements", "updates",
+    "latest-news",
 })
 
 # Query keys of pages that aren't articles: a WordPress search
@@ -312,10 +323,14 @@ def _date_archive(segments: list[str]) -> bool:
     return False
 
 
-def _listing_path(segments: list[str]) -> bool:
+def _listing_path(segments: list[str], own: int = 0) -> bool:
     """A path whose segments name a listing, a record or CMS plumbing
-    rather than an article (see the segment sets above)."""
+    rather than an article (see the segment sets above). The first
+    ``own`` segments are the feed's own section (``_own_segments``) and
+    aren't judged."""
     for i, segment in enumerate(segments):
+        if i < own:
+            continue
         rest = segments[i + 1:]
         if segment in _NON_ARTICLE_SEGMENTS:
             return True
@@ -329,7 +344,28 @@ def _listing_path(segments: list[str]) -> bool:
     return False
 
 
-def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
+def _static_section(segments: list[str]) -> bool:
+    """The path is in a static section (``_STATIC_SECTIONS`` first) and
+    not in a news section under it (``/about/news/<slug>``)."""
+    return segments[0] in _STATIC_SECTIONS and not any(
+        s in _NEWS_SECTIONS for s in segments[1:-1]
+    )
+
+
+def _own_segments(path: str, section: str | None) -> int:
+    """How many of ``path``'s segments are the feed's own section
+    (``section``, a path prefix such as ``/about/news/``): its whole
+    segments, when ``path`` is below it, else 0. A prefix that ends
+    inside a segment (``/about/news-``) owns only the segments before
+    it."""
+    if not section or not path.startswith(section) or path.rstrip("/") == section.rstrip("/"):
+        return 0
+    return len(_segments(section[: section.rfind("/") + 1]))
+
+
+def url_ok(
+    url: str, site: str, *, owner_pattern: bool = False, section: str | None = None
+) -> bool:
     """Cheap test of whether ``url`` could be an article on ``site``
     (the source's URL or host). Same-site http(s) URLs only.
 
@@ -338,7 +374,8 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     - **The path above the page is ours**, by whole segment and by
       position (``_NON_ARTICLE_SEGMENTS`` anywhere; record, archive and
       pagination words only where they are the listing or one record;
-      ``_STATIC_SECTIONS`` first; date archives last). The site root is
+      ``_STATIC_SECTIONS`` first, unless a news section is under it, as
+      in ``/about/news/<slug>``; date archives last). The site root is
       the home page unless its query names a post (WordPress's
       ``/?p=123``). courlan's own structure filter matches substrings:
       it reads
@@ -375,6 +412,14 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     2-to-5-letter ending rule that reads like it
     (``/library/why-we-chose-deno.land``); our path rules and the file
     endings (as read above) still apply.
+
+    ``section``: the section the feed reads (its ``link_pattern``, else
+    its address's section, such as ``/about/news/``). The owner chose
+    it, so for a URL below it the segment rules (listing, record and
+    static section) judge only the segments below it:
+    ``/about/news/<slug>`` and ``/shop/journal/<slug>`` are candidates
+    of a feed that reads them. The page's own name, date archives, the
+    file endings and courlan are judged as for any URL.
     """
     try:
         parts = urlsplit(url.strip())
@@ -389,9 +434,10 @@ def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     query_keys = {k.lower() for k, _ in parse_qsl(parts.query, keep_blank_values=True)}
     if not segments and not query_keys & _ROOT_POST_QUERY_KEYS:
         return False  # the home page
-    if _listing_path(segments):
+    own = _own_segments(parts.path, section)
+    if _listing_path(segments, own):
         return False
-    if segments and (segments[-1] in _STATIC_SLUGS or segments[0] in _STATIC_SECTIONS):
+    if segments and (segments[-1] in _STATIC_SLUGS or (not own and _static_section(segments))):
         return False
     if segments and _date_archive(segments):
         return False
@@ -1080,13 +1126,14 @@ def _link_title(a) -> str:
     return _clean_text(img.get("alt")) if img is not None and img.get("alt") else ""
 
 
-def listing_links(html: str, page_url: str) -> list[Candidate]:
+def listing_links(html: str, page_url: str, *, section: str | None = None) -> list[Candidate]:
     """The article links on a listing page, in page order:
     ``[Candidate(url, published, title)]``.
 
     - Links resolve against ``<base href>`` when the page has one.
-    - Only same-site links that pass ``url_ok`` count, and never the
-      page itself.
+    - Only same-site links that pass ``url_ok`` count (below the feed's
+      own ``section``, as ``url_ok`` reads it), and never the page
+      itself.
     - nav, aside and page-level header and footer are dropped first.
     - Links group by their tag path (``main/div/article/h2/a``), and
       the largest group with 3 or more distinct URLs wins: a listing's
@@ -1118,7 +1165,7 @@ def listing_links(html: str, page_url: str) -> list[Candidate]:
             absolute = urlsplit(urljoin(base, href))._replace(fragment="").geturl()
         except ValueError:
             continue
-        if absolute == page_key or not url_ok(absolute, page_url):
+        if absolute == page_key or not url_ok(absolute, page_url, section=section):
             continue
         groups[_tag_path(a)].append((absolute, a))
 

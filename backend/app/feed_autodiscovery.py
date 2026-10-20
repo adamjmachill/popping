@@ -398,7 +398,8 @@ def _read_sitemap(
 ) -> tuple[list[_Entry], list[tuple[str, str | None]], bool]:
     """Parse one sitemap document and keep the pages that could be
     articles on ``site``: under ``path_prefix`` when there is one, and
-    passing ``url_ok`` (as the owner's pattern when ``owner_pattern``).
+    passing ``url_ok`` below it (``section``; as the owner's pattern
+    when ``owner_pattern``).
     At most ``room`` pages. Returns ``(pages, nested sitemaps, listed)``,
     ``listed`` False when the document named no page or sitemap at all,
     before any filter (an HTML page, an empty urlset). Pure and
@@ -411,7 +412,7 @@ def _read_sitemap(
             break
         if path_prefix and not _under_prefix(entry[0], path_prefix):
             continue
-        if url_ok(entry[0], site, owner_pattern=owner_pattern):
+        if url_ok(entry[0], site, owner_pattern=owner_pattern, section=path_prefix):
             pages.append(entry)
     return pages, nested, bool(found or nested)
 
