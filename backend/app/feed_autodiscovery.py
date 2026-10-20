@@ -92,6 +92,13 @@ _CANDIDATE_PROBE_BUDGET = 20.0
 _DISCOVERY_TOTAL_BUDGET = 60.0
 
 
+def probe_headers(candidate: str, page_url: str, headers: dict | None) -> dict | None:
+    """The caller's ``headers`` for a feed link on ``page_url``'s own
+    site (the same registrable domain, ``article_detect.same_site``),
+    None for one anywhere else."""
+    return headers if same_site(candidate, page_url) else None
+
+
 async def discover_feed_url(
     page_url: str,
     headers: dict | None = None,
@@ -103,15 +110,21 @@ async def discover_feed_url(
     """Return a working RSS/Atom feed URL for ``page_url``, or None
     if none could be found within the discovery time budget.
 
-    ``headers`` are sent with every request: the page fetch and each
-    feed probe (a feed's ``custom_headers``, or the Add preview's
-    browser headers). The Add preview (``app.source_preview``) has
+    ``headers`` (a feed's ``custom_headers``, or the Add preview's
+    browser headers) are sent to ``page_url``'s own site only: the page
+    fetch, the probe of ``page_url`` and each feed link on the same
+    registrable domain (``probe_headers``). A page can link a feed on
+    any host, and a caller's header (an API key) is meant for this site
+    alone, so a feed link elsewhere is probed with the default headers.
+    The Add preview (``app.source_preview``) has
     already fetched ``page_url`` as a feed itself, so it passes
     ``tried_as_feed`` to skip that first probe, ``page_html`` (the page
     it got back, when it got one) so the page isn't fetched again, and
     ``probe``, its own one-attempt feed fetch, which keeps what it
     parsed. A probe returns something truthy when the candidate is a
-    feed with items; the default is ``fetch_rss`` with ``headers``.
+    feed with items; the default is ``fetch_rss`` with
+    ``probe_headers(candidate, page_url, headers)``. A ``probe`` of the
+    caller's own picks its headers the same way.
 
     Tries ``page_url`` itself first — the user may have pasted a feed
     URL directly, which is the common case and needs no discovery at
@@ -138,7 +151,7 @@ async def discover_feed_url(
     async def _is_feed(url: str) -> object:
         if probe is not None:
             return await probe(url)
-        return await fetch_rss(url, headers=headers)
+        return await fetch_rss(url, headers=probe_headers(url, page_url, headers))
 
     async def _probe_initial() -> str | None:
         """Phase 1: a quick probe of the user-supplied URL itself."""

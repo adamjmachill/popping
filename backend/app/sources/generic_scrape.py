@@ -552,9 +552,11 @@ async def preview_page(
     became of it: ``{title, url, published_at, accepted, reason}``.
     ``reason`` is None for a story and one of the module's reason
     constants otherwise. ``title`` falls back to the list's title for
-    the candidate (None when it had none). Never raises an HTTP error:
-    a refusal or a failure is a reason, like a page that isn't an
-    article."""
+    the candidate (None when it had none). A ``REFUSED`` verdict also
+    carries the refusal's ``status`` (401-403 or 429), so the preview
+    can tell a site that refuses us from a rate limit. Never raises an
+    HTTP error: a refusal or a failure is a reason, like a page that
+    isn't an article."""
     verdict = {
         "title": candidate.title,
         "url": candidate.url,
@@ -566,8 +568,8 @@ async def preview_page(
         fetched = await fetch_html_checked(
             candidate.url, custom_headers=headers, return_final_url=True, raise_for_status=True
         )
-    except FetchRefusedError:
-        return {**verdict, "reason": REFUSED}
+    except FetchRefusedError as exc:
+        return {**verdict, "reason": REFUSED, "status": exc.response.status_code}
     except httpx.HTTPStatusError as exc:
         return {**verdict, "reason": FAILED if exc.response.status_code >= 500 else UNREADABLE}
     except NETWORK_ERRORS:

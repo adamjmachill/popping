@@ -249,10 +249,33 @@ async def test_a_podcast_feed_is_kind_podcast(app_client, site, body):
     assert result["kind"] == "podcast"
 
 
-async def test_a_named_type_is_the_kind(app_client, site):
-    site.routes[FEED] = _xml(_rss(4, podcast=True))
-    result = await _preview(app_client, url=FEED, type="rss")
-    assert result["kind"] == "rss"
+@pytest.mark.parametrize(
+    "named,podcast,kind",
+    [
+        # A named rss or podcast reads the address as a feed; the feed
+        # says whether it is a podcast (Find its feed previews as rss).
+        ("rss", True, "podcast"),
+        ("podcast", False, "rss"),
+        # A YouTube channel stays one.
+        ("youtube_channel", True, "youtube_channel"),
+    ],
+)
+async def test_a_named_feed_type_still_reads_the_feeds_kind(app_client, site, named, podcast, kind):
+    site.routes[FEED] = _xml(_rss(4, podcast=podcast))
+    result = await _preview(app_client, url=FEED, type=named)
+    assert (result["ok"], result["kind"]) == (True, kind)
+
+
+YOUTUBE_FEED = "https://www.youtube.com/feeds/videos.xml?channel_id=UCabcdefghijklmnopqrstuv"
+
+
+async def test_a_pasted_youtube_feed_is_a_youtube_channel(app_client, site):
+    site.routes[YOUTUBE_FEED] = _xml(_rss(3))
+    result = await _preview(app_client, url=YOUTUBE_FEED)
+    assert (result["ok"], result["kind"], result["url"]) == (True, "youtube_channel", YOUTUBE_FEED)
+    # A feed type the caller named is kept.
+    result = await _preview(app_client, url=YOUTUBE_FEED, type="rss")
+    assert (result["ok"], result["kind"]) == (True, "rss")
 
 
 async def test_a_page_with_a_feed_link_is_read_once_and_previews_its_feed(app_client, site):
@@ -269,19 +292,31 @@ async def test_a_page_with_a_feed_link_is_read_once_and_previews_its_feed(app_cl
 # --- blocked: the browser retry -----------------------------------------------
 
 
-def _refuses_us(body: tuple[int, str, str]):
+def _refuses_us(body: tuple[int, str, str], language: str | None = None):
+    """Serves ``body`` to Safari only, and checks Safari's request
+    carries ``language`` (the preset's when None)."""
+    language = language or rss.BROWSER_HEADERS["Accept-Language"]
+
     async def route(request: httpx.Request):
         if request.headers.get("user-agent") == rss.BROWSER_HEADERS["User-Agent"]:
-            assert request.headers.get("accept-language") == rss.BROWSER_HEADERS["Accept-Language"]
+            assert request.headers.get("accept-language") == language
+            assert len(request.headers.get_list("accept-language")) == 1
             return body
         return _html("<html><body>Forbidden</body></html>", status=403)
 
     return route
 
 
-async def test_a_403_feed_is_retried_as_safari(app_client, site):
-    site.routes[FEED] = _refuses_us(_xml(_rss(3)))
-    result = await _preview(app_client, url=FEED)
+# The caller's own Accept-Language survives the retry; only the
+# User-Agent becomes Safari's.
+_LANGUAGES = pytest.mark.parametrize("language", [None, "fr-CA"], ids=["preset", "callers-own"])
+
+
+@_LANGUAGES
+async def test_a_403_feed_is_retried_as_safari(app_client, site, language):
+    site.routes[FEED] = _refuses_us(_xml(_rss(3)), language)
+    extra = {"custom_headers": {"Accept-Language": language}} if language else {}
+    result = await _preview(app_client, url=FEED, **extra)
     assert result["ok"] is True
     assert result["headers_used"] == "browser"
     assert result["total_count"] == 3
@@ -302,20 +337,83 @@ async def test_a_challenge_page_is_retried_as_safari(app_client, site):
     assert (result["ok"], result["headers_used"]) == (True, "browser")
 
 
-async def test_a_403_website_is_retried_as_safari(app_client, site):
+@_LANGUAGES
+async def test_a_403_website_is_retried_as_safari(app_client, site, language):
     when = _now() - dt.timedelta(hours=3)
     story = f"{SITE}/news/2026/river-trail"
     sitemap = _news_sitemap([(story, when)])
-    site.routes[f"{SITE}/sitemap.xml"] = _refuses_us((200, sitemap, "application/xml"))
-    site.routes[story] = _refuses_us(_html(_article(story, "River trail", when)))
+    site.routes[f"{SITE}/sitemap.xml"] = _refuses_us((200, sitemap, "application/xml"), language)
+    site.routes[story] = _refuses_us(_html(_article(story, "River trail", when)), language)
     # The whole site refuses us: its home page and robots.txt too.
-    site.routes[f"{SITE}/"] = _refuses_us(_html("<html><body><p>Welcome.</p></body></html>"))
-    site.routes[f"{SITE}/robots.txt"] = _refuses_us((200, "User-agent: *\n", "text/plain"))
-    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    site.routes[f"{SITE}/"] = _refuses_us(_html("<html><body><p>Welcome.</p></body></html>"), language)
+    site.routes[f"{SITE}/robots.txt"] = _refuses_us((200, "User-agent: *\n", "text/plain"), language)
+    extra = {"custom_headers": {"Accept-Language": language}} if language else {}
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape", **extra)
     assert result["ok"] is True, result
     assert (result["kind"], result["mode"], result["headers_used"]) == ("generic_scrape", "sitemap", "browser")
     assert result["items"][0]["accepted"] is True
     assert site.agents(story) == [rss.BROWSER_HEADERS["User-Agent"]]
+
+
+async def test_an_ordinary_cloudflare_page_is_not_a_challenge(app_client, site):
+    """Cloudflare's bot detection loads a ``challenge-platform`` script
+    into ordinary pages: that page is read, not retried as Safari."""
+    page = f"{SITE}/blog"
+    jsd = (
+        "<script>(function(){window.__CF$cv$params={r:'8f1e',t:'MTcyOQ=='};"
+        "var a=document.createElement('script');"
+        "a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';"
+        "document.getElementsByTagName('head')[0].appendChild(a);})();</script>"
+    )
+    site.routes[page] = _html(_page_linking("/blog/feed.xml").replace("</body>", f"{jsd}</body>"))
+    site.routes[f"{SITE}/blog/feed.xml"] = _xml(_rss(3))
+    result = await _preview(app_client, url=page)
+    assert (result["ok"], result["headers_used"], result["url"]) == (True, "default", f"{SITE}/blog/feed.xml")
+    assert rss.BROWSER_HEADERS["User-Agent"] not in {r.headers.get("user-agent") for r in site.requests}
+
+
+def _site_refusing_its_pages(site, page_route) -> str:
+    """A sitemap served to anyone, and one dated article behind
+    ``page_route``. Returns the article's URL."""
+    when = _now() - dt.timedelta(hours=3)
+    story = f"{SITE}/news/2026/river-trail"
+    site.routes[f"{SITE}/sitemap.xml"] = (200, _news_sitemap([(story, when)]), "application/xml")
+    site.routes[story] = page_route(_html(_article(story, "River trail", when)))
+    return story
+
+
+@_LANGUAGES
+async def test_article_pages_that_refuse_us_are_retried_as_safari(app_client, site, language):
+    """The sitemap is served, the article pages refuse our User-Agent:
+    the pages are read again as Safari and counted from what Safari
+    got."""
+    story = _site_refusing_its_pages(site, lambda body: _refuses_us(body, language))
+    extra = {"custom_headers": {"Accept-Language": language}} if language else {}
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape", **extra)
+    assert result["ok"] is True, result
+    assert (result["mode"], result["headers_used"]) == ("sitemap", "browser")
+    assert (result["total_count"], result["will_add_count"]) == (1, 1)
+    assert [(i["url"], i["accepted"]) for i in result["items"]] == [(story, True)]
+    assert site.agents(story)[1:] == [rss.BROWSER_HEADERS["User-Agent"]]
+    # The sitemap was served at once: only the pages were asked twice.
+    assert site.asked(f"{SITE}/sitemap.xml") == 1
+
+
+async def test_article_pages_refusing_the_callers_user_agent_are_blocked(app_client, site):
+    story = _site_refusing_its_pages(site, _refuses_us)
+    result = await _preview(
+        app_client, url=f"{SITE}/", type="generic_scrape", custom_headers={"User-Agent": "MyReader/1.0"}
+    )
+    assert (result["ok"], result["error_kind"]) == (False, "blocked")
+    assert site.agents(story) == ["MyReader/1.0"]
+
+
+async def test_article_pages_that_rate_limit_us_are_an_http_error(app_client, site):
+    story = _site_refusing_its_pages(site, lambda body: 429)
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    assert (result["ok"], result["error_kind"]) == (False, "http_error")
+    # A rate limit isn't something Safari changes: no retry.
+    assert len(site.agents(story)) == 1
 
 
 async def test_the_callers_own_user_agent_is_never_swapped(app_client, site):
@@ -365,9 +463,56 @@ async def test_running_out_returns_timeout_with_what_is_known(app_client, site, 
     assert time.monotonic() - started < 1.6
     assert (result["ok"], result["error_kind"]) == (False, "timeout")
     assert result["error"] == source_preview.ERRORS["timeout"]
-    # What was known by then: the address and the feed link it found.
-    assert result["url"] == page
+    # What was known by then: the kind, the address and the feed link
+    # it found.
+    assert (result["kind"], result["url"]) == ("rss", page)
     assert result["feed_candidates"] == [f"{SITE}/blog/feed.xml"]
+
+
+async def test_a_youtube_feed_that_hangs_still_says_its_kind(app_client, site, monkeypatch):
+    monkeypatch.setattr(source_preview, "PREVIEW_BUDGET_S", 0.5)
+
+    async def hangs(request: httpx.Request):
+        await asyncio.sleep(30)
+        return _xml(_rss(3))
+
+    site.routes[YOUTUBE_FEED] = hangs
+    result = await _preview(app_client, url=YOUTUBE_FEED)
+    assert (result["ok"], result["error_kind"]) == (False, "timeout")
+    assert (result["kind"], result["url"]) == ("youtube_channel", YOUTUBE_FEED)
+
+
+async def test_a_slow_refusal_and_a_hanging_retry_share_one_half(app_client, site, monkeypatch):
+    """Step 3's half of the time is worked out once: a 403 that comes
+    late and a Safari retry that hangs end at the half, so discovery
+    still gets the other half (here enough for a feed that takes 1.5 s
+    to answer, which a quarter wouldn't be)."""
+    monkeypatch.setattr(source_preview, "PREVIEW_BUDGET_S", 4.0)
+    page = f"{SITE}/blog"
+    calls = 0
+
+    async def page_route(request: httpx.Request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(1.4)
+            return _html("<html><body>Forbidden</body></html>", status=403)
+        if calls == 2:
+            await asyncio.sleep(30)
+        return _html(_page_linking("/blog/feed.xml"))
+
+    async def slow_feed(request: httpx.Request):
+        await asyncio.sleep(1.5)
+        return _xml(_rss(3))
+
+    site.routes[page] = page_route
+    site.routes[f"{SITE}/blog/feed.xml"] = slow_feed
+    started = time.monotonic()
+    result = await _preview(app_client, url=page, type="rss")
+    assert result["ok"] is True, result
+    assert result["url"] == f"{SITE}/blog/feed.xml"
+    assert site.agents(page)[1] == rss.BROWSER_HEADERS["User-Agent"]
+    assert time.monotonic() - started < 4.0
 
 
 # --- two at a time ------------------------------------------------------------
@@ -615,6 +760,35 @@ async def test_preview_writes_nothing(app_client, site, db_session):
 
 
 # --- discover_feed_url(headers=) ----------------------------------------------
+
+
+OTHER_FEED = "https://feeds.other-site.example.net/feed.xml"
+
+
+async def test_a_feed_link_on_another_site_never_gets_the_callers_headers(app_client, site, fake_dns):
+    fake_dns["feeds.other-site.example.net"] = "93.184.215.15"
+    page = f"{SITE}/blog"
+    site.routes[page] = _html(_page_linking(OTHER_FEED))
+    site.routes[OTHER_FEED] = _xml(_rss(3))
+    result = await _preview(app_client, url=page, custom_headers={"X-Api-Key": SECRET})
+    assert (result["ok"], result["url"]) == (True, OTHER_FEED)
+    sent = {str(r.url): r.headers.get("x-api-key") for r in site.requests}
+    assert sent[page] == SECRET
+    assert sent[OTHER_FEED] is None
+
+
+@pytest.mark.no_db
+async def test_discover_feed_url_keeps_the_headers_on_the_pages_site(site, fake_dns):
+    fake_dns["feeds.other-site.example.net"] = "93.184.215.15"
+    page = f"{SITE}/blog"
+    site.routes[page] = _html(_page_linking(OTHER_FEED))
+    site.routes[OTHER_FEED] = _xml(_rss(2))
+    found = await feed_autodiscovery.discover_feed_url(page, headers={"X-Api-Key": SECRET})
+    assert found == OTHER_FEED
+    on_page = [r for r in site.requests if str(r.url) == page]
+    elsewhere = [r for r in site.requests if str(r.url) == OTHER_FEED]
+    assert on_page and all(r.headers.get("x-api-key") == SECRET for r in on_page)
+    assert elsewhere and all("x-api-key" not in r.headers for r in elsewhere)
 
 
 @pytest.mark.no_db

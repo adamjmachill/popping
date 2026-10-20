@@ -18,7 +18,12 @@ check would, in this order, and stops at the first that works:
    page step 3 got back, so nothing is fetched as a feed twice.
 5. The page as a website feed: ``generic_scrape.plan_candidates``, then
    up to ``EXTRACT_MAX`` of its pages read and scored
-   (``generic_scrape.preview_page``).
+   (``generic_scrape.preview_page``). A refused plan, or pages that
+   all refuse, are tried once more as Safari on the same terms.
+
+The Safari retry keeps the caller's own headers and adds only what the
+caller didn't set. The caller's headers go to the address's own site:
+a feed link on another host is fetched without them.
 
 Limits, all module constants so tests can shrink them:
 
@@ -75,7 +80,7 @@ from app import reddit_client
 from app.apple_podcasts import PodcastResolutionError, resolve_feed_url
 from app.article_detect import Candidate
 from app.article_extract import NETWORK_ERRORS, FetchRefusedError
-from app.feed_autodiscovery import discover_feed_url
+from app.feed_autodiscovery import discover_feed_url, probe_headers
 from app.ingest_rules import FIRST_FETCH, IngestTunables, published_utc, select_items_for_ingest
 from app.schemas import SourcePreviewDuplicate, SourcePreviewItem, SourcePreviewResult
 from app.sources import generic_scrape
@@ -84,7 +89,12 @@ from app.sources.reddit import normalize_subreddit
 from app.sources.rss import _DEFAULT_HEADERS, BROWSER_HEADERS, ParsedFeed, get_feed_response, parse_feed
 from app.thread_work import drain, run_in_thread, tracked
 from app.url_safety import check_url_safe
-from app.youtube import YouTubeResolutionError, resolve_channel_feed_url
+from app.youtube import (
+    YouTubeResolutionError,
+    is_youtube_url,
+    normalize_youtube_input,
+    resolve_channel_feed_url,
+)
 
 logger = logging.getLogger("popping.source_preview")
 
@@ -137,9 +147,13 @@ ERRORS = {
 }
 
 # A challenge page (Cloudflare and the like) instead of the document.
+# Only markers of the interstitial itself: an ordinary page behind
+# Cloudflare loads ``/cdn-cgi/challenge-platform/...`` scripts (its bot
+# detection), and one behind DDoS-Guard loads its scripts, so neither
+# name alone says the page is a challenge.
 _CHALLENGE_RE = re.compile(
-    r"cf-chl|challenge-platform|_cf_chl_opt|<title>\s*Just a moment|"
-    r"Attention Required! \| Cloudflare|ddos-guard|px-captcha",
+    r"<title>\s*Just a moment|_cf_chl_opt|cf-chl-|"
+    r"Attention Required! \| Cloudflare|<title>\s*DDoS-Guard|px-captcha",
     re.IGNORECASE,
 )
 # Statuses Popping reads as the site refusing it (``[blocked]``).
@@ -321,14 +335,20 @@ async def _read(req: PreviewRequest, state: _Upstream, deadline: float) -> None:
             resolved = await _step(resolve_feed_url(url), RESOLVE_CAP_S, deadline)
             if resolved != url:
                 url, kind_hint = resolved, kind_hint or "podcast"
+            youtube_ok = kind_hint in (None, "youtube_channel")
+            # Any YouTube address, the channel feed's own included (it
+            # resolves to itself), is a YouTube channel, as
+            # ``/sources/auto`` types it, unless the caller named a
+            # feed type of its own.
+            youtube = youtube_ok and is_youtube_url(
+                normalize_youtube_input(url, allow_bare_handle=youtube_ok)
+            )
             resolved = await _step(
-                resolve_channel_feed_url(
-                    url, allow_bare_handle=kind_hint in (None, "youtube_channel")
-                ),
+                resolve_channel_feed_url(url, allow_bare_handle=youtube_ok),
                 RESOLVE_CAP_S,
                 deadline,
             )
-            if resolved != url:
+            if resolved != url or youtube:
                 url, kind_hint = resolved, "youtube_channel"
         except (PodcastResolutionError, YouTubeResolutionError):
             raise _Stop("not_found")
@@ -347,6 +367,11 @@ async def _read(req: PreviewRequest, state: _Upstream, deadline: float) -> None:
         logger.info("source_preview: refused by the SSRF guard host=%s reason=%s", parsed.hostname, reason)
         raise _Stop("invalid_url")
     state.url = url
+    if kind_hint in FEED_TYPES:
+        # Known before anything is fetched, so a preview that runs out
+        # of time still says what it is reading; a feed that parses
+        # settles it (``_found_feed``).
+        state.kind = kind_hint
 
     discovery_next = kind_hint in (None, "rss", "podcast")
     scrape_next = kind_hint in (None, "generic_scrape")
@@ -468,11 +493,21 @@ def _may_retry_as_browser(headers: dict[str, str]) -> bool:
     return not any(k.lower() == "user-agent" for k in headers)
 
 
+def _as_browser(headers: dict[str, str]) -> dict[str, str]:
+    """``headers`` read as Safari: ``BROWSER_HEADERS`` under the
+    caller's own, so a header the caller set (its ``Accept-Language``)
+    is kept and only the User-Agent, which the caller didn't set
+    (``_may_retry_as_browser``), is Safari's. Header names arrive
+    canonical (``routes.sources._validate_custom_headers``), so no name
+    is sent twice in two spellings."""
+    return {**BROWSER_HEADERS, **headers}
+
+
 def _effective_headers(headers: dict[str, str], state: _Upstream) -> dict[str, str]:
     """The headers later steps send: Safari's once the site answered
     Safari and not us."""
     if state.headers_used == "browser":
-        return {**headers, **BROWSER_HEADERS}
+        return _as_browser(headers)
     return headers
 
 
@@ -482,8 +517,15 @@ async def _get_document(
     """One GET of ``url`` as a feed, and once more as Safari when the
     site refuses us and the caller set no User-Agent. Raises ``_Stop``
     for an answer that ends the preview, and ``asyncio.TimeoutError``
-    (or an httpx timeout) when it runs out of time."""
+    (or an httpx timeout) when it runs out of time.
+
+    ``share`` of the time left is worked out once, before the first
+    attempt, and both attempts come out of it, so a slow refusal and a
+    hanging retry together still leave the rest to the later steps.
+    Each attempt also has its own cap."""
     cap = FEED_CONNECT_S + FEED_READ_S
+    now = time.monotonic()
+    step_deadline = now + max(0.0, share * (deadline - now))
 
     async def get(with_headers: dict[str, str]) -> httpx.Response:
         return await _step(
@@ -491,14 +533,13 @@ async def _get_document(
                 url, {**_DEFAULT_HEADERS, **with_headers}, timeout=_feed_timeout(), raise_for_status=False
             ),
             cap,
-            deadline,
-            share,
+            step_deadline,
         )
 
     try:
         resp = await get(headers)
         if _is_refusal(resp) and _may_retry_as_browser(headers):
-            retry = await get({**headers, **BROWSER_HEADERS})
+            retry = await get(_as_browser(headers))
             if not _is_refusal(retry):
                 state.headers_used = "browser"
             resp = retry
@@ -541,11 +582,14 @@ async def _read_feed(
 
 
 def _found_feed(state: _Upstream, url: str, feed: ParsedFeed, kind_hint: str | None) -> None:
-    """Record a feed that parsed. Its kind is the type the caller named
-    (or a YouTube or Apple link resolved to); with none, a feed with
-    audio enclosures or the iTunes namespace is a podcast, so Add gives
-    it the podcast refresh default and category."""
-    if kind_hint in FEED_TYPES:
+    """Record a feed that parsed. A YouTube channel (named, or a YouTube
+    address) stays one. Any other feed, whether the caller named
+    ``rss`` or ``podcast`` or no type, is a podcast when it has audio
+    enclosures or the iTunes namespace, else ``rss``: a named feed type
+    means "read it as a feed", so a podcast found through a page (Find
+    its feed previews with ``type: "rss"``) still gets the podcast
+    refresh default and category on Add."""
+    if kind_hint == "youtube_channel":
         state.kind = kind_hint
     elif feed.podcast:
         state.kind = "podcast"
@@ -572,8 +616,14 @@ async def _discover(
 
     async def probe(candidate: str) -> object:
         state.feed_candidates.append(candidate)
+        sent = probe_headers(candidate, url, headers)
+        if sent is None:
+            # A feed link on another site never gets the caller's own
+            # headers (an API key is for this site), only the public
+            # Safari preset once this site needed it.
+            sent = BROWSER_HEADERS if state.headers_used == "browser" else {}
         resp = await get_feed_response(
-            candidate, {**_DEFAULT_HEADERS, **headers}, timeout=_feed_timeout()
+            candidate, {**_DEFAULT_HEADERS, **sent}, timeout=_feed_timeout()
         )
         feed = await run_in_thread(parse_feed, resp.text, candidate, resp.headers.get("content-type"))
         parsed[candidate] = feed
@@ -601,7 +651,15 @@ async def _discover(
 async def _read_site(
     req: PreviewRequest, url: str, headers: dict[str, str], state: _Upstream, deadline: float
 ) -> None:
-    """Step 5: the website feed's plan, then its newest pages read."""
+    """Step 5: the website feed's plan, then its newest pages read.
+
+    A site that refuses us is asked once more as Safari when the caller
+    set no User-Agent: its sitemap or listing (the plan), or, when the
+    plan was served, its pages, since a site often serves its sitemap
+    but refuses its article pages. Every page read refused, still or
+    with no retry allowed, ends the preview the way it ends Add's first
+    check (``GenericScrapePlugin._settle_refusals``): ``blocked``, or
+    ``http_error`` when every refusal was a 429."""
     state.kind = "generic_scrape"
     state.url = url
 
@@ -624,7 +682,7 @@ async def _read_site(
         except FetchRefusedError as exc:
             if exc.response.status_code == 429 or not _may_retry_as_browser(headers):
                 raise
-            headers = {**headers, **BROWSER_HEADERS}
+            headers = _as_browser(headers)
             found = await plan(headers)
             state.headers_used = "browser"
     except FetchRefusedError as exc:
@@ -640,18 +698,44 @@ async def _read_site(
     owner_configured = bool(req.link_pattern) or (bool(req.sitemap_url) and found.mode == "sitemap")
     sem = asyncio.Semaphore(EXTRACT_CONCURRENCY)
 
-    async def read(candidate: Candidate) -> None:
+    newest = found.candidates[:EXTRACT_MAX]
+
+    async def read(candidate: Candidate, with_headers: dict[str, str], as_browser: bool) -> None:
         async with sem:
             verdict = await generic_scrape.preview_page(
-                candidate, headers or None, owner_configured=owner_configured
+                candidate, with_headers or None, owner_configured=owner_configured
             )
+        # A page read again as Safari replaces its refusal.
         state.pages[candidate.url] = verdict
+        if as_browser and verdict["reason"] != generic_scrape.REFUSED:
+            state.headers_used = "browser"
+
+    async def read_all(with_headers: dict[str, str], as_browser: bool = False) -> None:
+        await asyncio.gather(*(read(c, with_headers, as_browser) for c in newest))
 
     async def read_newest() -> None:
-        await asyncio.gather(*(read(c) for c in found.candidates[:EXTRACT_MAX]))
+        await read_all(headers)
+        refusal = _refusal(state, newest)
+        if refusal == "blocked" and _may_retry_as_browser(headers):
+            await read_all(_as_browser(headers), as_browser=True)
+            refusal = _refusal(state, newest)
+        if refusal is not None:
+            raise _Stop(refusal)
 
     # Each page is recorded as it is read, so a timeout returns those.
+    # The Safari retry runs inside the same step and deadline.
     await _step(read_newest(), PREVIEW_BUDGET_S, deadline)
+
+
+def _refusal(state: _Upstream, candidates: list[Candidate]) -> str | None:
+    """``blocked`` when every page read was refused and a 401-403 was
+    among them, ``http_error`` when every one was a 429 (a rate limit,
+    which Safari wouldn't change), None when any page answered or none
+    was read."""
+    verdicts = [state.pages.get(c.url) for c in candidates]
+    if not verdicts or any(v is None or v["reason"] != generic_scrape.REFUSED for v in verdicts):
+        return None
+    return "http_error" if all(v.get("status") == 429 for v in verdicts) else "blocked"
 
 
 # --- The response -------------------------------------------------------

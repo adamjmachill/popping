@@ -43,14 +43,27 @@ WIP commit); this commit reviews and completes it.
   2. A subreddit (`reddit.com/r/x` or `r/x`, or `type: "reddit"`): `reddit_client.is_disabled()`
      first, `reddit_off`; then the hot listing of 50, as `DynamicRedditPlugin` reads it.
   3. The address as a feed: one GET through `get_feed_response`, connect 6 s, read 12 s. A 401,
-     402 or 403, a `cf-mitigated: challenge` header or a challenge page is retried once with
-     `BROWSER_HEADERS` when the caller sent no User-Agent; `headers_used` is then `browser`.
-     A timeout moves on to discovery. When discovery or the website read could still follow,
-     this step gets at most half the time left.
+     402 or 403, a `cf-mitigated: challenge` header or a challenge page is retried once as
+     Safari when the caller sent no User-Agent; `headers_used` is then `browser`. A challenge
+     page is matched only by markers of the interstitial itself (`<title>Just a moment`,
+     `_cf_chl_opt`, `cf-chl-`, Cloudflare's "Attention Required!", `<title>DDoS-Guard`,
+     `px-captcha`), never by the `challenge-platform` script Cloudflare's bot detection loads
+     into ordinary pages. A timeout moves on to discovery. When discovery or the website read
+     could still follow, this step gets at most half the time left: the half is worked out once,
+     and the first GET and the Safari retry both come out of it (each still capped at 18 s).
   4. `discover_feed_url` with the step-3 page and headers (half the time left when step 5 could
-     follow). Each feed link tried is recorded in `feed_candidates`.
+     follow). Each feed link tried is recorded in `feed_candidates`. The caller's headers go only
+     to feed links on the page's own site (the same registrable domain,
+     `feed_autodiscovery.probe_headers`); a link on another host gets the default headers, plus
+     the public Safari preset once the site needed it. `discover_feed_url`'s default probe
+     follows the same rule.
   5. `plan_candidates(..., raise_errors=True)` (a refusal is retried as Safari the same way), then
-     the 8 newest candidates read with `preview_page`, 3 at a time.
+     the 8 newest candidates read with `preview_page`, 3 at a time. When every page read is
+     refused (the site serves its sitemap but not its articles), the same pages are read again
+     as Safari when the caller sent no User-Agent, inside the same step and deadline;
+     `headers_used` becomes `browser` once one is served. Still all refused, or no retry
+     allowed: `blocked`, or `http_error` when every refusal was a 429 (not retried), as Add's
+     first check ends (`_settle_refusals`). A refused verdict carries its `status` for this.
   - **Deadline:** `PREVIEW_BUDGET_S = 60`; each step gets `min(cap, time left)`. Out of time, the
     response is `error_kind: "timeout"` with what is known (kind, url, items or pages read,
     `feed_candidates`).
@@ -69,9 +82,13 @@ WIP commit); this commit reviews and completes it.
     list: the listing card's or news sitemap's date, else `<lastmod>`), and `will_add_count =
     min(kept, 10, dated + max_undated_per_poll)`. `older_skipped_count` is what that rule left
     out. `items` are the pages read.
-  - **`kind`:** the type the caller named; with none, `podcast` when the feed has an audio
-    enclosure or the iTunes namespace, else `rss`; `youtube_channel`, `reddit`,
-    `generic_scrape` from their steps.
+  - **`kind`:** for a feed, `podcast` when it has an audio enclosure or the iTunes namespace,
+    else `rss`, whether the caller named `rss`, `podcast` or no type (a named feed type means
+    "read it as a feed"). `youtube_channel` when named or when the address is a YouTube one,
+    the canonical `feeds/videos.xml?channel_id=` address included (as `/sources/auto` types
+    it), unless the caller named `rss` or `podcast`. `reddit` and `generic_scrape` from their
+    steps. A named or resolved feed type is the `kind` from the start, so a preview that runs
+    out of time still returns it.
   - **`error`:** one fixed sentence per `error_kind` (`source_preview.ERRORS`), never upstream
     text, an exception or an address. A private host's message is the one `/sources/test` gives
     (`_validate_url`'s). `headers_used` is `default | browser | custom`; header values are never
@@ -107,8 +124,10 @@ WIP commit); this commit reviews and completes it.
 - **`thread_work`** is new; without it a timed-out wait on `asyncio.to_thread` can't keep the
   slot until the thread ends.
 - **Failed previews aren't cached**, so a retry after a blip fetches again.
-- **The Safari retry merges `BROWSER_HEADERS` over the caller's own headers** when those carry no
-  User-Agent; `headers_used` is then `browser`.
+- **The Safari retry keeps the caller's own headers** and adds the `BROWSER_HEADERS` the caller
+  didn't set (`{**BROWSER_HEADERS, **headers}`), which is always the User-Agent (the retry runs
+  only without one) and the `Accept-Language` unless the caller sent its own. `headers_used` is
+  then `browser`.
 - **Duplicate lookup** matches the previewed URL exactly, with and without a trailing slash.
   PR11b defines the normalized lookup (lower-case host) and the 409.
 - **PATCH `type` keeps `last_attempt_at`, `last_item_count` and `last_new_count`**: they describe
@@ -161,6 +180,63 @@ WIP commit); this commit reviews and completes it.
   content, exception text or addresses; header values are never echoed. The unit's review step
   (`/security-review` + `/code-review high`) runs on the PR.
 
+## Review fixes
+
+Eight confirmed review findings, all fixed (the sections above describe the fixed behaviour):
+
+1. **Discovery sent the caller's headers to feed links on other hosts.** `probe_headers` keeps
+   them on the page's registrable domain, in the preview's probe and `discover_feed_url`'s
+   default one. Tests: `test_a_feed_link_on_another_site_never_gets_the_callers_headers`,
+   `test_discover_feed_url_keeps_the_headers_on_the_pages_site`.
+2. **An ordinary Cloudflare page read as a challenge** (the bare `challenge-platform` and
+   `ddos-guard` markers). Only interstitial markers are kept. Test:
+   `test_an_ordinary_cloudflare_page_is_not_a_challenge`.
+3. **Article pages that refused us got no Safari retry**, and the preview still said ok with
+   stories to add. Website mode now retries them and ends `blocked` / `http_error` as Add's
+   first check would. Tests: `test_article_pages_that_refuse_us_are_retried_as_safari`,
+   `test_article_pages_refusing_the_callers_user_agent_are_blocked`,
+   `test_article_pages_that_rate_limit_us_are_an_http_error`.
+4. **A pasted YouTube feed address came back as `rss`.** Test:
+   `test_a_pasted_youtube_feed_is_a_youtube_channel` (and a named `rss` is kept).
+5. **Step 3 and its Safari retry could use more than half the deadline** (the half was taken
+   per attempt). It is now taken once. Test:
+   `test_a_slow_refusal_and_a_hanging_retry_share_one_half`.
+6. **A timed-out YouTube or typed feed preview returned `kind: null`.** Tests:
+   `test_a_youtube_feed_that_hangs_still_says_its_kind`, and a `kind` check in
+   `test_running_out_returns_timeout_with_what_is_known`.
+7. **A named `rss` overrode the podcast rule** (so Find its feed could never yield a podcast).
+   Fixed in code rather than listed as a deviation. Test:
+   `test_a_named_feed_type_still_reads_the_feeds_kind` (replaces
+   `test_a_named_type_is_the_kind`).
+8. **The Safari retry replaced the caller's own `Accept-Language`.** `_as_browser` merges the
+   presets under the caller's headers. Tests: the `callers-own` cases of
+   `test_a_403_feed_is_retried_as_safari`, `test_a_403_website_is_retried_as_safari` and
+   `test_article_pages_that_refuse_us_are_retried_as_safari`.
+
+Not changed: a redirect from the caller's own site to another host still carries the caller's
+custom headers (httpx drops only `Authorization` across origins). That is how every feed's
+`custom_headers` already behave in `fetch_rss` and `fetch_html`, before this unit, so it is not
+this unit's to change.
+
+**Verification of the fixes** (database `popping_test_b2`):
+- Backend pytest: 1501 passed, 13 failed, the 13 exactly the DNS-only baseline list.
+  `test_sources_preview.py` is now 44 tests; it and `test_source_patch_type.py` were run 3 times
+  in a row, all green.
+- The 15 new or changed preview cases all fail against the first commit's code.
+- Mutation checks (break the line, run the guarding tests, restore from a copy, `md5sum -c`
+  clean), each failed as expected:
+  - `_as_browser` merging the presets over the caller's headers: the three `callers-own` cases.
+  - `probe_headers` returning the headers for any host: both cross-host tests. The preview's
+    probe ignoring `probe_headers`: the preview's cross-host test.
+  - No page retry: the two page-retry cases. A page retry despite the caller's User-Agent:
+    `..._refusing_the_callers_user_agent_are_blocked`. 429s mapped to `blocked`:
+    `..._rate_limit_us_are_an_http_error`.
+  - The YouTube-address check dropped: both YouTube tests.
+  - The early `state.kind` dropped: both timeout `kind` checks.
+  - A named feed type kept as the kind: the `rss-True-podcast` and `podcast-False-rss` cases.
+  - `challenge-platform` put back in the markers: the Cloudflare test.
+  - The half taken per attempt again: the shared-half test.
+
 ## Device checks
 
 None. The preview route and PATCH `type` have no caller until PR11b and PR11c, so nothing on the
@@ -170,11 +246,14 @@ existing checks that feeds keep updating (#35).
 ## Open items for later units
 
 - **PR11b:** `api.previewSource`; show `error` as given; on `busy`, offer a retry; on
-  `headers_used: "browser"`, store the "Use a browser identity" and "Prefer English" presets with
-  Add (the response carries no header values) and show "Reading as Safari · Undo"; prefix
+  `headers_used: "browser"`, add to the headers it sent the presets it didn't set itself: "Use a
+  browser identity" always, "Prefer English" only when it sent no `Accept-Language` (the
+  response carries no header values, and the preview kept the caller's own), store them with
+  Add and show "Reading as Safari · Undo"; prefix
   `https://` to a bare address; `duplicate_of` is a hint, the 409 is PR11b's.
-- **PR11c:** PATCH `{type, url}` with `sitemap_url` and `link_pattern` cleared; previews the found
-  feed first with `type: "rss"`.
+- **PR11c:** previews the found feed first with `type: "rss"`, then PATCHes `{type: <the
+  preview's kind>, url}` (`podcast` for a podcast feed, else `rss`) with `sitemap_url` and
+  `link_pattern` cleared.
 - **PR12b:** the `invalid_url` sentence (shared with `/sources/test`).
 - Revert: safe while nothing calls the route. Once PR11b merges, fix forward or revert newest
   first.
