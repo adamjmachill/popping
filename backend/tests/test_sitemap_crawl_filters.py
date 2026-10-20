@@ -55,18 +55,22 @@ def _serve(monkeypatch, docs: dict[str, str]) -> list[str]:
 def test_entries_carry_a_news_sitemaps_publication_date_and_title():
     pages, nested = _parse_sitemap_entries(_fixture("news-sitemap.xml"))
     assert nested == []
-    assert pages[0] == (
-        f"{SITE}/news/2026/10/19/bridge-reopens-after-repairs",
-        "2026-10-19T16:20:00-07:00",
-        "Bridge reopens after repairs",
-    )
+    url, published, _lastmod, title = pages[0]
+    assert url == f"{SITE}/news/2026/10/19/bridge-reopens-after-repairs"
+    assert published == "2026-10-19T16:20:00-07:00"
+    assert title == "Bridge reopens after repairs"
 
 
-def test_entries_fall_back_to_lastmod_and_plain_text_lists():
+def test_lastmod_is_kept_apart_from_the_publication_date():
+    """A ``<lastmod>`` says when a page last changed, not when it was
+    published (static pages get edited), so it never stands in for the
+    publication date."""
     pages, _ = _parse_sitemap_entries(_fixture("yoast-post-sitemap2.xml"))
-    assert pages[0] == (f"{SITE}/news/council-approves-river-trail/", "2026-10-18T09:30:11+00:00", None)
+    assert pages[0] == (
+        f"{SITE}/news/council-approves-river-trail/", None, "2026-10-18T09:30:11+00:00", None
+    )
     pages, nested = _parse_sitemap_entries(f"{SITE}/a\n# comment\n{SITE}/b\n")
-    assert pages == [(f"{SITE}/a", None, None), (f"{SITE}/b", None, None)]
+    assert pages == [(f"{SITE}/a", None, None, None), (f"{SITE}/b", None, None, None)]
     assert nested == []
 
 
@@ -137,6 +141,19 @@ async def test_candidates_are_dated_newest_first(monkeypatch):
     entries = await _crawl_sitemaps(f"{SITE}/news-sitemap.xml", limit=10)
     assert [e.title for e in entries] == ["Bridge reopens after repairs", "School board votes on budget"]
     assert entries[0].published == dt.datetime(2026, 10, 19, 23, 20, tzinfo=dt.timezone.utc)
+
+
+@pytest.mark.asyncio
+async def test_a_post_sitemaps_lastmod_orders_and_is_carried_but_never_dates(monkeypatch):
+    _serve(monkeypatch, {f"{SITE}/post-sitemap.xml": _fixture("yoast-post-sitemap2.xml")})
+    entries = await _crawl_sitemaps(f"{SITE}/post-sitemap.xml", limit=10)
+    assert [e.url for e in entries] == [
+        f"{SITE}/news/council-approves-river-trail/",
+        f"{SITE}/news/harvest-market-returns/",
+    ]
+    assert all(e.published is None for e in entries)
+    assert entries[0].modified == dt.datetime(2026, 10, 18, 9, 30, 11, tzinfo=dt.timezone.utc)
+    assert entries[0].modified > entries[1].modified
 
 
 @pytest.mark.asyncio

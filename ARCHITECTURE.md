@@ -21,7 +21,8 @@ will silently break if you run `uvicorn --workers > 1`:
 | `app/scheduler.py` | `_ingest_running`, `_ingest_unrecorded`, `_ingest_finished` | Ingest runs in progress per job id, those that haven't written their result yet, and how many have returned (one count per job id that has run; never counted down). `queue_check` leaves a running job alone instead of moving it up (APScheduler would drop the run), and treats a job whose finished count moved while it read the rows as just checked |
 | `app/sources/github_releases.py` | `_etag_cache` | Per-repo ETag cache for GitHub API 304s |
 | `app/sources/dynamic_reddit.py` | `_warned_disabled` | One-shot warning dedup for disabled Reddit rows |
-| `app/sources/generic_scrape.py` | `GenericScrapePlugin._extracted_urls` | Pages each website feed has already fetched (bounded FIFO, 5000 entries), so a page that isn't an article, is too old or is over the undated cap isn't fetched again. Stored pages are skipped through the scheduler's stored-URL lookup instead, so a restart only re-reads the pages that weren't kept. A refused page is left out, so the next check (for example after Read as Safari) asks for it again |
+| `app/sources/generic_scrape.py` | `GenericScrapePlugin._extracted_urls` | Pages each website feed has already fetched (bounded FIFO, 5000 entries), so a page that isn't an article, is too old, is gone (404, 410) or is over the undated cap isn't fetched again. Stored pages are skipped through the scheduler's stored-URL lookup instead, so a restart only re-reads the pages that weren't kept. A refused page is left out, so the next check (for example after Read as Safari) asks for it again |
+| `app/sources/generic_scrape.py` | `GenericScrapePlugin._page_failures` | Consecutive failed checks per page whose fetch failed in a way that passes (a timeout, a network error, a 5xx), bounded FIFO, 1000 entries. Such a page is asked for again on the next check, and passed over (added to `_extracted_urls`) after 3 failed checks in a row. A restart starts the counts again |
 | `app/scoring/convergence.py` | process-level cache | 30s TTL convergence counts cache |
 | `app/runtime_settings.py` | `_cache` | In-process app_settings cache |
 | `app/request_state.py` | `_notifier` | Module-level notifier singleton |
@@ -38,6 +39,8 @@ With N workers:
 - **`_extracted_urls` is per-worker**: each worker re-fetches the pages
   another worker already read and passed over. Stored pages are skipped
   on every worker (the stored-URL lookup reads the DB).
+- **`_page_failures` is per-worker**: a page that keeps failing is passed
+  over after 3 failed checks on each worker, not 3 in all.
 - **Convergence cache is per-worker**: N redundant SQL queries per
   30s window instead of 1.
 - **`_warned_disabled` is per-worker**: N× the warning log lines.

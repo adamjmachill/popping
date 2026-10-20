@@ -72,13 +72,15 @@ class SourcePlugin(ABC):
     # can't be edited; ``_ingest`` snapshots their row instead.
     fetch_target: tuple[str | None, str | None, str | None] | None = None
     # True for a plugin whose ``fetch`` takes the keyword arguments
-    # ``known_urls`` (a ``KnownUrls`` lookup) and ``max_undated``
-    # (``ingest.max_undated_per_poll``), which ``scheduler._ingest``
-    # then passes. Only ``GenericScrapePlugin`` does: it fetches a page
-    # per candidate, so skipping stored ones before the fetch matters,
-    # and its items never include stored URLs, so the ingest rules'
-    # undated cap has to be applied inside it. Every other plugin's
-    # ``fetch`` takes no arguments.
+    # ``known_urls`` (a ``KnownUrls`` lookup), ``max_undated``
+    # (``ingest.max_undated_per_poll``) and ``backlog_before`` (the
+    # date before which a page is old backlog on this poll, None on a
+    # first fetch), which ``scheduler._ingest`` then passes. Only
+    # ``GenericScrapePlugin`` does: it fetches a page per candidate, so
+    # skipping stored ones before the fetch matters, and its items never
+    # include stored URLs, so the ingest rules' undated cap has to be
+    # applied inside it. Every other plugin's ``fetch`` takes no
+    # arguments.
     takes_ingest_hints: bool = False
 
     @abstractmethod

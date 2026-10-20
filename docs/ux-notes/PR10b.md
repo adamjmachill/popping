@@ -93,13 +93,17 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   - `fetch_html_checked` (new) raises a refusal as `FetchRefusedError` and a transport failure
     as the httpx error. With `raise_for_status`, any other 4xx or 5xx raises
     `httpx.HTTPStatusError`; without it, those read as an empty document, as in `fetch_html`.
+    A host that doesn't resolve raises `httpx.ConnectError` (`unresolved_host_error`, review
+    fix); a host in a denied range still reads as no document.
   - `most_telling_error(errors)`: a 401-403 refusal, then a 429, then any other HTTP status,
     then a network error or `asyncio.TimeoutError`, then anything else.
 - **`backend/app/feed_autodiscovery.py`**
-  - `_parse_sitemap_entries` returns `([(page, date, title)], [(nested, lastmod)])`. A page's
-    date is a news sitemap's `<news:publication_date>`, else `<lastmod>`; its title is
-    `<news:title>`.
-  - `_crawl_sitemaps` returns `Candidate(url, published, title)` newest first.
+  - `_parse_sitemap_entries` returns `([(page, published, lastmod, title)], [(nested,
+    lastmod)])`: a news sitemap's `<news:publication_date>`, the `<lastmod>` and `<news:title>`,
+    kept apart (review fix; the first cut merged `<lastmod>` into the date).
+  - `_crawl_sitemaps` returns `Candidate(url, published, title, modified)` newest first, ordered
+    by the publication date, else `<lastmod>`, else a date in the URL. `published` is only a
+    publication date, `modified` only the `<lastmod>`.
     - It orders and skips sitemaps with `article_detect.order_sitemaps`, both the robots.txt
       list and each index's nested list (newest first within a class).
     - It keeps entries that pass `url_ok` against the crawl's site.
@@ -111,12 +115,15 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
     - Headers go on every request, robots.txt included.
     - Failures are collected per document. A document that fails is skipped, as before. With
       `raise_errors`, an empty crawl raises, in order: the input sitemap's own failure (the
-      feed's `sitemap_url`, or its URL when that is a sitemap; a 404 there is `[not found]`); a
-      refusal when every sitemap document fetched was refused (a refused robots.txt reads as no
-      robots.txt and never counts on its own); a network error.
-  - `discover_sitemap_entries(page_url, limit, path_prefix, *, headers, raise_errors)` (new)
-    wraps the crawl in the 30 s budget. Without `raise_errors` nothing raises (`[]`); with it,
-    the crawl's error or the budget's `asyncio.TimeoutError` (`[network]`) propagates.
+      feed's `sitemap_url`, read as the sitemap whatever its address looks like, or its URL when
+      that looks like a sitemap; a 404 there is `[not found]`); a refusal when every sitemap
+      that could list pages was refused (a sitemap index that loaded counts neither way, and a
+      refused robots.txt reads as no robots.txt and never counts on its own); a network error.
+  - `discover_sitemap_entries(page_url, limit, path_prefix, *, headers, raise_errors,
+    input_is_sitemap, owner_pattern)` (new) wraps the crawl in the 30 s budget. Without
+    `raise_errors` nothing raises (`[]`); with it, the crawl's error, the budget's
+    `asyncio.TimeoutError` (`[network]`) or a host that doesn't resolve (`[network]`)
+    propagates.
   - `discover_sitemap_urls` keeps returning `list[str]` and never raises; `/auto` calls it as
     before. It now goes through the same filters, so auto-add makes a website feed only when a
     sitemap lists an article-shaped URL (root cause "Auto-add makes a scraper if the sitemap
@@ -125,11 +132,12 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
 - **`backend/app/sources/generic_scrape.py`**
   - `plan_candidates(url, sitemap_url, link_pattern, headers, known_urls, *, limit,
     raise_errors) -> Plan(mode, candidates, fresh)` serves `fetch` and `probe`.
-    - A section URL reads the page, then the sitemap. A site root or a feed with a
-      `sitemap_url` reads the sitemap, then the page. A URL that is itself a sitemap reads only
-      the sitemap. The first read with candidates wins.
+    - A section URL reads the page, then the sitemap. A site root, a feed with a
+      `sitemap_url`, or a URL that looks like a sitemap reads the sitemap, then the page. The
+      first read with candidates wins.
     - The page read (`_discover_page_links`) keeps today's prefix filter with a link pattern
-      and uses `listing_links` without one. Every link passes `url_ok`. The page is fetched with
+      and uses `listing_links` without one. Every link passes `url_ok`, as the owner's choice
+      under the link pattern (`owner_pattern`). The page is fetched with
       `raise_for_status`, because it is the feed's own address. `listing_links` resolves against
       the final URL when the page redirected within the site. The parse runs in a thread.
     - The sitemap read is scoped to the link pattern, else the URL's section. The whole-sitemap
@@ -138,23 +146,28 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
       else `NoArticleListError`. A read's failure is ignored when the other read finds
       candidates.
     - `known_urls` marks stored candidates; `fresh` leaves them out.
-  - `_extract_one(url, custom_headers=None, *, owner_configured=False)` fetches with
-    `fetch_html_checked(..., return_final_url=True)`. One `asyncio.to_thread` call
-    (`_read_page`) runs `bare_extraction` and then `score_page(html, url, final_url=..., text=...,
-    owner_configured=...)`, passing the text it already extracted. A page under `ACCEPT_SCORE`
-    is rejected, with the reasons in a DEBUG line. A refusal raises; every other failure returns
-    None, as before.
+  - `_extract_one(url, custom_headers=None, *, owner_configured=False, listed_date=None)`
+    fetches with `fetch_html_checked(..., return_final_url=True, raise_for_status=True)`. One
+    `asyncio.to_thread` call (`_read_page`) runs `bare_extraction` and then `score_page(html,
+    url, final_url=..., text=..., owner_configured=..., listed_date=...)`, passing the text it
+    already extracted. A page under `ACCEPT_SCORE` is rejected, with the reasons in a DEBUG
+    line. A refusal raises, and so does a failure that passes (a network error, a 5xx); a page
+    that is gone (404, 410, other 4xx), not HTML or not an article returns None. A page with no
+    date of its own takes `listed_date` (the list's publication date).
   - `GenericScrapePlugin.fetch(*, known_urls=None, max_undated=None)` (`takes_ingest_hints`):
     - plans with `raise_errors=True`, then takes up to 10 fresh candidates not in
       `_extracted_urls`;
-    - a refused page is not marked extracted;
+    - a refused page is not marked extracted, nor is a page whose fetch failed in a way that
+      passes (`_page_failed`: marked after 3 failed polls in a row);
     - when every page of a non-empty batch was refused, `_settle_refusals` fetches a control (the
-      newest candidate outside the batch). Refused too, no answer, or no control: it raises the
-      refusal and leaves the pages unmarked. Loads: the 401-403 pages are marked, and a 429 stays
-      unmarked;
-    - `_cap_undated`: at most `max_undated` undated pages per poll, only above the first stored
-      candidate. Pages past the cap stay marked;
-    - `owner_configured = bool(link_pattern or sitemap_url)`.
+      newest candidate outside the batch; a gone one, 404 or 410, passes to the next, up to 3).
+      Serves a page: the 401-403 pages are marked, and a 429 stays unmarked. Refused, a 5xx, no
+      answer, an answer with no page in it (not HTML, empty), or no control: it raises the
+      refusal and leaves the pages unmarked;
+    - `_cap_undated`: at most `max_undated` undated pages per poll, and none that are old
+      backlog (see the review fixes). Pages it drops stay marked;
+    - `owner_configured` is worked out after the plan: the link pattern, or a `sitemap_url` whose
+      sitemap gave the candidates.
   - `probe` uses the same plan without `raise_errors` and skips refused pages, so the Test
     route's preview never raises.
 - **`backend/app/sources/base.py`**: the `KnownUrls` type and `SourcePlugin.takes_ingest_hints`
@@ -162,10 +175,12 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
 - **`backend/app/scheduler.py`**: `_stored_urls(session, urls)` is the known-URL query, used by
   the commit session as before and by `_known_urls_lookup` (its own short session) during a
   website feed's fetch. `_ingest_once` reads the tunables before the fetch and passes
-  `known_urls` and `max_undated` to a plugin with `takes_ingest_hints`.
+  `known_urls`, `max_undated` and `backlog_before` (`_backlog_cutoff`, review fix) to a plugin
+  with `takes_ingest_hints`.
 - **Docs:** README gains a "Website feeds" subsection after Feed health. ARCHITECTURE.md's
-  `_extracted_urls` row and its multi-worker note now describe what it holds. No new
-  process-local state: the control fetch and the plan live for one poll.
+  `_extracted_urls` row and its multi-worker note now describe what it holds, and the review
+  fixes add a row for `_page_failures` (the only new process-local state; the control fetch
+  and the plan live for one poll).
   `frontend/scripts/iphone-audit/README.md` is unchanged: no flows or states.
 
 ## Deviations from the spec
@@ -186,7 +201,10 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   says `[no list]` "only when raw discovery is empty". Raw discovery is also empty when every
   request failed to connect, and `[no list]` is a setup state that never backs off or stops.
   So an empty plan raises the most telling failure first (above), and `[no list]` only when
-  nothing failed.
+  nothing failed. That includes a host that doesn't resolve (a lapsed domain, a resolver
+  that is down): `url_safety` refuses it like a denied address, so `article_extract` asks the
+  resolver once more after the safety check fails and raises `httpx.ConnectError` for it
+  (review fix; `url_safety.py` is frozen and unchanged).
 - **The listing page's own failures count too.** A refused or missing listing page decides the
   error only when the sitemap finds nothing either ("a listing page 403 gives `[blocked]`" is
   that case). Today a section feed whose page 404s but whose section is in the sitemap works,
@@ -197,8 +215,10 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   when the sitemap found nothing, so a feed that works today reads exactly what it read before.
   So "all 404s with no link pattern give `[no list]`" is tested with a home page that answers
   but lists nothing. A home page that 404s is the feed's own address missing: `[not found]`.
-- **A URL that is itself a sitemap reads only the sitemap.** The spec doesn't say; reading XML
-  as a listing page could only find nothing.
+- **A URL that looks like a sitemap reads the sitemap first, then the page.** The spec
+  doesn't say. The first cut read only the sitemap, which broke an HTML sitemap page
+  (`/sitemap/` with a link pattern) that works on main (review fix). Reading an XML sitemap as
+  a page finds nothing at the cost of one fetch.
 - **`discover_sitemap_entries` is new, and `_section_candidates` is gone.** The spec keeps
   `discover_sitemap_urls` (`list[str]`, for `/auto`) and gives it and `_section_candidates`
   `raise_errors`. The plugin needs the entries' dates and titles (PR11a's preview counts older
@@ -214,21 +234,32 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   alone, refused, and the sixth poll would auto-disable the feed. This is common after a
   restart, when the only unstored candidate left is the refused one. So when the whole batch is
   refused, one page of the site outside the batch is fetched first:
-  - refused too, no answer, or no other page: the spec's rule (raise, pages unmarked);
-  - loads: the pages refuse everyone, so they are marked and the poll succeeds.
+  - refused too, a 5xx, no answer, an answer with no page in it, or no other page: the spec's
+    rule (raise, pages unmarked);
+  - gone (404, 410): the next candidate is tried, up to 3, so a deleted stored story doesn't
+    decide;
+  - serves a page: the pages refuse everyone, so they are marked and the poll succeeds.
 
   A 429 is treated as a refusal (`[http error]`, Check now) and is never marked, because a rate
   limit passes.
-- **The undated cap also drops undated pages below a stored candidate,** the other half of
-  PR4a's rule for every feed type. Without it, after each restart the plugin would store up to
-  two old undated pages per poll that it had passed over before. Pages past the cap stay marked.
-  PR4a's notes suggested leaving them unmarked, but then every poll would fetch them again only
-  to drop them again, up to 8 wasted fetches a poll on an undated site.
-- **`url_ok` applies under a link pattern too,** as the spec's raw-discovery rule says. The
-  prefix filter itself is unchanged. An owner pattern that targets record pages such as
-  `/products/<x>` would be filtered out (see Open items).
-- **Network errors on article pages** still return None and mark the page, as before. Only
-  refusals are left unmarked: a single page that always times out must not fail every poll.
+- **The undated cap also drops old undated backlog,** the other half of PR4a's rule for every
+  feed type. Without it, after each restart the plugin would store up to two old undated pages
+  per poll that it had passed over before. Which pages are backlog depends on the list's order
+  (review fix; the first cut used position everywhere): below the first stored candidate on a
+  listing page; in a sitemap, last modified before the poll's backlog line, or with no date at
+  all after the first fetch. Pages the cap drops stay marked. PR4a's notes suggested leaving
+  them unmarked, but then every poll would fetch them again only to drop them again, up to 8
+  wasted fetches a poll on an undated site.
+- **`url_ok` applies under a link pattern too,** as the spec's raw-discovery rule says, but
+  without courlan (review fix): the pattern is the owner's article signal. The prefix filter
+  itself is unchanged, and our own path rules still apply, so an owner pattern that targets
+  record pages such as `/products/<x>` is still filtered out (see Open items).
+- **Article pages that fail in a way that passes are asked for again.** The first cut marked a
+  page that timed out or answered 5xx, so a transient failure lost the story (review fix). Now
+  only a page that was read (gone, not HTML, not an article, kept) is marked. A failed page is
+  left for the next poll and never fails the poll (only an all-refused batch raises); after 3
+  failed polls in a row it is marked, so a page that never answers can't take a slot of every
+  poll.
 - **No owner VPS probe before merging.** Per the owner's decision of 2026-10-20 (PROGRESS.md),
   the read-only probe runs after deploying instead, from `docs/DEVICE_CHECKS.md`.
 
@@ -356,6 +387,124 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   header denylist still applies. `trafilatura`, `courlan`, `lxml` and `defusedxml` are used only
   as parsers. Error messages carry the status and the URL the feed already has, never a body.
 
+## Review fixes
+
+The review agents' confirmed findings, each fixed with a test that fails without the fix (the
+mutation run below):
+
+1. **A control page that answers 404 or 5xx counted as loaded.** `_settle_refusals` fetches the
+   control with `raise_for_status` and counts it only when it returns a page. A 5xx, a
+   refusal, a network error, a non-HTML answer or an empty body is not the site serving us; a
+   404 or 410 passes to the next candidate (up to 3).
+2. **An HTML sitemap page was never read as a page.** A URL that looks like a sitemap now reads
+   the sitemap, then the page, like a site root.
+3. **A served sitemap index whose children are all refused read as `[no list]`** (reported
+   twice). The refusal rule leaves out the indexes that loaded: an index whose post sitemaps
+   are all refused raises the refusal (`[blocked]`, or `[http error]` for 429s). A lone guessed
+   403 beside 404s, an index with one refused and one missing child, and a refused sitemap
+   beside one that loads are still not blocked.
+4. **A host that doesn't resolve read as `[no list]`.** `unresolved_host_error` in
+   `article_extract` (used by `fetch_html` with `raise_errors` and by
+   `discover_sitemap_entries`) raises `httpx.ConnectError` (`[network]`). A host in a denied
+   range still reads as no document.
+5. **Article pages that timed out or answered 5xx were marked** (reported twice). See the
+   deviation above: `_extract_one` re-raises those, `fetch()` leaves them unmarked
+   (`_page_failed`), and a 404 or 410 page stays marked.
+6. **A dead `sitemap_url` vouched for the home page's links.** `owner_configured` is worked out
+   after the plan, so links `listing_links` found are scored as any page is. An INFO line
+   names the `sitemap_url` that listed nothing. The feed still reads its page: raising
+   `[not found]` there would stop `sitemap_url` plus `link_pattern` feeds that work today.
+7. **Dated articles were scored as undated.**
+   - `Candidate.published` (a listing card's `<time datetime>` or a news sitemap's
+     publication date) reaches `score_page` as `listed_date`, which counts like the page's own
+     date and cancels the `og:type=website` −3. The item also takes it as `published_at` when
+     the page carries no date of its own. A sitemap's `<lastmod>` is kept apart
+     (`Candidate.modified`) and never dates a page; trafilatura's date is never used for
+     scoring.
+   - `_body_date` also reads a plain `<time datetime>` inside the first h1's own `<article>`
+     (not in its footer, aside or nav, and not marked as an update), when only one article
+     holds an h1. New fixture `astro-post.html` (the Astro blog starter's post layout).
+   - Still rejected: About, Yoast About, the long listing and the listing fixtures.
+8. **"Below the first stored candidate" dropped new pages in `<lastmod>` order.** The position
+   rule now applies only to a listing page. In a sitemap, an undated page is backlog when its
+   `<lastmod>` is older than the poll's backlog line (the scheduler's `_backlog_cutoff`: the
+   baseline minus `backfill_hours`, or `max_age_days`, whichever is later; None on a first
+   fetch), or when it has no date at all after the first fetch. A page can't have been
+   published after it last changed, so the first is sound; the second can't tell a new
+   undated page from old backlog in an order that says nothing.
+9. **`url_ok`'s courlan step rejected real slugs** (`png-vs-jpg`, `node.js-22-released`,
+   `.ece`, `.cms`). File types are judged by the page's own ending (`_FILE_EXTENSIONS`);
+   courlan sees a one-word page name as it is and a longer slug as a neutral word, with an
+   ending that is neither a file nor a web page it knows left off; and under the owner's link
+   pattern (page links and the sitemap read) courlan isn't asked (`owner_pattern`).
+   Blogspot's `_archive.html` pages, which only courlan rejected, are rejected by our rules.
+10. **No request-level test of the feed's headers.** Two tests serve robots.txt, a sitemap index
+    listed only there, its post sitemap, the article page and a section's listing page only to
+    a Safari User-Agent, and assert that every request carries it. Each fails when
+    `custom_headers=headers` becomes `None` on the robots.txt fetch, the sitemap document fetch
+    or the listing page fetch (mutation run below).
+11. **An explicit `sitemap_url` that didn't look like a sitemap was ignored.**
+    `discover_sitemap_entries(..., input_is_sitemap=True)` reads the owner's URL as the sitemap
+    whatever its path (`/?sitemap=index`), so a 404 there is `[not found]`. `/auto` doesn't set
+    it.
+12. **The VPS probe contradicted Step 0 and its 24-hour count couldn't catch a stopped feed.**
+    The baseline is its own line, marked as the one check that runs before Step 0's
+    `popping-update`. The probe now has a `since_deploy` column (stories fetched since the
+    backend container was created, read from `docker inspect`), and the line a day after
+    deploying fails a feed whose `since_deploy` is 0 while its site kept publishing.
+
+### Verification of the review fixes
+
+- **Backend pytest** (database `popping_test_b`, worktree `PYTHONPATH`): **13 failed, 1371
+  passed**. The 13 are the DNS-only baseline (`/root/popping-env/baseline.txt`), unchanged.
+  The 11 DNS-only source-route tests among them pass with a fake resolver (their four files:
+  50 passed).
+- **New and rewritten tests:** `test_generic_scrape_errors.py` (+27 cases: controls, the HTML
+  sitemap page, refused index children, DNS, transient article failures, gone pages, the dead
+  and working `sitemap_url`, list dates, the Astro post, the owner's pattern, headers on every
+  request, `/?sitemap=index`), `test_generic_scrape_skips_stored.py` (the undated cap per list
+  order, the backlog line, and the scheduler passing it), `test_article_detect.py` (the
+  review's `url_ok` slugs, `owner_pattern`, the wider body date, `listed_date`, the static
+  pages that stay rejected), `test_generic_scrape_plan.py` (read order for a sitemap-looking
+  URL, `input_is_sitemap`, `owner_pattern`, `owner_configured` after a dead `sitemap_url`),
+  `test_sitemap_crawl_filters.py` and `test_sitemap_newest_first.py` (`<lastmod>` kept apart).
+- **Mutation check of the fixes.** A script broke each guarded line, ran the tests that guard
+  it, required a failure, and restored the file byte for byte (SHA-256). 41 mutations, 51 test
+  runs, all caught:
+  - control: a gone control not skipped, a 5xx control counted as serving, a control with no
+    page counted as serving;
+  - a sitemap-looking URL read only as a sitemap;
+  - the index rule: indexes counted as refusable, every loaded document counted as an index,
+    and the looser "any refusal with nothing loaded" rule;
+  - DNS: `fetch_html` and the sitemap discovery not raising, and a denied host read as
+    unresolved;
+  - articles: a 5xx read as gone, network errors swallowed, no `raise_for_status`, a failed
+    page marked, a failing page never passed over, a gone page left unmarked;
+  - `owner_configured` from the `sitemap_url` alone;
+  - dates: the listed date not scored, not passed by `fetch()`, not dating the item, ignored by
+    `score_page`; the plain article `<time>` ignored; a footer or "updated" `<time>` counted;
+    `<lastmod>` merged into the publication date;
+  - the undated cap: position in a sitemap, no position on a listing page, `<lastmod>` not held
+    against the line, an undated no-date page kept after the first fetch, the scheduler passing
+    no line, the line ignoring the baseline;
+  - `url_ok`: courlan seeing the whole slug, our file-type check dropped, courlan asked under
+    the owner's pattern, page links and the sitemap read not passing `owner_pattern`;
+  - headers dropped on the robots.txt fetch, the sitemap document fetch and the listing page
+    fetch, one at a time;
+  - the explicit `sitemap_url` read by its looks, and the plan not flagging it.
+
+  The first run had six survivors, each fixed: two mutations had been aimed at the wrong tests;
+  `fetch_html`'s own unresolved-host raise and the page links' `owner_pattern` had no test that
+  reached them (now `fetch_html_checked` is asserted directly, and a link-pattern listing with a
+  `/library/home` link is planned); and "every loaded document counted as an index" got its
+  own test (a refused sitemap beside one that loads is not blocked).
+- **`ruff check --select F,E9,B`** on every changed app file and test: clean, except the 5
+  findings in `scheduler.py` that are on main.
+- **The probe:** the exact command in `docs/DEVICE_CHECKS.md` was run with `docker` stubbed to
+  run its container half locally, against sample rows in a scratch schema on the test cluster
+  (dropped afterwards): it parses, and `since_deploy` reads 0 for a feed whose stories all came
+  in the 24 hours before the deploy.
+
 ## Risks and data-compatibility notes
 
 - **Some website feeds will pull fewer stories or show a new state.** This is the intended
@@ -366,17 +515,26 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
     row, as for every other feed.
 - **A section feed now reads its page first.** If `listing_links` picks a repeating group that
   isn't the posts and every one of them is rejected by `score_page`, the feed finds candidates
-  but brings nothing (Quiet). It never falls through to the sitemap. The probe's `stories_24h`
-  would show it; the fix is a link pattern or a `sitemap_url`.
+  but brings nothing (Quiet). It never falls through to the sitemap. The probe's
+  `since_deploy` a day after deploying would show it; the fix is a link pattern or a
+  `sitemap_url`.
+- **A listing ordered by update time** (a model index whose "newest" means recently updated)
+  still uses the position rule for undated pages: a new undated page below a stored one that
+  was just updated is dropped as backlog. The review asked to keep position for listing pages;
+  a `sitemap_url` or a dated listing avoids it.
+- **A sitemap with no `<lastmod>` and pages with no date** brings undated pages only on its
+  first fetch: such a page can't be told from old backlog.
 - **After a restart,** pages that were fetched but not kept (not articles, too old, over the
-  undated cap) are fetched once more. Stored pages are not.
+  undated cap) are fetched once more, and pages that were failing start a new count of 3.
+  Stored pages are not fetched.
 - **Revert is safe until PR11a merges** (it calls `plan_candidates`). There is no migration,
   and no route or response changes shape.
 
 ## Open items for later units
 
 - **PR11a:** the preview should call `plan_candidates` (`Plan.candidates` carries each
-  candidate's date and title for `older_skipped_count`). `_read_page` logs `score_page`'s reasons
+  candidate's publication date, `<lastmod>` and title for `older_skipped_count`; a date in the
+  URL is not carried, `feed_autodiscovery._entry_date` reads it). `_read_page` logs `score_page`'s reasons
   but returns only accept or reject. The preview's per-item `accepted` and `reason` will need it
   to return the score and reasons.
 - **PR9b:** a website feed's `[blocked]` comes from its sitemaps, its listing page or its
@@ -386,15 +544,23 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
 - **Scoring edge cases** from PR10a stand. A date in the URL earns +1 and cancels the
   `og:type=website` −3, so a static page at a dated URL scores 2 and is accepted (seen while
   writing these tests; not a real-world shape so far).
-- **`url_ok` under a link pattern** rejects record-shaped paths (`/products/<x>`, `/users/<x>`)
-  even when the owner chose them. If a feed needs that, the pattern should replace `url_ok`'s
-  path rules for that feed; that is a spec change.
+- **`url_ok` under a link pattern** no longer asks courlan, but our own path rules still reject
+  record-shaped paths (`/products/<x>`, `/users/<x>`) even when the owner chose them. If a feed
+  needs that, the pattern should replace `url_ok`'s path rules for that feed; that is a spec
+  change.
+- **A date written only as text** ("Posted on October 14, 2026") with no `<time>`, no metadata
+  and no listing card date still leaves an `og:type=website` page undated (−3), and such a page
+  is rejected without a link pattern. Reading dates from text is a heuristic of its own.
+- **A slug that ends in a file type** (`/blog/getting-started-with-vue.js`) is read as a file.
 - **The plan's frontend-only rollback command** still lacks `--no-deps` (PR9a's open item).
 
 ## Device checks
 
-Added under Pending in `docs/DEVICE_CHECKS.md`. The first is the read-only VPS probe that used
-to be the merge gate; the owner now runs it before and after deploying.
+Added under Pending in `docs/DEVICE_CHECKS.md`. The first three are the read-only VPS probe that
+used to be the merge gate; the owner now runs it before deploying (the one exception to Step 0)
+and twice after.
 
-- [ ] #<pr> · With #35 already deployed (the query reads its columns), and before running `popping-update` for this PR, run `cd /opt/popping && docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT s.name, s.active, s.last_attempt_at, s.last_item_count AS listed, s.last_new_count AS new, left(s.last_error, 40) AS error, count(e.id) FILTER (WHERE e.fetched_at >= now() - make_interval(hours => 24)) AS stories_24h, count(e.id) AS stories_7d FROM sources s LEFT JOIN entries e ON e.source_id = s.id AND e.fetched_at >= now() - make_interval(days => 7) WHERE s.type = '\''generic_scrape'\'' GROUP BY s.id ORDER BY s.name"'` and keep the output; run it again 3 hours after deploying (a website feed is checked every 2 hours by default). Pass: every website feed has a `last_attempt_at` after the deploy, and each one that brought stories before still shows no error (its `listed` count can be lower than before, because About, tag and shop pages no longer count); write `fail: <feed name>` for a feed that now shows `[no list]`, `[blocked]` or `[not found]`, or whose `stories_24h` fell to 0 while its site kept publishing.
+- [ ] #<pr> · Baseline, the one check that runs **before** Step 0's `popping-update` (it has to read the old build): with #35 already deployed (the query reads its columns), run `cd /opt/popping && DEPLOYED=$(docker inspect -f '{{.Created}}' $(docker compose ps -q backend)) && docker compose exec -e DEPLOYED="$DEPLOYED" postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT s.name, s.active, s.last_attempt_at, s.last_item_count AS listed, s.last_new_count AS new, left(s.last_error, 40) AS error, count(e.id) FILTER (WHERE e.fetched_at >= '\''$DEPLOYED'\''::timestamptz) AS since_deploy, count(e.id) FILTER (WHERE e.fetched_at >= now() - make_interval(hours => 24)) AS stories_24h, count(e.id) AS stories_7d FROM sources s LEFT JOIN entries e ON e.source_id = s.id AND e.fetched_at >= now() - make_interval(days => 7) WHERE s.type = '\''generic_scrape'\'' GROUP BY s.id ORDER BY s.name"'` and keep the output. Pass: it prints a row per website feed (`since_deploy` counts from the previous deploy here and doesn't matter).
+- [ ] #<pr> · 3 hours after deploying this PR (a website feed is checked every 2 hours by default), run the baseline's command again. Pass: every website feed has a `last_attempt_at` after the deploy, and each one with no error in the baseline still shows none (its `listed` count can be lower than before, because About, tag and shop pages no longer count); write `fail: <feed name>` for one that now shows `[no list]`, `[blocked]` or `[not found]`.
+- [ ] #<pr> · A day or more after deploying this PR, and before deploying anything else, run the baseline's command once more: `since_deploy` counts only the stories each feed brought since the backend was deployed. Pass: each website feed with stories in the baseline's `stories_7d` has a `since_deploy` above 0, unless its site published nothing since the deploy; write `fail: <feed name>` for one whose `since_deploy` is 0 while its site kept publishing. `listed` is no signal on its own: a check with nothing new lists 0 too.
 - [ ] #<pr> · A day after deploying, open the tab of a website feed that used to pull pages that aren't articles. Pass: the stories that arrived since the deploy are its articles, with no About, Contact, tag, author or shop pages.

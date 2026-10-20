@@ -118,10 +118,50 @@ def _page(
         "https://www.example.com/p/2041",
         # "page" is pagination only when a number follows it.
         "https://www.example.com/page/how-we-report",
+        # Slugs that name a file type, and endings that are no file
+        # type (news CMSs). courlan's own tests match ``-png`` and
+        # ``.js`` anywhere in a URL and reject any ending it doesn't
+        # know, so PR10b's first cut rejected all of these.
+        "https://www.example.com/blog/how-to-compress-png-files",
+        "https://www.example.com/blog/converting-jpg-to-webp",
+        "https://www.example.com/blog/png-vs-jpg",
+        "https://www.example.com/news/2026/10/14/apple-drops-png-support/",
+        "https://www.example.com/blog/img-tags-explained",
+        "https://www.example.com/blog/node.js-22-released",
+        "https://www.example.com/news/national/council-vote/article68765432.ece",
+        "https://www.example.com/city/news/council-vote/112233.cms",
     ],
 )
 def test_url_ok_keeps_articles(url):
     assert url_ok(url, SITE)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.example.com/library/riverlm3",
+        "https://www.example.com/library/riverlm3-png-tools",
+        "https://www.example.com/library/home",
+    ],
+)
+def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
+    """Under the owner's ``link_pattern`` courlan isn't asked: the
+    pattern says what an article is, as ``score_page`` takes it."""
+    assert url_ok(url, SITE, owner_pattern=True)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.example.com/library/tag/python",
+        "https://www.example.com/library/2026/07/",
+        "https://www.example.com/library/riverlm3.png",
+        "https://www.example.com/library/about",
+        "https://www.other-site.com/library/riverlm3",
+    ],
+)
+def test_url_ok_keeps_its_own_rules_under_the_owners_link_pattern(url):
+    assert not url_ok(url, SITE, owner_pattern=True)
 
 
 def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():
@@ -173,6 +213,13 @@ def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():
         "https://www.example.com/feed/",
         "https://www.example.com/wp-content/uploads/2026/10/trail.jpg",
         "https://www.example.com/files/annual-report.pdf",
+        "https://www.example.com/wp-content/uploads/2026/10/trail.JPG",
+        "https://www.example.com/news/feed.xml",
+        "https://www.example.com/assets/app.js",
+        "https://www.example.com/download?file=annual-report.pdf",
+        "https://www.example.com/blog/home",
+        "https://www.example.com/index.html",
+        "https://www.example.com/2026_10_01_archive.html",
         "https://www.example.com/kontakt",
         "https://www.other-site.com/news/a-story",
         "mailto:news@example.com",
@@ -464,19 +511,83 @@ def test_a_date_in_the_url_counts_as_dated():
         # A class-less <time> in the article's header is its date.
         (('<article><header><h1>Council approves the trail</h1>'
           '<time datetime="2026-10-14">Oct 14</time></header><p>Story.</p></article>'), True),
+        # So is one anywhere in the h1's own article: Astro, Next.js and
+        # Webflow templates print the date in a div under the title.
+        (('<main><article><h1>Council approves the trail</h1>'
+          '<p><time datetime="2026-10-14">Oct 14</time></p><p>Story.</p></article></main>'), True),
+        (('<article><div class="date"><time datetime="2026-10-14">Oct 14</time></div>'
+          '<h1>Council approves the trail</h1><p>Story.</p></article>'), True),
         # In the article's footer it is not ("updated", comment times).
         (('<article><header><h1>Council approves the trail</h1></header><p>Story.</p>'
           '<footer><time datetime="2026-10-14">Oct 14</time></footer></article>'), False),
+        # Nor in its related-posts aside, nor one marked as an update.
+        (('<article><h1>Council approves the trail</h1><p>Story.</p><aside>'
+          '<time datetime="2026-10-14">Oct 14</time></aside></article>'), False),
+        (('<article><h1>Council approves the trail</h1><p>Updated '
+          '<time class="updated" datetime="2026-10-14">Oct 14</time></p></article>'), False),
         # Nor outside the article.
         (('<article><header><h1>Council approves the trail</h1></header><p>Story.</p></article>'
           '<div class="sidebar"><time datetime="2026-10-14">Oct 14</time></div>'), False),
+        # Nor a card's, when several articles hold an h1 (a listing).
+        (('<article><h1><a href="/a">A</a></h1><time datetime="2026-10-14">Oct 14</time></article>'
+          '<article><h1><a href="/b">B</a></h1><time datetime="2026-10-13">Oct 13</time></article>'),
+         False),
     ],
 )
-def test_a_class_less_time_counts_only_in_the_articles_header(body, dated):
+def test_a_class_less_time_counts_only_as_the_articles_own_date(body, dated):
     html = _page(og_type="website", published=None, body=body)
     _, reasons = score_page(html, STORY_URL, text="x" * 650)
     assert ("+1 dated 2026-10-14" in reasons) is dated
     assert ("-1 no date" in reasons) is not dated
+
+
+def test_an_astro_style_post_is_accepted_without_a_link_pattern():
+    """og:type=website on every page, no JSON-LD, and the date in a
+    plain <time> inside the post's article: a real article on a site
+    with no feed (PR10b review)."""
+    score, reasons = score_page(
+        _fixture("astro-post.html"), "https://www.example.com/blog/rebuilding-the-river-trail-bridge/"
+    )
+    assert score >= ACCEPT_SCORE, reasons
+    assert "+1 dated 2026-10-14" in reasons
+
+
+def test_a_page_with_a_plain_time_and_no_og_tags_is_accepted():
+    html = (
+        "<html><head><title>Council approves the trail</title></head><body><main><article>"
+        "<h1>Council approves the trail</h1><p><time datetime='2026-10-14'>Oct 14</time></p>"
+        f"<p>{'The extension adds four kilometres of path. ' * 16}</p></article></main></body></html>"
+    )
+    score, reasons = score_page(html, STORY_URL)
+    assert score >= ACCEPT_SCORE, reasons
+
+
+def test_the_lists_date_dates_a_page_that_carries_none():
+    """A listing card's date (or a news sitemap's) is the site saying
+    when the page was published: it counts like a date on the page."""
+    html = _page(og_type="website", published=None)
+    listed = dt.datetime(2026, 10, 14, tzinfo=dt.timezone.utc)
+    score, reasons = score_page(html, STORY_URL, text="x" * 650)
+    assert score < ACCEPT_SCORE
+    score, reasons = score_page(html, STORY_URL, text="x" * 650, listed_date=listed)
+    assert "+1 listed 2026-10-14" in reasons
+    assert not any("website" in r for r in reasons)
+    assert score >= ACCEPT_SCORE, reasons
+    # The page's own date wins over the list's.
+    dated = _page(og_type="website", published="2026-10-12T08:00:00+00:00")
+    _, reasons = score_page(dated, STORY_URL, text="x" * 650, listed_date=listed)
+    assert "+1 dated 2026-10-12" in reasons
+
+
+@pytest.mark.parametrize(("fixture", "url"), [
+    ("about.html", "https://www.example.com/about"),
+    ("yoast-about.html", "https://www.example.com/about-us/"),
+    ("listing-long.html", "https://www.example.com/blog/"),
+    ("listing.html", "https://www.example.com/blog/"),
+])
+def test_static_pages_and_listings_stay_rejected_with_the_wider_date_rule(fixture, url):
+    score, reasons = score_page(_fixture(fixture), url)
+    assert score < ACCEPT_SCORE, reasons
 
 
 def test_home_page_redirect_is_rejected():

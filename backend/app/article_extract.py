@@ -18,15 +18,17 @@ misses a ``public.example.com -> 127.0.0.1`` redirect hop).
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import zlib
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 import httpx
 import trafilatura
 
 from app.config import settings
-from app.url_safety import check_url_safe, ssrf_event_hook
+from app.url_safety import check_url_safe, resolve_addresses, ssrf_event_hook
 
 logger = logging.getLogger("popping.article_extract")
 
@@ -84,6 +86,35 @@ class FetchRefusedError(httpx.HTTPStatusError):
     way."""
 
 
+def unresolved_host_error(url: str) -> httpx.ConnectError | None:
+    """A network error for ``url`` when its host is a name that resolves
+    to nothing, else None.
+
+    ``check_url_safe`` refuses both a host that doesn't resolve and one
+    that resolves into a denied range, and the two mean different
+    things to a website feed: a lapsed domain or a resolver that is down
+    is a host that doesn't answer (``[network]``, which backs off and
+    can stop the feed), while a denied address is not a site we read.
+    Only the first gets an error here; an IP literal never does.
+    ``url_safety`` stays as it is: this asks the resolver once more,
+    only after the safety check has already failed."""
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return None
+    host = (parts.hostname or "").rstrip(".")
+    if parts.scheme not in ("http", "https") or not host:
+        return None
+    try:
+        ipaddress.ip_address(host)
+        return None
+    except ValueError:
+        pass
+    if resolve_addresses(host):
+        return None
+    return httpx.ConnectError(f"{host} did not resolve", request=httpx.Request("GET", url))
+
+
 def most_telling_error(errors: Iterable[BaseException]) -> BaseException | None:
     """The failure that best explains why a website gave us nothing,
     the first of its rank: a 401, 402 or 403 refusal, then a 429, then
@@ -129,7 +160,10 @@ async def fetch_html(
 
     Returns the decoded body, or None when there is nothing usable
     (refused by the URL safety check, an HTTP error, a network error, a
-    content type outside ``content_types``, an empty body).
+    content type outside ``content_types``, an empty body). With
+    ``raise_errors`` (``fetch_html_checked``), a host that doesn't
+    resolve raises ``httpx.ConnectError`` instead
+    (``unresolved_host_error``).
 
     Parameters
     ----------
@@ -156,6 +190,10 @@ async def fetch_html(
     safe, reason = check_url_safe(url)
     if not safe:
         logger.info("article_extract: %s rejected by URL safety check (%s)", url, reason)
+        if raise_errors:
+            unresolved = unresolved_host_error(url)
+            if unresolved is not None:
+                raise unresolved
         return None
     # Merge default headers with custom headers. Custom headers take
     # precedence (e.g. a user-supplied User-Agent override for sites
@@ -259,14 +297,15 @@ async def fetch_html_checked(
       that refuses us reads as ``[blocked]`` (or ``[http error]`` for a
       rate limit), not as a site with no articles.
     - Connect errors, timeouts and other transport failures
-      (``NETWORK_ERRORS``) raise as the httpx error (``[network]``).
+      (``NETWORK_ERRORS``) raise as the httpx error (``[network]``), and
+      so does a host that doesn't resolve (``httpx.ConnectError``).
     - Any other 4xx or 5xx raises ``httpx.HTTPStatusError`` only with
       ``raise_for_status``, which callers set for the user's own
       listing page or sitemap. Otherwise it returns None, as
       ``fetch_html`` does: a missing robots.txt or a guessed sitemap
       path that 404s is routine, and the crawl moves on.
-    - The URL safety check, a content type outside ``content_types``
-      and an empty body still return None.
+    - A host in a denied range (the URL safety check), a content type
+      outside ``content_types`` and an empty body still return None.
     """
     return await fetch_html(
         url,

@@ -447,33 +447,44 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
 
 - **Finds the list of articles.** It reads the listing page the feed
   points at and the site's sitemap; the first that lists articles wins.
-  A section address (`/news`) reads its page first, a site root or a
-  feed with a `sitemap_url` reads the sitemap first, and an address that
-  is itself a sitemap reads only that. With a `link_pattern`, the page's
-  links under that path are the list; without one, the page's repeating
-  list of posts is. The sitemap is read for the pattern's path, else the
+  A section address (`/news`) reads its page first; a site root, a feed
+  with a `sitemap_url`, or an address that looks like a sitemap reads the
+  sitemap first (an HTML `/sitemap/` page is still read as a page after
+  it). A `sitemap_url` is read as the sitemap whatever its address looks
+  like (`/?sitemap=index`). With a `link_pattern`, the page's links under
+  that path are the list; without one, the page's repeating list of
+  posts is. The sitemap is read for the pattern's path, else the
   address's section, never the whole site instead.
 - **Keeps only articles.** Of a site's sitemaps only news, post and
   unknown ones are read (a page sitemap only when there is no post
   sitemap; never tag, author, product or media sitemaps). URLs that are
   not article-shaped (tag, author, cart and archive pages, About,
   Contact) are dropped, and each new page is scored as an article
-  before it is kept (`backend/app/article_detect.py`). A feed with a
-  `link_pattern` or `sitemap_url` takes the owner's choice as the
-  article signal.
+  before it is kept (`backend/app/article_detect.py`). A date the
+  site's own list gives a page (a listing card's `<time>`, a news
+  sitemap's publication date) counts as the page's date. A feed with a
+  `link_pattern` takes the pattern as the article signal, and so does a
+  `sitemap_url` for the pages it lists.
 - **Fetches only new pages,** at most 10 a check, skipping stories
   already stored. At most `ingest.max_undated_per_poll` (2) of them may
-  be undated.
+  be undated, and an undated page that is old backlog is skipped: on a
+  listing page, one below a stored story; in a sitemap, one last
+  modified before the check's backlog line, or with no date at all once
+  the feed's first fetch is done. A page that times out or answers 5xx
+  is asked for again on the next checks (3 in all).
 
 A website's failures read as the kinds above: a site that refuses its
 sitemaps, its listing page or every article page asked for is
 `[blocked]` (a 429 is `[http error]`); the feed's own listing page or
-`sitemap_url` missing is `[not found]`; a host that doesn't answer is
-`[network]`; and `[no list]` only when nothing lists articles at all.
-A missing robots.txt or guessed sitemap path is routine, and a refused
-robots.txt counts only when every sitemap is refused too. A page that
-refuses everyone (members only) while the rest of the site loads is
-skipped, so it never fails the feed.
+`sitemap_url` missing is `[not found]`; a host that doesn't answer or
+doesn't resolve is `[network]`; and `[no list]` only when nothing lists
+articles at all. A missing robots.txt or guessed sitemap path is
+routine, a refused robots.txt counts only when every sitemap is refused
+too, and a sitemap index that loads counts neither way (an index whose
+post sitemaps are all refused is `[blocked]`). A page that refuses
+everyone (members only) while another page of the site loads is
+skipped, so it never fails the feed; a page that is gone or answers 5xx
+doesn't count as loading.
 
 ### Adding a YouTube channel
 

@@ -85,9 +85,11 @@ async def test_crawl_limit_applies_after_sorting(monkeypatch):
     _serve(monkeypatch, {f"{SITE}/sitemap.xml": SITEMAP})
     entries = await _crawl_sitemaps(f"{SITE}/sitemap.xml", limit=1, path_prefix="/news-events/cpabc-newsroom/")
     assert [e.url for e in entries] == [f"{NEWSROOM}2026/july/regulatory-pause-esg/"]
-    # Each candidate carries its date (here from the URL, there being
-    # no <lastmod>).
-    assert entries[0].published == dt.datetime(2026, 7, 1, tzinfo=dt.timezone.utc)
+    # The date in the URL orders the entries, but it is no publication
+    # date (only the month) and no <lastmod>: the candidate carries
+    # neither.
+    assert entries[0].published is None
+    assert entries[0].modified is None
 
 
 def test_section_prefix():

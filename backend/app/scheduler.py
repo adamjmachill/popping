@@ -464,6 +464,28 @@ async def _is_first_fetch(
     return not has_rows
 
 
+async def _backlog_cutoff(
+    session: AsyncSession,
+    source: Source,
+    now: dt.datetime,
+    rules: ingest_rules.IngestTunables,
+) -> dt.datetime | None:
+    """For a website feed's fetch (``takes_ingest_hints``): the date
+    before which a page is old backlog on this poll, the line
+    ``ingest_rules`` draws for dated items on a later poll (the
+    baseline's backfill window, or ``max_age_days``, whichever is
+    later). None on a first fetch, which keeps the newest items
+    whatever their age. ``GenericScrapePlugin._cap_undated`` holds an
+    undated page's sitemap ``<lastmod>`` against it."""
+    if await _is_first_fetch(session, source, now, rules):
+        return None
+    cutoff = now - dt.timedelta(days=rules.max_age_days)
+    baseline = _as_utc(source.created_at)
+    if baseline is not None:
+        cutoff = max(cutoff, baseline - dt.timedelta(hours=rules.backfill_hours))
+    return cutoff
+
+
 def _as_utc(value: dt.datetime | None) -> dt.datetime | None:
     # Timestamps are timezone-aware UTC in practice, but tolerate a
     # naive value coming from a pre-upgrade DB row.
@@ -694,6 +716,9 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             except Exception:
                 logger.debug("favicon fetch failed for %s", plugin_cls.name, exc_info=True)
 
+        rules = await _ingest_tunables()
+        takes_hints = getattr(plugin, "takes_ingest_hints", False)
+        backlog_before: dt.datetime | None = None
         async with SessionLocal() as session:
             source = await session.get(Source, source_id) if source_id else None
             if source is None:
@@ -712,6 +737,10 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 logger.debug("ingest: %s paused — skipping", source.name)
                 summary["status"] = "paused"
                 return summary
+            if takes_hints:
+                backlog_before = await _backlog_cutoff(
+                    session, source, dt.datetime.now(dt.timezone.utc), rules
+                )
 
         # Raised before the fetch (``reddit_off`` is read above), so the
         # failure path records it as the ``[reddit off]`` setup state
@@ -721,18 +750,19 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 "Reddit isn't set up on this server (no proxy, and direct mode is off)"
             )
 
-        rules = await _ingest_tunables()
         # Network fetch with no DB session open: some plugins (podcasts,
         # generic scrape) take minutes, and an idle transaction for that
         # long starves the connection pool.
-        if getattr(plugin, "takes_ingest_hints", False):
+        if takes_hints:
             # A website feed fetches one page per candidate, so it asks
             # which candidates are already stored before fetching them
             # (one short session per poll), and caps undated pages
-            # itself (``GenericScrapePlugin``).
+            # itself, holding them against this poll's backlog line
+            # (``GenericScrapePlugin``).
             raw_items = await plugin.fetch(
                 known_urls=_known_urls_lookup,
                 max_undated=rules.max_undated_per_poll,
+                backlog_before=backlog_before,
             )
         else:
             raw_items = await plugin.fetch()

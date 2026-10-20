@@ -104,11 +104,40 @@ async def test_an_explicit_sitemap_url_is_read_first(monkeypatch):
     assert reads.args("sitemap")[0] == f"{SITE}/news-sitemap.xml"
 
 
-async def test_a_sitemap_url_as_the_feed_url_reads_only_the_sitemap(monkeypatch):
-    reads = _Reads(monkeypatch, sitemap=[], page=[f"{SITE}/b"])
+async def test_a_sitemap_address_reads_the_sitemap_first(monkeypatch):
+    reads = _Reads(monkeypatch, sitemap=[f"{SITE}/a"], page=[f"{SITE}/b"])
     plan = await plan_candidates(f"{SITE}/sitemap.xml")
-    assert plan == Plan("", [], [])
+    assert plan.mode == "sitemap"
     assert reads.order == ["sitemap"]
+
+
+async def test_a_sitemap_address_with_nothing_in_it_is_read_as_a_page(monkeypatch):
+    """``looks_like_sitemap`` reads the path only, so an HTML sitemap
+    page (``/sitemap/``) looks like one too. It is still the feed's
+    listing page: read second, it finds the links."""
+    reads = _Reads(monkeypatch, sitemap=[], page=[f"{SITE}/news/b"])
+    plan = await plan_candidates(f"{SITE}/sitemap/", link_pattern="/news/")
+    assert plan.mode == "page"
+    assert reads.order == ["sitemap", "page"]
+    assert reads.args("page")[:2] == (f"{SITE}/sitemap/", "/news/")
+
+
+async def test_an_explicit_sitemap_url_is_read_as_the_sitemap_whatever_it_looks_like(monkeypatch):
+    reads = _Reads(monkeypatch, sitemap=[f"{SITE}/a"], page=[])
+    await plan_candidates(f"{SITE}/", sitemap_url=f"{SITE}/?sitemap=index")
+    assert reads.kwargs("sitemap")["input_is_sitemap"] is True
+    reads = _Reads(monkeypatch, sitemap=[f"{SITE}/a"], page=[])
+    await plan_candidates(f"{SITE}/")
+    assert reads.kwargs("sitemap")["input_is_sitemap"] is False
+
+
+async def test_the_owners_link_pattern_is_trusted_in_the_sitemap_read(monkeypatch):
+    reads = _Reads(monkeypatch, sitemap=[f"{SITE}/library/a"], page=[])
+    await plan_candidates(f"{SITE}/", link_pattern="/library/")
+    assert reads.kwargs("sitemap")["owner_pattern"] is True
+    reads = _Reads(monkeypatch, sitemap=[f"{SITE}/news/a"], page=[])
+    await plan_candidates(f"{SITE}/news/")
+    assert reads.kwargs("sitemap")["owner_pattern"] is False
 
 
 async def test_the_link_pattern_scopes_the_sitemap_instead_of_the_section(monkeypatch):
@@ -232,7 +261,7 @@ async def test_owner_configured_follows_the_link_pattern_or_sitemap_url(monkeypa
     _Reads(monkeypatch, sitemap=[f"{SITE}/library/a"], page=[f"{SITE}/library/a"])
     seen: list[bool] = []
 
-    async def fake_extract(url, custom_headers=None, *, owner_configured=False):
+    async def fake_extract(url, custom_headers=None, *, owner_configured=False, **kwargs):
         seen.append(owner_configured)
         return None
 
@@ -250,3 +279,11 @@ async def test_owner_configured_follows_the_link_pattern_or_sitemap_url(monkeypa
     await plugin(link_pattern="/library/").fetch()
     await plugin(sitemap_url=f"{SITE}/sitemap.xml").fetch()
     assert seen == [False, True, True]
+
+    # A sitemap_url that lists nothing leaves the home page's links,
+    # which the owner never chose: they are scored as any page is.
+    seen.clear()
+    _Reads(monkeypatch, sitemap=[], page=[f"{SITE}/library/a"])
+    await plugin(sitemap_url=f"{SITE}/sitemap.xml").fetch()
+    await plugin(sitemap_url=f"{SITE}/sitemap.xml", link_pattern="/library/").fetch()
+    assert seen == [False, True]

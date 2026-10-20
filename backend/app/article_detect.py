@@ -38,12 +38,24 @@ ACCEPT_SCORE = 2
 
 
 class Candidate(NamedTuple):
-    """One article link found on a listing page. Unpacks as
-    ``(url, published, title)``, the same shape as a sitemap entry."""
+    """One article link from a site's own list: a listing page's card or
+    a sitemap entry.
+
+    - ``published``: when the list says the page was published, a
+      listing card's ``<time datetime>`` or a news sitemap's
+      ``<news:publication_date>``. A date the site gives for that page,
+      so ``score_page`` counts it (``listed_date``).
+    - ``title``: the card's link text or a news sitemap's title.
+    - ``modified``: a sitemap's ``<lastmod>``. When the page last
+      changed, not when it was published (static pages get edited), so
+      it orders a sitemap but never dates a page. A page was published
+      no later than it.
+    """
 
     url: str
     published: dt.datetime | None
     title: str | None
+    modified: dt.datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +182,48 @@ _NUMBER_RE = re.compile(r"\d+")
 # path above the page.
 _PROBE_HOST = "example.com"
 
+# Files, by the page's own ending: ``/uploads/trail.jpg``, ``/feed.xml``,
+# ``/report.pdf``. Only the ending counts. courlan's own file-type test
+# matches ``.js`` or ``-png`` anywhere in a URL, so it read
+# ``/blog/how-to-compress-png-files`` and ``/blog/node.js-22-released``
+# as files.
+_FILE_EXTENSIONS = frozenset({
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "bmp", "ico", "tif", "tiff", "heic",
+    "pdf", "zip", "gz", "tgz", "tar", "rar", "7z", "iso", "dmg", "exe", "apk", "msi",
+    "mp3", "m4a", "aac", "ogg", "oga", "wav", "flac", "opus",
+    "mp4", "m4v", "mov", "avi", "webm", "mkv", "flv", "swf",
+    "css", "js", "mjs", "json", "xml", "rss", "atom", "rdf", "csv", "ics", "vcf",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub",
+    "woff", "woff2", "ttf", "otf", "eot",
+})
+# Endings of web pages that courlan knows; any other ending that isn't a
+# file (``.ece``, ``.cms`` news CMSs) is left out of what courlan sees.
+_PAGE_EXTENSIONS = frozenset({
+    "html", "htm", "xhtml", "shtml", "php", "asp", "aspx", "jsp", "cfm",
+})
+_EXTENSION_RE = re.compile(r"^(.+)\.([a-z][a-z0-9]{0,4})$")
+# A page name of one word, which courlan judges as a whole (``contact``,
+# ``login``, ``impressum``, ``index``, ``home``, ``feed``). A slug of
+# several words is judged by our rules and ``score_page``, not by the
+# words in it.
+_ONE_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _split_extension(page: str) -> tuple[str, str]:
+    """``("article68765432", "ece")`` for ``article68765432.ece``;
+    ``(page, "")`` when the page name has no ending."""
+    match = _EXTENSION_RE.match(page)
+    return (match.group(1), match.group(2)) if match else (page, "")
+
+
+def _courlan_page(page: str) -> str:
+    """The page's own name as courlan sees it (see ``url_ok``): a
+    one-word name as it is, with its ending when it is a web page's, and
+    any longer slug as a neutral word."""
+    stem, extension = _split_extension(page)
+    name = stem if _ONE_WORD_RE.fullmatch(stem) else "post"
+    return f"{name}.{extension}" if extension in _PAGE_EXTENSIONS else name
+
 
 def _segments(path: str) -> list[str]:
     return [unquote(s).lower() for s in path.split("/") if s]
@@ -214,11 +268,11 @@ def _listing_path(segments: list[str]) -> bool:
     return False
 
 
-def url_ok(url: str, site: str) -> bool:
+def url_ok(url: str, site: str, *, owner_pattern: bool = False) -> bool:
     """Cheap test of whether ``url`` could be an article on ``site``
     (the source's URL or host). Same-site http(s) URLs only.
 
-    Two checks, each on what it reads well:
+    Three checks, each on what it reads well:
 
     - **The path above the page is ours**, by whole segment and by
       position (``_NON_ARTICLE_SEGMENTS`` anywhere; record, archive and
@@ -230,15 +284,26 @@ def url_ok(url: str, site: str) -> bool:
       ``/pets/fat-cat/how-to-feed`` as a category page,
       ``/news/power-user/tips`` as a user page, and any ``/search/``
       as a search page.
-    - **courlan judges the rest**: ``check_url(strict=True)`` on the
-      page's own name, the query and the host — file types, feeds,
-      contact, login and index pages, malformed hosts. It is a yes/no
-      test only. The URL it would normalize to is never used, because
-      strict normalizing drops query parameters it doesn't know.
+    - **Files are ours too**, by the page's own ending only
+      (``_FILE_EXTENSIONS``): ``/blog/png-vs-jpg`` and
+      ``/blog/node.js-22-released`` are articles, ``trail.jpg`` is not.
+    - **courlan judges the rest**: ``check_url(strict=True)`` on a
+      one-word page name (contact, login, imprint and index pages,
+      ``/feed``), the query (a file type hidden in it) and the host
+      (malformed hosts). A slug of several words reaches it as a
+      neutral word, and an ending that is neither a file nor a web page
+      it knows (``.ece``, ``.cms``) is left off. It is a yes/no test
+      only. The URL it would normalize to is never used, because strict
+      normalizing drops query parameters it doesn't know.
 
     When the URL's host is the source's own host, courlan's host check
     is skipped: the owner chose that host, and courlan rejects an IP or
     ``localhost`` with a port, which every loopback test server uses.
+
+    ``owner_pattern``: the URL is under the owner's ``link_pattern``,
+    which is the article signal (as ``score_page``'s
+    ``owner_configured``), so courlan isn't asked; our path and file
+    rules still apply.
     """
     try:
         parts = urlsplit(url.strip())
@@ -261,17 +326,24 @@ def url_ok(url: str, site: str) -> bool:
         return False
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
+    page = segments[-1] if segments else ""
+    if _split_extension(page)[1] in _FILE_EXTENSIONS:
+        return False
+    # Blogspot's date archives (/2026_10_01_archive.html).
+    if page.endswith("_archive.html"):
+        return False
+    if owner_pattern:
+        return True
 
     own_host = parts.hostname.lower().rstrip(".") == _host(site)
     netloc = _PROBE_HOST if own_host else parts.netloc
-    # Keep the page's own segment (and its trailing slash); every
-    # segment above it was judged above. A root post (/?p=123) keeps
-    # the bare root.
+    # Keep the page's own name as courlan should see it (and its
+    # trailing slash); every segment above it was judged above. A root
+    # post (/?p=123) keeps the bare root.
     path = ""
     if segments:
-        page = parts.path.rstrip("/").rsplit("/", 1)[-1]
         trailing = "/" if parts.path.endswith("/") else ""
-        path = "x/" * (len(segments) - 1) + page + trailing
+        path = "x/" * (len(segments) - 1) + _courlan_page(page) + trailing
     probe = f"{parts.scheme}://{netloc}/{path}"
     if parts.query:
         probe += "?" + parts.query
@@ -589,6 +661,36 @@ def _marked_dates(doc) -> list[tuple[object, dt.datetime]]:
     return out
 
 
+# Inside an article, the parts whose ``<time>`` is not the article's
+# own: its footer ("Updated ..."), and related-post lists and menus.
+_NOT_OWN_TIME_TAGS = frozenset({"footer", "aside", "nav"})
+_UPDATED_CLASS_RE = re.compile(r"updat|modif", re.IGNORECASE)
+
+
+def _article_time(article) -> dt.datetime | None:
+    """The first plain ``<time datetime>`` of an article: one with no
+    published marker (a theme that prints the date in a ``<div>`` under
+    the title, as Astro, Next.js and Webflow templates do), outside the
+    article's footer, asides and menus, and not marked as an update."""
+    for el in article.iter("time"):
+        stamp = el.get("datetime")
+        if not stamp or _UPDATED_CLASS_RE.search(el.get("class") or ""):
+            continue
+        outside = False
+        for ancestor in el.iterancestors():
+            if ancestor is article:
+                break
+            if ancestor.tag in _NOT_OWN_TIME_TAGS:
+                outside = True
+                break
+        if outside:
+            continue
+        parsed = parse_date(stamp)
+        if parsed:
+            return parsed
+    return None
+
+
 def _body_date(doc) -> dt.datetime | None:
     """The page's published date from its body, only when the page is
     one article. A listing's post cards each carry a marked date, and
@@ -598,12 +700,13 @@ def _body_date(doc) -> dt.datetime | None:
       ``<header>``), a marked date inside that element is the page's.
       Not when several articles hold an ``<h1>``: that is a listing
       whose cards use one.
+    - With no marked date there, a plain ``<time datetime>`` inside the
+      first ``<h1>``'s own ``<article>`` is the page's
+      (``_article_time``): that article is the page's one story.
     - Otherwise a marked date counts only when the page has at most one
       ``<article>`` and all its marked dates agree.
     """
     marked = _marked_dates(doc)
-    if not marked:
-        return None
     h1 = doc.find(".//h1")
     if h1 is not None:
         ancestors = list(h1.iterancestors())
@@ -618,6 +721,12 @@ def _body_date(doc) -> dt.datetime | None:
             for el, parsed in marked:
                 if scope in el.iterancestors():
                     return parsed
+            if scope.tag == "article":
+                parsed = _article_time(scope)
+                if parsed:
+                    return parsed
+    if not marked:
+        return None
     if len(doc.findall(".//article")) > 1:
         return None
     if len({parsed for _, parsed in marked}) > 1:
@@ -742,6 +851,7 @@ def score_page(
     final_url: str | None = None,
     text: str | None = None,
     owner_configured: bool = False,
+    listed_date: dt.datetime | None = None,
 ) -> tuple[int, list[str]]:
     """Score a fetched page as an article: ``(score, reasons)``, where
     the page is accepted at ``ACCEPT_SCORE`` (2) or more and each reason
@@ -752,6 +862,12 @@ def score_page(
     main text; when None it is extracted here, the same way the plugin
     does. Run it off the event loop, like any trafilatura call.
 
+    ``listed_date``: when the site's own list says the page was
+    published (``Candidate.published``: a listing card's
+    ``<time datetime>`` or a news sitemap's publication date). It dates
+    the page like a date on the page itself. Never a sitemap's
+    ``<lastmod>``, which every static page has too.
+
     Kind and date:
     - +3 for ``og:type=article`` or a JSON-LD Article, BlogPosting or
       NewsArticle. ``og:type=article`` earns nothing when JSON-LD calls
@@ -760,7 +876,7 @@ def score_page(
     - -3 for ``og:type=website`` or a JSON-LD WebSite, AboutPage or
       ContactPage, but only when the page has no JSON-LD article and
       no date. Many CMSs tag every page ``og:type=website``.
-    - +1 for a published date, -1 for none.
+    - +1 for a published date (the page's, or the list's), -1 for none.
 
     Length: +1 for 600+ characters, -2 under 300.
 
@@ -799,7 +915,7 @@ def score_page(
             add(3, "json-ld " + "/".join(sorted(article_ld)))
         elif facts.og_type == "article" and not facts.jsonld_types & _PAGE_TYPES:
             add(3, "og:type article")
-        dated = facts.published is not None or facts.url_dated
+        dated = facts.published is not None or listed_date is not None or facts.url_dated
         site_ld = facts.jsonld_types & _SITE_TYPES
         if not article_ld and not dated:
             if facts.og_type == "website":
@@ -808,6 +924,8 @@ def score_page(
                 add(-3, "json-ld " + "/".join(sorted(site_ld)) + ", undated")
         if facts.published is not None:
             add(1, "dated " + facts.published.date().isoformat())
+        elif listed_date is not None:
+            add(1, "listed " + listed_date.date().isoformat())
         elif facts.url_dated:
             add(1, "date in URL")
         else:

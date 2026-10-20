@@ -32,13 +32,14 @@ import httpx
 from defusedxml import DefusedXmlException
 from defusedxml import ElementTree as DefusedET
 
-from app.article_detect import Candidate, order_sitemaps, same_site, url_ok
+from app.article_detect import Candidate, order_sitemaps, parse_date, same_site, url_ok
 from app.article_extract import (
     NETWORK_ERRORS,
     FetchRefusedError,
     fetch_html,
     fetch_html_checked,
     most_telling_error,
+    unresolved_host_error,
 )
 from app.sources.rss import fetch_rss
 from app.url_safety import check_url_safe
@@ -216,14 +217,25 @@ async def discover_sitemap_entries(
     *,
     headers: dict | None = None,
     raise_errors: bool = False,
+    input_is_sitemap: bool = False,
+    owner_pattern: bool = False,
 ) -> list[Candidate]:
     """Return up to ``limit`` article candidates from ``page_url``'s
-    sitemap, newest first, as ``Candidate(url, published, title)``.
+    sitemap, newest first, as ``Candidate(url, published, title,
+    modified)``.
 
-    ``published`` is the entry's best date: a news sitemap's
-    publication date, else its ``<lastmod>``, else a ``/YYYY/MM/`` style
-    date in the URL itself; undated URLs follow in sitemap order.
-    ``title`` is a news sitemap's title, else None.
+    They are ordered by their best date: a news sitemap's publication
+    date, else ``<lastmod>``, else a ``/YYYY/MM/`` style date in the URL
+    itself; undated URLs follow in sitemap order. ``published`` is the
+    publication date alone, ``modified`` the ``<lastmod>`` alone, and
+    ``title`` a news sitemap's title, each None when absent.
+
+    ``input_is_sitemap``: ``page_url`` is the owner's ``sitemap_url``,
+    read as the sitemap whatever its address looks like (a WordPress
+    ``/?sitemap=index``). Otherwise only an address that looks like a
+    sitemap is read directly; any other is a site whose robots.txt and
+    usual sitemap paths are tried. ``owner_pattern``: ``path_prefix`` is
+    the owner's ``link_pattern`` (``url_ok``'s ``owner_pattern``).
 
     Only entries that could be articles are kept
     (``article_detect.url_ok``), and only the sitemaps worth reading
@@ -250,11 +262,23 @@ async def discover_sitemap_entries(
     safe, reason = check_url_safe(page_url)
     if not safe:
         logger.info("feed_autodiscovery: %s rejected by URL safety check (%s)", page_url, reason)
+        if raise_errors:
+            # A host that doesn't resolve is a host that doesn't answer
+            # (``[network]``), not a site with no list.
+            unresolved = unresolved_host_error(page_url)
+            if unresolved is not None:
+                raise unresolved
         return []
     try:
         entries = await asyncio.wait_for(
             _crawl_sitemaps(
-                page_url, limit, path_prefix, headers=headers, raise_errors=raise_errors
+                page_url,
+                limit,
+                path_prefix,
+                headers=headers,
+                raise_errors=raise_errors,
+                input_is_sitemap=input_is_sitemap,
+                owner_pattern=owner_pattern,
             ),
             _TRAFILATURA_BUDGET,
         )
@@ -309,22 +333,30 @@ def _local(tag: str) -> str:
     return tag.rsplit("}", 1)[-1]
 
 
+# One sitemap page entry: ``(url, published, lastmod, title)``.
+_Entry = tuple[str, str | None, str | None, str | None]
+
+
 def _parse_sitemap_entries(
     text: str,
-) -> tuple[list[tuple[str, str | None, str | None]], list[tuple[str, str | None]]]:
+) -> tuple[list[_Entry], list[tuple[str, str | None]]]:
     """Read a sitemap document: an XML urlset, an XML sitemapindex, or
-    a plain-text list. Returns ``([(page, date, title)], [(nested
-    sitemap, lastmod)])``.
+    a plain-text list. Returns ``([(page, published, lastmod, title)],
+    [(nested sitemap, lastmod)])``.
 
-    A page's ``date`` is a news sitemap's ``<news:publication_date>``,
-    else its ``<lastmod>``; ``title`` is ``<news:title>``. Either is
-    None when absent."""
+    A page's ``published`` is a news sitemap's
+    ``<news:publication_date>``, ``lastmod`` its ``<lastmod>`` and
+    ``title`` its ``<news:title>``, each None when absent. The two dates
+    stay apart: a publication date dates the page, a ``<lastmod>`` only
+    says when it last changed."""
     try:
         root = DefusedET.fromstring(text.lstrip())
     except (DefusedET.ParseError, ValueError, DefusedXmlException):
         lines = [ln.strip() for ln in text.splitlines()]
-        return [(ln, None, None) for ln in lines if ln.startswith(("http://", "https://"))], []
-    pages: list[tuple[str, str | None, str | None]] = []
+        return [
+            (ln, None, None, None) for ln in lines if ln.startswith(("http://", "https://"))
+        ], []
+    pages: list[_Entry] = []
     nested: list[tuple[str, str | None]] = []
     is_index = _local(root.tag) == "sitemapindex"
     for entry in root:
@@ -347,26 +379,26 @@ def _parse_sitemap_entries(
         if is_index:
             nested.append((loc, lastmod))
         else:
-            pages.append((loc, published or lastmod, title))
+            pages.append((loc, published, lastmod, title))
     return pages, nested
 
 
 def _read_sitemap(
-    text: str, site: str, path_prefix: str | None, room: int,
-) -> tuple[list[tuple[str, str | None, str | None]], list[tuple[str, str | None]]]:
+    text: str, site: str, path_prefix: str | None, room: int, owner_pattern: bool = False,
+) -> tuple[list[_Entry], list[tuple[str, str | None]]]:
     """Parse one sitemap document and keep the pages that could be
     articles on ``site``: under ``path_prefix`` when there is one, and
-    passing ``url_ok``. At most ``room`` pages. Pure and CPU-bound
-    (an XML parse, then a URL test per entry), so ``_crawl_sitemaps``
-    runs it in a thread."""
+    passing ``url_ok`` (as the owner's pattern when ``owner_pattern``).
+    At most ``room`` pages. Pure and CPU-bound (an XML parse, then a URL
+    test per entry), so ``_crawl_sitemaps`` runs it in a thread."""
     found, nested = _parse_sitemap_entries(text)
-    pages: list[tuple[str, str | None, str | None]] = []
+    pages: list[_Entry] = []
     for entry in found:
         if len(pages) >= room:
             break
         if path_prefix and not _under_prefix(entry[0], path_prefix):
             continue
-        if url_ok(entry[0], site):
+        if url_ok(entry[0], site, owner_pattern=owner_pattern):
             pages.append(entry)
     return pages, nested
 
@@ -433,12 +465,15 @@ async def _crawl_sitemaps(
     *,
     headers: dict | None = None,
     raise_errors: bool = False,
+    input_is_sitemap: bool = False,
+    owner_pattern: bool = False,
 ) -> list[Candidate]:
     """Find article candidates for ``page_url`` from its sitemap(s),
     using only SSRF-guarded fetches. ``page_url`` may be a sitemap
-    itself or a site URL; for a site URL, robots.txt ``Sitemap:`` lines
-    are tried first, then a few common paths. Returns the newest
-    ``limit`` (see ``discover_sitemap_entries``).
+    itself (``input_is_sitemap``, or an address that looks like one) or
+    a site URL; for a site URL, robots.txt ``Sitemap:`` lines are tried
+    first, then a few common paths. Returns the newest ``limit`` (see
+    ``discover_sitemap_entries``).
 
     A document that fails is skipped and the crawl moves on: robots.txt
     and the guessed paths 404 on many sites, and a nested sitemap can be
@@ -448,9 +483,11 @@ async def _crawl_sitemaps(
     - the input's own failure, when ``page_url`` is a sitemap: it is
       the user's address (their ``sitemap_url``), so a 404 there is
       ``[not found]``;
-    - a refusal, when every sitemap document fetched was refused. A
-      refused robots.txt alone doesn't count, because the guessed paths
-      are still tried;
+    - a refusal, when every sitemap that could list pages was refused.
+      A sitemap index that loaded doesn't count either way: it only
+      names the sitemaps to read, so an index whose post sitemaps are
+      all refused is refused. A refused robots.txt alone doesn't count,
+      because the guessed paths are still tried;
     - a network error, when a document couldn't be fetched at all.
 
     Otherwise it returns ``[]``: the site has no sitemap with articles.
@@ -462,7 +499,7 @@ async def _crawl_sitemaps(
     own_failure: BaseException | None = None
     refused: list[FetchRefusedError] = []
     network: list[BaseException] = []
-    if looks_like_sitemap(page_url):
+    if input_is_sitemap or looks_like_sitemap(page_url):
         input_doc = page_url
         queue = [page_url]
     else:
@@ -485,9 +522,12 @@ async def _crawl_sitemaps(
         queue = order_sitemaps(listed) if listed else [origin + path for path in _GUESSED_SITEMAP_PATHS]
 
     seen: set[str] = set()
-    pages: list[tuple[str, str | None, str | None]] = []
+    pages: list[_Entry] = []
     page_set: set[str] = set()
     fetched = 0
+    # Sitemap indexes that loaded: they list sitemaps, not pages, so the
+    # refusal rule above leaves them out of ``fetched``.
+    indexes = 0
     while queue and fetched < _MAX_SITEMAP_DOCS and len(pages) < _MAX_SITEMAP_COLLECT:
         url = queue.pop(0)
         if url in seen or not same_site(url, host):
@@ -520,8 +560,15 @@ async def _crawl_sitemaps(
         if not text:
             continue
         found, nested = await asyncio.to_thread(
-            _read_sitemap, text, page_url, path_prefix, _MAX_SITEMAP_COLLECT - len(pages)
+            _read_sitemap,
+            text,
+            page_url,
+            path_prefix,
+            _MAX_SITEMAP_COLLECT - len(pages),
+            owner_pattern,
         )
+        if nested:
+            indexes += 1
         for entry in found:
             if entry[0] not in page_set:
                 page_set.add(entry[0])
@@ -535,10 +582,14 @@ async def _crawl_sitemaps(
     if not pages and raise_errors:
         if own_failure is not None:
             raise own_failure
-        if refused and len(refused) == fetched:
+        if refused and len(refused) == fetched - indexes:
             raise most_telling_error(refused)
         if network:
             raise network[0]
-    by_url = {url: (date, title) for url, date, title in pages}
-    ordered = _newest_first([(url, date) for url, date, _ in pages])[:limit]
-    return [Candidate(url, _entry_date(url, by_url[url][0]), by_url[url][1]) for url in ordered]
+    by_url = {url: (published, lastmod, title) for url, published, lastmod, title in pages}
+    ordered = _newest_first([(url, published or lastmod) for url, published, lastmod, _ in pages])
+    out = []
+    for url in ordered[:limit]:
+        published, lastmod, title = by_url[url]
+        out.append(Candidate(url, parse_date(published), title, parse_date(lastmod)))
+    return out
