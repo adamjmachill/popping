@@ -9,6 +9,8 @@ bookkeeping around them."""
 
 from __future__ import annotations
 
+import pytest
+
 from app import runtime_settings, scheduler
 from ingest_harness import (
     accounted,
@@ -69,6 +71,42 @@ async def test_feed_resumed_after_21_days_gets_at_most_10_plus_2_days(db_session
     assert summary["inserted"] == max(10, recent) == 10
     assert summary["skipped"] == 63 - 10
     assert accounted(summary)
+
+
+async def _resume_after_28_days(db_session, plugin, *, dated: bool, new_posts: int):
+    """A weekly blog that lists 20 posts. Its first fetch stores the
+    newest 10; then it goes 28 days without a successful poll (a pause,
+    an auto-disable, a server outage). Returns the resumed poll's
+    summary, for a listing of ``new_posts`` new posts plus the 16
+    newest old ones."""
+
+    def weekly(n: int, weeks_ago: int, shift_h: float = 0) -> dict:
+        return item(n, hours_ago=None if not dated else 1 + shift_h + weeks_ago * 7 * 24)
+
+    plugin.items = [weekly(n, n) for n in range(20)]
+    first = await scheduler._ingest(plugin)
+    assert first["inserted"] == 10
+    await age_feed(db_session, plugin.name, hours=28 * 24)
+
+    old = [weekly(n, n, shift_h=28 * 24) for n in range(16)]
+    new = [weekly(100 + n, n) for n in range(new_posts)]
+    plugin.items = new + old
+    return await scheduler._ingest(plugin)
+
+
+@pytest.mark.parametrize("new_posts", [0, 4])
+@pytest.mark.parametrize("dated", [True, False], ids=["dated", "undated"])
+async def test_resumed_feed_stores_only_its_new_posts_not_the_skipped_back_catalogue(
+    db_session, offline_ingest, dated, new_posts
+):
+    plugin = make_plugin(f"bf_resume_deep_{'d' if dated else 'u'}{new_posts}")
+    summary = await _resume_after_28_days(db_session, plugin, dated=dated, new_posts=new_posts)
+    assert summary["inserted"] == new_posts
+    assert summary["duplicates"] == 10
+    assert summary["skipped"] == 6  # p10-p15, below the stored posts
+    assert accounted(summary)
+    assert await entry_count(db_session, plugin.name) == 10 + new_posts
+    assert set(offline_ingest[10:]) == {f"https://feed.test/{100 + n}" for n in range(new_posts)}
 
 
 async def test_resume_gap_boundary(db_session, offline_ingest):

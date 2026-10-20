@@ -7,13 +7,18 @@ Backend track. Backend changes and pytest only; no frontend, flows or smoke stat
 - **`app/ingest_rules.py` (new, pure).** `select_items_for_ingest(items, *, known, first_fetch,
   baseline_at, now, keep_first=10, backfill_h=48, max_age_d=30, per_poll=50, max_undated=2) →
   (kept, counts)`. No I/O, no clock.
-  - First fetch: the newest `keep_first` (dated newest first, then undated in feed order), plus
-    every item dated within `backfill_h`.
+  - First fetch: the feed's newest `keep_first` (dated newest first, then undated in feed order),
+    plus every item dated within `backfill_h`. The newest are ranked over the whole listing,
+    already-stored items included: those use up rank slots but aren't stored again. So a resumed
+    feed, or one whose recent stories another feed already stored, doesn't fill the slots with
+    older back catalogue.
   - Later polls: drop items dated before `baseline_at − backfill_h` (`before_baseline`) or before
     `now − max_age_d` (`too_old`). An undated item is kept only above the first known URL in feed
     order, at most `max_undated` per poll, topmost first (`undated`).
-  - Then `per_poll` caps the new items, newest first (`per_poll`). The overflow stays unknown, so
-    the next poll stores it.
+  - Then `per_poll` caps the new items (`per_poll`): undated survivors take their slots first,
+    then dated ones newest first. The overflow is dated, stays unknown, and the next poll stores
+    it. An undated item cut here would be lost, because once the dated items above it are stored
+    it sits below a known URL.
   - Known URLs and repeats within the same listing are duplicates, not drops. `kept` is in feed
     order, so insert order is unchanged.
   - `parse_tunables` reads the six `ingest.*` knobs and falls back to the default when a value is
@@ -29,8 +34,13 @@ Backend track. Backend changes and pytest only; no frontend, flows or smoke stat
     row. It then loads the feed's row `FOR NO KEY UPDATE` (with `populate_existing`), so it holds
     a row lock until its commit. The entry inserts' foreign-key `KEY SHARE` locks don't conflict
     with it.
-  - **In-flight guard.** The first session snapshots `(url, sitemap_url, link_pattern)`. If the
-    locked row differs, the batch is discarded and the bookkeeping skipped.
+  - **In-flight guard.** The address being fetched is `(url, sitemap_url, link_pattern)`. A
+    row-driven plugin records it when it is built (`SourcePlugin.fetch_target`, set from the row
+    by `base.row_fetch_target` in all five dynamic plugins), because its job keeps that instance
+    until `update_source` replaces it after the edit's commit. A class-driven built-in has no
+    `fetch_target` (its address can't be edited), so the first session's row read is the
+    snapshot. If the locked row in the commit session differs, the batch is discarded and the
+    bookkeeping skipped.
   - The known-URL query runs first, then `_is_first_fetch`, then the rules. Only kept items reach
     the embedder.
     - `_is_first_fetch` is true when `last_fetch_at` is NULL, or when it is more than
@@ -77,9 +87,13 @@ class-driven plugin, `age_feed`, which moves a feed's `created_at`, rows' `fetch
 `last_fetch_at` back, and `install_offline_ingest`, which stubs the embedder, rescheduling and the
 favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_ingest` fixture.
 
-- `test_ingest_rules.py` (no_db, 21 tests): every rule and reason, ranking by date rather than
+- `test_ingest_rules.py` (no_db, 29 tests): every rule and reason, ranking by date rather than
   feed order, undated last, the undated cap and its knob, per-poll after the date rules and on a
-  first fetch, duplicates vs drops, naive and ISO dates, tunable parsing and fallback.
+  first fetch, duplicates vs drops, naive and ISO dates, tunable parsing and fallback. Added in
+  the review fixes: a resumed first fetch (dated and undated, with 0 or 4 new posts) that stores
+  only the new posts; a new feed whose newest stories another feed stored; the per-poll cap by
+  date on a listing in oldest-first order (later poll and first fetch); undated items getting
+  per-poll slots before 60 dated ones, with all 62 landing over two polls.
 - `test_ingest_backfill_cap.py` (db): the spec matrix through `_ingest`:
   - an empty success, then items 3 days later: 16 = max(10, the 16 inside 2 days) kept, 24
     skipped. The last success is set to 1 h ago, so only the EXISTS makes this a first fetch;
@@ -90,6 +104,8 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
   - 80 new dated items land 50 + 30 over two polls;
   - a first fetch over the cap (70 stories inside 2 days) lands 50 + 20;
   - an undated 60-item feed gives 10, then 0 for the same listing, then 2 of 5 new;
+  - a weekly blog resumed after 28 days, dated and undated, with 0 or 4 new posts, stores only
+    the new posts, not the 6 old ones below the 10 its first fetch stored;
   - the `ingest.first_fetch_keep` knob is honoured;
   - `IngestResult.skipped`;
   - every summary satisfies `fetched == inserted + duplicates + skipped`.
@@ -108,7 +124,12 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
     lands its baseline after the poll's rows;
   - an edit that holds the lock first makes the waiting poll discard;
   - an edit made from a stale read (the PATCH route's earlier `session.get`) still re-points and
-    resets.
+    resets;
+  - a new address whose first poll is empty still gets a first fetch on the next poll with
+    items (10 kept, 20 skipped), although the feed holds the old address's rows;
+  - a job still holding the `DynamicRssPlugin` built before an edit that has already committed
+    stores nothing and leaves the reset's `last_fetch_at` and `created_at`; a plugin built from
+    the edited row then gets the first fetch.
 - `test_brief_published_guard.py`:
   - a date-only story stamped midnight UTC stays;
   - an RSS story published before `since` and fetched after it stays;
@@ -161,7 +182,7 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
   | no per-poll cap / oldest first | `test_per_poll_cap_keeps_the_newest_and_leaves_the_rest_for_later` |
   | resume-gap floor removed | `test_tunables_parse_and_fall_back_when_out_of_range` |
   | no resume gap | `test_feed_resumed_after_21_days_gets_at_most_10_plus_2_days` |
-  | `last_fetch_at` alone decides (EXISTS dropped) | `test_empty_success_then_items_3_days_later_get_a_first_fetch` |
+  | the whole EXISTS check dropped (`last_fetch_at` alone decides) | `test_empty_success_then_items_3_days_later_get_a_first_fetch` |
   | baseline never moves | `test_first_fetch_that_stores_a_story_moves_the_baseline` |
   | baseline moves on an empty first fetch | `test_empty_first_poll_leaves_the_baseline` |
   | baseline from `clock_timestamp()` instead of the rows' `now()` | `test_first_fetch_that_stores_a_story_moves_the_baseline` |
@@ -212,10 +233,11 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
 - **`test_ingest_backfill_cap.py`** holds the end-to-end matrix and `test_ingest_rules.py` the
   pure cases. The spec listed the same bullets under both names.
 - **Which undated items win the cap:** the topmost (newest) ones, matching "newest first"
-  elsewhere. Undated items beyond the cap in one poll are lost, because the next poll sees them
-  below the newly stored ones. That is D12's cap as written. Keeping the ones nearest the known
-  boundary instead would let a burst drain over later polls, at the cost of showing the newest
-  ones late.
+  elsewhere. Undated items beyond the undated cap in one poll are lost, because the next poll sees
+  them below the newly stored ones. That is D12's cap as written. Keeping the ones nearest the
+  known boundary instead would let a burst drain over later polls, at the cost of showing the
+  newest ones late. The undated items within the cap are never deferred by the per-poll cap:
+  they take their slots before the dated ones.
 
 ## Risks and data-compatibility notes
 
@@ -229,9 +251,9 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
   applies the cap inside the plugin. This is the spec's known risk.
 - The On this day stories already stored move to the new tab with the row, and stay there until
   they leave the 2-day window.
-- If one poll brings 50 or more new dated stories and some undated ones, the undated rank after
-  the dated and are deferred. The next poll then sees them below the newly stored stories and
-  drops them.
+- A per-poll cap set below the undated cap (`ingest.max_per_poll` under
+  `ingest.max_undated_per_poll`, both non-default) would still cut undated survivors, and those
+  are lost the same way as undated items beyond the undated cap.
 
 ## Open items for later units
 
@@ -242,8 +264,8 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
   session.
 - **PR10b:** reuse `ingest_rules.IngestTunables.max_undated_per_poll` (`ingest.max_undated_per_poll`)
   inside `generic_scrape`, and leave pages past the cap unmarked in `_extracted_urls`.
-- **PR11a:** add `type` to `fetch_target` and to the reset in `update_source` when PATCH `type`
-  lands.
+- **PR11a:** when PATCH `type` lands, add `type` to `base.row_fetch_target`, to the class-plugin
+  snapshot in `_ingest`, and to the reset in `update_source`.
 - **Frontend (PR4d / PR7b):** the new category renders as "On This Day" through `categoryLabel`.
   The D15 vocabulary sweep may want "On this day".
 
@@ -252,7 +274,7 @@ favicon/thumbnail/og:image passes. `conftest.py` exposes it as the `offline_inge
 Added under Pending in `docs/DEVICE_CHECKS.md`:
 
 - [ ] #<pr> · Add a feed with a long back catalogue (a podcast or a blog with 50+ posts) and wait for its first check. Pass: its tab gains at most 10 stories plus any from the last 2 days.
-- [ ] #<pr> · After the next On this day check (it runs every 12 h), open the On This Day tab. Pass: it shows at most 5 stories for today, and none of them are in For You.
+- [ ] #<pr> · A day or more after the deploy, open the On This Day tab. Pass: the stories that arrived in the last 24 hours number at most 10 (at most 5 per UTC day, which turns at 5 pm Pacific), and none of them are in For You. Stories fetched before the deploy don't count.
 - [ ] #<pr> · The day after adding that feed, open Brief. Pass: no highlight is one of the new feed's older stories.
 
 ## Rebase
@@ -262,3 +284,65 @@ Added under Pending in `docs/DEVICE_CHECKS.md`:
   `IngestResult`.
 - After the rebase, full backend pytest on `popping_test` gave **13 failed, 881 passed**. The 13
   failures diff clean against the DNS-only baseline list. 881 = 799 + PR2a's 82.
+
+## Review fixes
+
+`/code-review xhigh` confirmed six findings. All six were fixed; none was skipped.
+
+1. **A resumed or overlapping first fetch pulled back old stories (major).** The first fetch
+   ranked "newest 10" over unknown items only. On a resume (a pause, an auto-disable, or an
+   outage of 72 h or more, which turns every feed's next poll into a first fetch at once), the
+   unknown set also holds the back catalogue the earlier first fetch skipped, so those stories
+   filled the slots the stored ones held and landed as new. Undated feeds did the same, and so
+   did a new feed whose newest stories another feed had stored. `select_items_for_ingest` now
+   ranks the whole deduped listing, known items included: they use up rank slots but aren't
+   stored. A brand-new feed is unchanged. Tests: the pure resume cases (dated and undated, 0 or 4
+   new posts) and the overlap case in `test_ingest_rules.py`, and the 28-day weekly-blog resume
+   through `_ingest` in `test_ingest_backfill_cap.py`.
+2. **The in-flight guard read the address from the database, not from the plugin that fetches
+   (minor).** A job keeps its plugin instance until `update_source` replaces it after the edit's
+   commit, and `trigger_now` builds from an earlier read. An edit that committed between the
+   plugin's build and the snapshot read made the snapshot match the new address while the old
+   one was fetched, and that batch then ran as the new address's first fetch. Each dynamic plugin
+   now records `fetch_target = base.row_fetch_target(row)`, the full `(url, sitemap_url,
+   link_pattern)` tuple of the row it was built from, whatever its type, so an RSS row with a
+   `sitemap_url` still matches itself. `_ingest` uses it, and keeps the row snapshot for
+   class-driven built-ins. Test: `test_job_still_holding_the_old_plugin_after_the_edit_inserts_nothing`.
+3. **The On this day device check would fail on deploy day (minor).** Deploy day's stories from
+   the old code (up to 50 `events` a day) move into the new tab with the row, and the startup tick
+   runs on the same UTC date. The check now counts only stories from the last 24 hours, a day or
+   more after the deploy: at most 10, because the 12 h polls can straddle a UTC midnight and each
+   UTC day brings up to 5.
+4. **The EXISTS's `fetched_at >= created_at` clause had no test (minor).** Without it, a feed
+   re-pointed to an address whose first poll is empty keeps the old address's rows, so the next
+   poll with items ran the later-poll rules. With the reset's new baseline, those rules drop
+   everything older than 2 days as backfill: the feed under-ingests (2 of the new address's 30
+   one-a-day stories instead of 10). It does not flood. Test:
+   `test_empty_first_poll_of_a_new_address_keeps_the_first_fetch`.
+5. **The per-poll cap's newest-first order wasn't pinned (minor).** Every per-poll test listed
+   items newest first, so a cap in feed order passed. New pure tests list 70 items oldest first
+   and assert the 50 newest are kept, for a later poll and a first fetch.
+6. **Undated stories cut by the per-poll cap were lost (minor).** They ranked after every dated
+   item, so a burst of 50 or more dated stories cut them, and the next poll dropped them as below
+   a known URL. Undated survivors (at most `max_undated`) now take their per-poll slots first,
+   and dated ones fill the rest, newest first. A cut dated story keeps its date and lands on a
+   later poll. Test: `test_undated_items_get_per_poll_slots_before_dated_ones` (60 dated plus 2
+   undated, all 62 landing over two polls).
+
+### Verification
+
+- Full backend pytest on `popping_test`: **13 failed, 895 passed**. The 13 diff clean against the
+  DNS-only baseline list. 895 = 881 + 14 new test cases.
+- The four ingest files (66 tests) ran 5 times in a row, all passing each time.
+- `ruff check --select F` on every changed file: clean.
+- **Mutation checks** (same script method as above; the working-tree diff was identical before
+  and after):
+
+  | Broken line | Failing test |
+  |---|---|
+  | first fetch ranks new items only | the 4 pure resume cases, the overlap case, the 4 `test_resumed_feed_stores_only_its_new_posts_…` cases |
+  | guard compares the row snapshot, not the plugin's `fetch_target` | `test_job_still_holding_the_old_plugin_after_the_edit_inserts_nothing` |
+  | EXISTS without the `fetched_at >= created_at` predicate | `test_empty_first_poll_of_a_new_address_keeps_the_first_fetch` |
+  | the whole EXISTS check dropped | `test_empty_success_then_items_3_days_later_get_a_first_fetch`, `test_empty_first_poll_of_a_new_address_keeps_the_first_fetch` |
+  | per-poll cap in feed order | `test_per_poll_cap_ranks_by_date_not_feed_order`, `test_per_poll_cap_ranks_by_date_on_a_first_fetch_too` |
+  | undated ranked after dated in the cap | `test_undated_items_get_per_poll_slots_before_dated_ones` |

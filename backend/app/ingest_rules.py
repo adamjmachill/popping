@@ -10,9 +10,13 @@ back catalogue (often 100+ stories), and so did a feed that came back
 after days of failures or a pause, and a feed whose address changed.
 Each of those flooded its tab. The rules:
 
-  - **First fetch** keeps the newest ``keep_first`` items (dated items
-    newest first, then undated ones in feed order), plus every item
-    dated within the last ``backfill_h`` hours.
+  - **First fetch** keeps the feed's newest ``keep_first`` items
+    (dated items newest first, then undated ones in feed order),
+    plus every item dated within the last ``backfill_h`` hours. The
+    newest are ranked over the whole listing, already-stored items
+    included: those take their slots without being stored again, so
+    a feed that resumes, or whose recent stories another feed already
+    stored, never fills the slots with older back catalogue.
   - **Later polls** drop items dated before ``baseline_at - backfill_h``
     (``baseline_at`` is when the feed's first fetch landed, so a
     backfill the first fetch left out doesn't trickle in later) or
@@ -20,8 +24,10 @@ Each of those flooded its tab. The rules:
     sits above the first already-stored URL in feed order (feeds and
     listings are newest-first, so anything below it is old backlog),
     and at most ``max_undated`` of those per poll, newest first.
-  - Then ``per_poll`` caps how many new items one poll stores, newest
-    first. The rest stay unknown, so a burst lands over the next polls
+  - Then ``per_poll`` caps how many new items one poll stores:
+    undated survivors first (a cut one would fall below the stored
+    part of the listing and be lost), then dated ones newest first.
+    The rest stay unknown, so a burst lands over the next polls
     instead of being lost.
 
 Known URLs (already stored, by any feed) and repeats within the same
@@ -113,11 +119,16 @@ def published_utc(value: Any) -> Optional[dt.datetime]:
     return value.astimezone(dt.timezone.utc)
 
 
-def _newest_first(cands: list[tuple[int, dict, Optional[dt.datetime]]]):
+# One distinct URL from the listing: its feed position, the item, its
+# date (None when undated) and whether it is new (not already stored).
+_Cand = tuple[int, dict, Optional[dt.datetime], bool]
+
+
+def _newest_first(cands: list[_Cand]) -> list[_Cand]:
     """Dated items newest first, then undated ones in feed order. The
     sort is stable, so equal dates keep their feed order."""
     dated = sorted((c for c in cands if c[2] is not None), key=lambda c: c[2], reverse=True)
-    undated = [c for c in cands if c[2] is None]
+    undated = sorted((c for c in cands if c[2] is None), key=lambda c: c[0])
     return dated + undated
 
 
@@ -148,27 +159,35 @@ def select_items_for_ingest(
         if n > 0:
             counts[reason] = counts.get(reason, 0) + n
 
-    # New items only, first occurrence of each URL, with their feed
-    # position. Known URLs and repeats are duplicates, not drops.
+    # The listing's distinct URLs, first occurrence of each, with their
+    # feed position. Known URLs and repeats are duplicates, not drops:
+    # they are never stored, but known ones still mark where the stored
+    # part of the listing starts and, on a first fetch, take rank slots.
     first_known = len(items)
     seen: set[str] = set()
-    cands: list[tuple[int, dict, Optional[dt.datetime]]] = []
+    listing: list[_Cand] = []
     for idx, item in enumerate(items):
         url = item.get("url")
-        if url in known:
-            first_known = min(first_known, idx)
-            continue
         if not url or url in seen:
             continue
         seen.add(url)
-        cands.append((idx, item, published_utc(item.get("published_at"))))
+        is_new = url not in known
+        if not is_new:
+            first_known = min(first_known, idx)
+        listing.append((idx, item, published_utc(item.get("published_at")), is_new))
 
     backfill = dt.timedelta(hours=backfill_h)
-    survivors: list[tuple[int, dict, Optional[dt.datetime]]] = []
+    survivors: list[_Cand] = []
     if first_fetch:
+        # The feed's own newest ``keep_first``, ranked over the whole
+        # listing, stored items included. Ranking only the new ones
+        # would, on a resume or an overlap with stories another feed
+        # already stored, fill the slots the stored ones hold with
+        # older back catalogue the earlier first fetch left out.
         recent_from = now - backfill
-        ranked = _newest_first(cands)
-        for rank, cand in enumerate(ranked):
+        for rank, cand in enumerate(_newest_first(listing)):
+            if not cand[3]:
+                continue
             when = cand[2]
             if rank < keep_first or (when is not None and when >= recent_from):
                 survivors.append(cand)
@@ -180,9 +199,11 @@ def select_items_for_ingest(
         # a caller that passes None from raising.
         baseline_from = (baseline_at - backfill) if baseline_at is not None else None
         oldest = now - dt.timedelta(days=max_age_d)
-        undated_above: list[tuple[int, dict, Optional[dt.datetime]]] = []
-        for cand in cands:
-            idx, _item, when = cand
+        undated_above: list[_Cand] = []
+        for cand in listing:
+            idx, _item, when, is_new = cand
+            if not is_new:
+                continue
             if when is None:
                 if idx < first_known:
                     undated_above.append(cand)
@@ -199,8 +220,15 @@ def select_items_for_ingest(
         survivors.extend(undated_above[:max_undated])
         drop(UNDATED, len(undated_above) - max_undated)
 
-    ranked = _newest_first(survivors)
-    drop(PER_POLL, len(ranked) - per_poll)
-    keep_idx = {cand[0] for cand in ranked[:per_poll]}
+    # The per-poll cap. Undated survivors take their slots first: once
+    # the dated items above them are stored, they sit below a known URL
+    # and the next poll's undated rule drops them, so a cut undated item
+    # would be lost. A cut dated item keeps its date and lands on a
+    # later poll. Dated items fill the rest, newest first.
+    undated_kept = sorted((c for c in survivors if c[2] is None), key=lambda c: c[0])[:per_poll]
+    dated_ranked = _newest_first([c for c in survivors if c[2] is not None])
+    dated_kept = dated_ranked[: per_poll - len(undated_kept)]
+    drop(PER_POLL, len(survivors) - len(undated_kept) - len(dated_kept))
+    keep_idx = {cand[0] for cand in undated_kept} | {cand[0] for cand in dated_kept}
     kept = [item for idx, item in enumerate(items) if idx in keep_idx]
     return kept, counts

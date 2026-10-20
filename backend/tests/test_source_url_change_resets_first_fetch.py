@@ -21,6 +21,7 @@ from sqlalchemy import func, select, text
 from app import scheduler
 from app.db import SessionLocal
 from app.models import Entry, Source
+from app.sources.dynamic_rss import DynamicRssPlugin
 from ingest_harness import (
     age_feed,
     entry_count,
@@ -270,3 +271,78 @@ async def test_edit_that_lands_first_makes_the_waiting_poll_discard(db_session, 
     assert summary["inserted"] == 0
     assert await entry_count(db_session, plugin.name) == 3
     assert (await source_row(db_session, plugin.name)).last_fetch_at is None
+
+
+async def test_empty_first_poll_of_a_new_address_keeps_the_first_fetch(db_session, offline_ingest):
+    """The new address's first poll comes back empty. That success sets
+    ``last_fetch_at``, and the feed still holds the old address's rows,
+    all fetched before the reset's baseline. Only the EXISTS's
+    ``fetched_at >= created_at`` keeps the next poll with items a first
+    fetch (newest 10 plus 2 days); without it the poll would run the
+    later-poll rules and drop all but the last 2 days as backfill."""
+    plugin = make_plugin("rp_empty_then_items")
+    before = await _polled_feed(db_session, plugin)
+    async with SessionLocal() as session:
+        await scheduler.update_source(session, before.id, url="https://moved.test/feed")
+
+    plugin.url = "https://moved.test/feed"
+    plugin.items = []
+    empty = await scheduler._ingest(plugin)
+    assert empty["error"] is None and empty["inserted"] == 0
+    assert (await source_row(db_session, plugin.name)).last_fetch_at is not None
+
+    plugin.items = [item(700 + n, hours_ago=1 + n * 24) for n in range(30)]
+    summary = await scheduler._ingest(plugin)
+    assert summary["inserted"] == 10
+    assert summary["skipped"] == 20
+
+
+async def test_job_still_holding_the_old_plugin_after_the_edit_inserts_nothing(
+    db_session, offline_ingest
+):
+    """The edit commits before the tick reads the row, but the job still
+    holds the plugin built before the edit (``update_source`` replaces
+    it only after its commit, and ``trigger_now`` builds from an earlier
+    read). The row then already has the new address while the plugin
+    fetches the old one, so the guard has to compare the plugin's own
+    address, not a fresh read of the row."""
+    async with SessionLocal() as session:
+        row = Source(name="rp_dyn_stale_plugin", type="rss", category="news", url="https://old.test/feed")
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+    source_id = row.id
+
+    def build(source: Source, items: list[dict]) -> DynamicRssPlugin:
+        plugin = DynamicRssPlugin(source)
+
+        async def fetch() -> list[dict]:
+            return list(items)
+
+        plugin.fetch = fetch
+        return plugin
+
+    old_plugin_items = [item(n, hours_ago=1 + n, host="old.test") for n in range(3)]
+    old_plugin = build(row, old_plugin_items)
+    assert (await scheduler._ingest(old_plugin))["inserted"] == 3
+    await age_feed(db_session, row.name, hours=10 * 24, last_fetch_hours=1)
+
+    async with SessionLocal() as session:
+        reset = await scheduler.update_source(session, source_id, url="https://moved.test/feed")
+    reset_last, reset_baseline = reset.last_fetch_at, reset.created_at
+    assert reset_last is None
+
+    # The stale job's tick: the old address's newest stories.
+    old_plugin_items[:] = [item(800 + n, hours_ago=1 + n * 24, host="old.test") for n in range(30)]
+    summary = await scheduler._ingest(old_plugin)
+    assert summary["inserted"] == 0
+    assert await entry_count(db_session, row.name) == 3
+    after = await source_row(db_session, row.name)
+    assert after.last_fetch_at == reset_last
+    assert after.created_at == reset_baseline
+
+    # The job rebuilt from the edited row fetches the new address, and
+    # that poll is the first fetch.
+    fresh = build(after, [item(900 + n, hours_ago=1 + n * 24, host="moved.test") for n in range(30)])
+    first = await scheduler._ingest(fresh)
+    assert first["inserted"] == 10 and first["skipped"] == 20

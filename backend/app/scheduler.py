@@ -439,10 +439,17 @@ async def _ingest(plugin_cls: Any) -> dict:
         source_id: int | None = None
         source_url: str | None = None
         # What the plugin is about to fetch: the feed's URL, sitemap
-        # URL and link pattern. If any of them changes while the fetch
-        # is in flight, the batch came from the old address and is
-        # discarded (see the commit session below).
-        fetch_target: tuple[str | None, ...] = ()
+        # URL and link pattern. If the row no longer has that address
+        # when the batch is committed, the batch came from the old
+        # address and is discarded (see the commit session below).
+        # A row-driven plugin carries the address it was built from
+        # (``SourcePlugin.fetch_target``): its job keeps that instance
+        # until ``update_source`` replaces it after an edit's commit,
+        # so the row read below can already hold the new address while
+        # this instance still fetches the old one. A class-driven
+        # built-in's address can't be edited, so its row is the
+        # snapshot.
+        fetch_target: tuple[str | None, ...] | None = getattr(plugin, "fetch_target", None)
         needs_favicon = False
         async with SessionLocal() as session:
             source = await _upsert_source(session, plugin_cls)
@@ -454,7 +461,8 @@ async def _ingest(plugin_cls: Any) -> dict:
                 return summary
             source_id = source.id
             source_url = source.url
-            fetch_target = (source.url, source.sitemap_url, source.link_pattern)
+            if fetch_target is None:
+                fetch_target = (source.url, source.sitemap_url, source.link_pattern)
             needs_favicon = (
                 source.favicon_url is None
                 and _should_retry_favicon(source.last_fetch_at)

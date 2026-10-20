@@ -25,7 +25,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #27 · Open Menu → Settings → History. Pass: recent hides and saves are listed.
 - [ ] #27 · Add a Reddit feed (r/python) and tap Test. Pass: it shows a post count and titles, not an error.
 - [ ] #<pr> · Add a feed with a long back catalogue (a podcast or a blog with 50+ posts) and wait for its first check. Pass: its tab gains at most 10 stories plus any from the last 2 days.
-- [ ] #<pr> · After the next On this day check (it runs every 12 h), open the On This Day tab. Pass: it shows at most 5 stories for today, and none of them are in For You.
+- [ ] #<pr> · A day or more after the deploy, open the On This Day tab. Pass: the stories that arrived in the last 24 hours number at most 10 (at most 5 per UTC day, which turns at 5 pm Pacific), and none of them are in For You. Stories fetched before the deploy don't count.
 - [ ] #<pr> · The day after adding that feed, open Brief. Pass: no highlight is one of the new feed's older stories.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)

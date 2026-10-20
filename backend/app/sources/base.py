@@ -32,6 +32,16 @@ class SourcePlugin(ABC):
     # every call site. None for class-driven built-ins, which use
     # ``ingest:<name>`` instead.
     source_id: int | None = None
+    # Set by row-driven plugins to the address they were built to
+    # fetch: the backing row's ``(url, sitemap_url, link_pattern)`` at
+    # construction (``row_fetch_target``). A job keeps its plugin
+    # instance until ``update_source`` replaces it, so after an address
+    # change an older instance can still be fetching the old address;
+    # ``scheduler._ingest`` compares this with the row it commits
+    # against and discards a batch that came from an address the row
+    # no longer has. None for class-driven built-ins, whose address
+    # can't be edited; ``_ingest`` snapshots their row instead.
+    fetch_target: tuple[str | None, str | None, str | None] | None = None
 
     @abstractmethod
     async def fetch(self) -> list[dict]:
@@ -50,6 +60,20 @@ class SourcePlugin(ABC):
         tracking params from URLs, decode HTML entities in titles).
         """
         return validate_required(self.name, raw)
+
+
+def row_fetch_target(source_row) -> tuple[str | None, str | None, str | None]:
+    """The address a ``Source`` row points a plugin at: its URL, sitemap
+    URL and link pattern, the three fields whose change re-points a
+    feed (see ``scheduler.update_source``). Every row-driven plugin
+    records the full tuple, whatever its type, so it compares equal to
+    the same tuple read from the row. ``getattr`` with a default keeps
+    stand-in rows without the newer columns working."""
+    return (
+        source_row.url,
+        getattr(source_row, "sitemap_url", None),
+        getattr(source_row, "link_pattern", None),
+    )
 
 
 def validate_required(name: str, raw: dict) -> dict:

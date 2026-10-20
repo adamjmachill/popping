@@ -54,7 +54,7 @@ from collections import OrderedDict
 
 from app.models import Source
 from app import reddit_client
-from app.sources.base import SourcePlugin
+from app.sources.base import SourcePlugin, row_fetch_target
 from app.sources.reddit import normalize_subreddit
 
 logger = logging.getLogger("popping.sources.dynamic_reddit")
@@ -116,6 +116,8 @@ class DynamicRedditPlugin(SourcePlugin):
         # Lets the scheduler compute this job's id (``ingest:dynamic:<id>``)
         # for backoff rescheduling without reaching into ``_source_row``.
         self.source_id = source_row.id
+        # The address this instance fetches (see ``SourcePlugin.fetch_target``).
+        self.fetch_target = row_fetch_target(source_row)
 
     async def fetch(self) -> list[dict]:
         # If this source is in its one-cycle cooldown from a previous

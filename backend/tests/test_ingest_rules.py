@@ -83,6 +83,45 @@ def test_first_fetch_ignores_baseline_and_max_age():
     assert counts == {ingest_rules.FIRST_FETCH: 2}
 
 
+def _weekly(n: int, *, weeks_ago: float, extra_h: float = 0) -> dict:
+    return _item(n, hours_ago=1 + extra_h + weeks_ago * 7 * 24)
+
+
+@pytest.mark.parametrize("new_posts", [0, 4])
+def test_resumed_first_fetch_does_not_pull_back_the_skipped_back_catalogue(new_posts):
+    """A weekly blog lists 20 posts; its first fetch stored the newest
+    10. Four weeks later (a resume) it lists ``new_posts`` new posts
+    plus its 16 newest old ones. The newest 10 are ranked over the
+    whole listing, so the stored posts take their slots and the old
+    posts below them stay out."""
+    gap_h = 28 * 24
+    old = [_weekly(n, weeks_ago=n, extra_h=gap_h) for n in range(16)]
+    new = [_weekly(100 + n, weeks_ago=n) for n in range(new_posts)]
+    stored = set(_urls(old[:10]))
+    kept, counts = _select(new + old, known=stored, first_fetch=True)
+    assert _urls(kept) == _urls(new)
+    assert counts == {ingest_rules.FIRST_FETCH: 6}
+
+
+@pytest.mark.parametrize("new_posts", [0, 4])
+def test_resumed_first_fetch_of_an_undated_feed_stops_at_the_stored_ones(new_posts):
+    old = [_item(n, hours_ago=None) for n in range(20)]
+    new = [_item(100 + n, hours_ago=None) for n in range(new_posts)]
+    stored = set(_urls(old[:10]))
+    kept, counts = _select(new + old, known=stored, first_fetch=True)
+    assert _urls(kept) == _urls(new)
+    assert counts == {ingest_rules.FIRST_FETCH: 10}
+
+
+def test_new_feed_overlapping_stored_stories_keeps_only_its_newest_10():
+    # Another feed already stored this feed's 6 newest stories. The new
+    # feed's first fetch fills the 4 slots left, not 10 older ones.
+    items = [_item(n, hours_ago=1 + n * 24 * 3) for n in range(30)]
+    kept, counts = _select(items, known=set(_urls(items[:6])), first_fetch=True)
+    assert _urls(kept) == _urls(items[6:10])
+    assert counts == {ingest_rules.FIRST_FETCH: 20}
+
+
 # --- later polls -------------------------------------------------------
 
 
@@ -182,6 +221,45 @@ def test_per_poll_cap_also_bounds_a_first_fetch():
     kept, counts = _select(items, first_fetch=True)
     assert _urls(kept) == _urls(items[:50])
     assert counts == {ingest_rules.PER_POLL: 20}
+
+
+def test_per_poll_cap_ranks_by_date_not_feed_order():
+    # Listed oldest first (a sitemap, a re-sorted feed): the cap still
+    # keeps the 50 newest by date, returned in feed order.
+    items = [_item(n, hours_ago=1 + (70 - n) * 0.5) for n in range(70)]
+    kept, counts = _select(items, first_fetch=False)
+    assert _urls(kept) == _urls(items[20:])
+    assert counts == {ingest_rules.PER_POLL: 20}
+
+
+def test_per_poll_cap_ranks_by_date_on_a_first_fetch_too():
+    items = [_item(n, hours_ago=0.5 + (70 - n) * 0.1) for n in range(70)]
+    kept, counts = _select(items, first_fetch=True)
+    assert _urls(kept) == _urls(items[20:])
+    assert counts == {ingest_rules.PER_POLL: 20}
+
+
+def test_undated_items_get_per_poll_slots_before_dated_ones():
+    """60 new dated stories, then 2 new undated ones, above the stored
+    part of the listing. Over two polls all 62 land: the undated ones
+    can't wait, because once the dated ones above them are stored they
+    sit below a known URL."""
+    dated = [_item(n, hours_ago=1 + n * 0.25) for n in range(60)]
+    undated = [_item(100 + n, hours_ago=None) for n in range(2)]
+    stored = [_item(200 + n, hours_ago=30 + n) for n in range(5)]
+    items = dated + undated + stored
+    known = set(_urls(stored))
+
+    kept, counts = _select(items, known=known, first_fetch=False)
+    assert set(_urls(undated)) <= set(_urls(kept))
+    assert _urls(kept) == _urls(dated[:48] + undated)
+    assert counts == {ingest_rules.PER_POLL: 12}
+
+    known |= set(_urls(kept))
+    kept2, counts2 = _select(items, known=known, first_fetch=False)
+    assert _urls(kept2) == _urls(dated[48:])
+    assert counts2 == {}
+    assert known | set(_urls(kept2)) == set(_urls(items))
 
 
 # --- duplicates and counting --------------------------------------------
