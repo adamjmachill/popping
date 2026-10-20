@@ -480,7 +480,8 @@ PR13 (deferred items, each needing a fresh yes, D19) is not a unit on either tra
    - The file keeps "Last good: sha-<…>", the last passed check. It was deployed, so its tag
      exists.
    - Fast frontend-only rollback:
-     `cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d frontend`. Then no
+     `cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d --no-deps frontend`
+     (`--no-deps` keeps the backend on its image; see PR9a's rollback note). Then no
      `popping-update` until the revert is merged and its main run is green.
    - Backend schema rollback follows PR9a.
    - After any deploy or revert, relaunch every device.
