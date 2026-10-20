@@ -23,7 +23,7 @@ import re
 # billion-laughs DoS). Aliased as ``ET`` so the existing call sites
 # (``ET.fromstring(...)``) don't change.
 from defusedxml import ElementTree as ET
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import urljoin
 
 import feedparser
@@ -45,6 +45,26 @@ _DEFAULT_HEADERS = {
     "User-Agent": _USER_AGENT,
     "Accept": _ACCEPT,
 }
+
+# What a feed sends to read as Safari: the identity the feed editor's
+# "Use a browser identity" preset stores (``BROWSER_USER_AGENT`` in
+# frontend/src/lib/headers.ts, pinned by
+# tests/test_frontend_feed_editor_rules.py) plus a language, the way a
+# browser asks. The Add preview retries with it once when a site
+# refuses our own User-Agent (``app.source_preview``); the response
+# only says ``headers_used: "browser"``, so the phone stores its own
+# copy of the same values.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+    ),
+    "Accept-Language": "en-CA,en;q=0.9",
+}
+
+# The iTunes podcast namespace. A feed that declares it (or whose items
+# carry audio enclosures) is a podcast (``ParsedFeed.podcast``).
+_ITUNES_NS = "http://www.itunes.com/dtds/podcast-1.0.dtd"
 
 
 def _parse_published(entry: Any) -> dt.datetime | None:
@@ -380,126 +400,8 @@ async def fetch_rss(url: str, headers: dict[str, str] | None = None) -> list[dic
     last_exc: Exception | None = None
     for attempt in (1, 2):
         try:
-            async with httpx.AsyncClient(
-                timeout=_RSS_TIMEOUT,
-                follow_redirects=True, max_redirects=5,
-                # B7: per-hop SSRF guard — fires before every request
-                # httpx sends, including redirect hops. RSS feed URLs
-                # can be user-controlled (DynamicRssPlugin), so the
-                # guard is critical here — without it a feed owner
-                # could redirect the backend to 127.0.0.1 or
-                # 169.254.169.254. The post-response final-URL check
-                # below is the safety net for the LAST hop; this hook
-                # is the per-hop guard that cuts the chain early.
-                event_hooks={"request": [ssrf_event_hook]},
-            ) as client:
-                resp = await client.get(url, headers=merged_headers)
-                resp.raise_for_status()
-                # Re-check the FINAL URL after the redirect chain. The
-                # entry-time check in routes/sources.py validates the
-                # user-supplied URL, but ``follow_redirects=True`` lets
-                # a feed owner 3xx the request to a private / loopback
-                # address (e.g. ``public.example.com → 127.0.0.1:6379``
-                # or ``169.254.169.254/...``) that the entry check
-                # never saw. Without this guard, the response body
-                # lands in feedparser and any internal services
-                # reachable from the backend get a hit on every
-                # ingest. Same shape as the assets._download guard.
-                final_url = str(resp.url)
-                if final_url != url:
-                    final_safe, reason = check_url_safe(final_url)
-                    if not final_safe:
-                        logger.warning(
-                            "rss: %s redirected to denied host %s (%s)",
-                            url, final_url, reason,
-                        )
-                        raise ValueError(
-                            f"rss: {url} redirected to a denied host"
-                        )
-            feed = feedparser.parse(resp.text)
-            transcripts_by_key = _extract_podcast_transcripts(resp.text)
-            items: list[dict] = []
-            for entry in feed.entries:
-                image_url = _pick_image_url(entry)
-                entry_url = _entry_url(entry)
-                item: dict[str, Any] = {
-                    "title": entry.get("title", ""),
-                    "url": entry_url,
-                    "published_at": _parse_published(entry),
-                    "summary": entry.get("summary", ""),
-                    # Top-level so the ingest pipeline can pop it out of
-                    # meta cleanly. NULL when the feed ships no image.
-                    "image_url": image_url,
-                }
-                # Podcast fields. Only added when present — unlike
-                # image_url (which the ingest pipeline always pops,
-                # so it needs a stable key) these have no dedicated
-                # Entry column and just flow into meta, so an absent
-                # key is cheaper than an always-present null (matches
-                # the RFD engagement extractor's convention).
-                audio_url = _pick_audio_enclosure(entry)
-                if audio_url:
-                    item["audio_url"] = audio_url
-                duration_seconds = _parse_itunes_duration(entry)
-                if duration_seconds is not None:
-                    item["duration_seconds"] = duration_seconds
-                # Transcript, if the feed publishes one via the
-                # Podcasting 2.0 <podcast:transcript> tag. Looked up
-                # by link first (matches entry_url, the common case),
-                # falling back to the guid (feedparser's ``id``) for
-                # feeds whose <link> and <guid> differ.
-                transcript = transcripts_by_key.get(entry_url) or transcripts_by_key.get(
-                    entry.get("id") or ""
-                )
-                if transcript:
-                    item["transcript_url"], item["transcript_type"] = transcript
-                items.append(item)
-            # HTTP 200 but the body isn't an RSS/Atom feed at all:
-            # Cloudflare challenges, paywall interstitials, a site's
-            # home page, JavaScript-rendered shells, a JSON API.
-            # feedparser accepts them with zero entries and no
-            # ``version`` (the feed format it recognised), and an
-            # ordinary text/html page doesn't even set ``bozo``, so
-            # the malformed check below would let it through as an
-            # empty feed. Say what it is, so the feed reads "not a
-            # feed" (fix: its address) rather than quietly bringing
-            # nothing. A well-formed feed with no entries has a
-            # ``version`` and stays a success. ``version`` comes from
-            # the one parse above; no second parse is needed.
-            if not items and not feed.get("version"):
-                snippet = resp.text[:200].replace("\n", " ").strip()
-                raise NotAFeedError(
-                    f"rss: {url} could not be parsed as a feed: no RSS or Atom "
-                    f"document (content-type={resp.headers.get('content-type')!r}, "
-                    f"excerpt={snippet!r})"
-                )
-            # A feed whose entries are broken: ``bozo=True`` (or a
-            # content type that isn't feed-like) with zero usable
-            # entries. Surface it as an error so the scheduler can
-            # record a useful tooltip instead of silently emptying
-            # the dashboard.
-            #
-            # Also guard the "feedparser happily parsed garbage"
-            # case: a truncated XML body can yield a non-empty
-            # ``entries`` list whose items have empty ``title`` /
-            # ``url``. Without this check, the pipeline lands
-            # phantom rows with ``title=''`` and ``url=<feed url>``
-            # that pollute the dashboard. We treat "any entry is
-            # missing title or url" as malformed and surface a
-            # useful tooltip instead of silently accepting the
-            # damage.
-            all_ok = bool(items) and all(
-                e.get("title") and e.get("url") for e in items
-            )
-            if not all_ok and (bool(feed.bozo) or not _looks_like_feed(resp)):
-                snippet = resp.text[:200].replace("\n", " ").strip()
-                raise ValueError(
-                    f"rss: {url} returned malformed entries "
-                    f"(bozo={feed.bozo}, ok={all_ok}, count={len(items)}, "
-                    f"content-type={resp.headers.get('content-type')!r}, "
-                    f"excerpt={snippet!r})"
-                )
-            return items
+            resp = await get_feed_response(url, merged_headers, timeout=_RSS_TIMEOUT)
+            return parse_feed(resp.text, url, resp.headers.get("content-type")).items
         except (httpx.ReadTimeout, httpx.ConnectError, httpx.ConnectTimeout, httpx.TooManyRedirects) as exc:
             last_exc = exc
             logger.warning(
@@ -525,12 +427,181 @@ async def fetch_rss(url: str, headers: dict[str, str] | None = None) -> list[dic
     raise last_exc
 
 
-def _looks_like_feed(resp: httpx.Response) -> bool:
+async def get_feed_response(
+    url: str,
+    headers: dict[str, str],
+    *,
+    timeout: httpx.Timeout,
+    raise_for_status: bool = True,
+) -> httpx.Response:
+    """One SSRF-guarded GET of a feed address, the request half of
+    ``fetch_rss``: ``headers`` are sent as they are (``fetch_rss``
+    merges them over ``_DEFAULT_HEADERS`` first). Raises
+    ``httpx.HTTPStatusError`` for a 4xx or 5xx answer (unless
+    ``raise_for_status`` is False, for a caller that reads the refused
+    body itself), any httpx transport error, and ``ValueError`` when
+    the redirects ended on a denied host. The body is read in full.
+
+    Also used by the Add preview (``app.source_preview``), which makes a
+    single attempt with a shorter read timeout instead of ``fetch_rss``'s
+    two attempts with a 60 s read."""
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True, max_redirects=5,
+        # B7: per-hop SSRF guard — fires before every request
+        # httpx sends, including redirect hops. RSS feed URLs
+        # can be user-controlled (DynamicRssPlugin), so the
+        # guard is critical here — without it a feed owner
+        # could redirect the backend to 127.0.0.1 or
+        # 169.254.169.254. The post-response final-URL check
+        # below is the safety net for the LAST hop; this hook
+        # is the per-hop guard that cuts the chain early.
+        event_hooks={"request": [ssrf_event_hook]},
+    ) as client:
+        resp = await client.get(url, headers=headers)
+        if raise_for_status:
+            resp.raise_for_status()
+        # Re-check the FINAL URL after the redirect chain. The
+        # entry-time check in routes/sources.py validates the
+        # user-supplied URL, but ``follow_redirects=True`` lets
+        # a feed owner 3xx the request to a private / loopback
+        # address (e.g. ``public.example.com → 127.0.0.1:6379``
+        # or ``169.254.169.254/...``) that the entry check
+        # never saw. Without this guard, the response body
+        # lands in feedparser and any internal services
+        # reachable from the backend get a hit on every
+        # ingest. Same shape as the assets._download guard.
+        final_url = str(resp.url)
+        if final_url != url:
+            final_safe, reason = check_url_safe(final_url)
+            if not final_safe:
+                logger.warning(
+                    "rss: %s redirected to denied host %s (%s)",
+                    url, final_url, reason,
+                )
+                raise ValueError(
+                    f"rss: {url} redirected to a denied host"
+                )
+    return resp
+
+
+class ParsedFeed(NamedTuple):
+    """A feed document, parsed (``parse_feed``)."""
+
+    # The items, in feed order, in the shape ``fetch_rss`` returns.
+    items: list[dict]
+    # The feed's own title, or None.
+    title: str | None
+    # Declares the iTunes namespace or has an audio enclosure: a
+    # podcast, which gets its own refresh default and category.
+    podcast: bool
+
+
+def parse_feed(text: str, url: str, content_type: str | None) -> ParsedFeed:
+    """Parse a fetched feed body: the parse half of ``fetch_rss``.
+    Synchronous and CPU-bound (feedparser and one strict XML pass for
+    podcast transcripts); the Add preview runs it in a thread.
+
+    Raises ``NotAFeedError`` when the body isn't a feed at all, and
+    ``ValueError`` when it is one whose entries are broken (see
+    ``fetch_rss``)."""
+    feed = feedparser.parse(text)
+    transcripts_by_key = _extract_podcast_transcripts(text)
+    items: list[dict] = []
+    for entry in feed.entries:
+        image_url = _pick_image_url(entry)
+        entry_url = _entry_url(entry)
+        item: dict[str, Any] = {
+            "title": entry.get("title", ""),
+            "url": entry_url,
+            "published_at": _parse_published(entry),
+            "summary": entry.get("summary", ""),
+            # Top-level so the ingest pipeline can pop it out of
+            # meta cleanly. NULL when the feed ships no image.
+            "image_url": image_url,
+        }
+        # Podcast fields. Only added when present — unlike
+        # image_url (which the ingest pipeline always pops,
+        # so it needs a stable key) these have no dedicated
+        # Entry column and just flow into meta, so an absent
+        # key is cheaper than an always-present null (matches
+        # the RFD engagement extractor's convention).
+        audio_url = _pick_audio_enclosure(entry)
+        if audio_url:
+            item["audio_url"] = audio_url
+        duration_seconds = _parse_itunes_duration(entry)
+        if duration_seconds is not None:
+            item["duration_seconds"] = duration_seconds
+        # Transcript, if the feed publishes one via the
+        # Podcasting 2.0 <podcast:transcript> tag. Looked up
+        # by link first (matches entry_url, the common case),
+        # falling back to the guid (feedparser's ``id``) for
+        # feeds whose <link> and <guid> differ.
+        transcript = transcripts_by_key.get(entry_url) or transcripts_by_key.get(
+            entry.get("id") or ""
+        )
+        if transcript:
+            item["transcript_url"], item["transcript_type"] = transcript
+        items.append(item)
+    # HTTP 200 but the body isn't an RSS/Atom feed at all:
+    # Cloudflare challenges, paywall interstitials, a site's
+    # home page, JavaScript-rendered shells, a JSON API.
+    # feedparser accepts them with zero entries and no
+    # ``version`` (the feed format it recognised), and an
+    # ordinary text/html page doesn't even set ``bozo``, so
+    # the malformed check below would let it through as an
+    # empty feed. Say what it is, so the feed reads "not a
+    # feed" (fix: its address) rather than quietly bringing
+    # nothing. A well-formed feed with no entries has a
+    # ``version`` and stays a success. ``version`` comes from
+    # the one parse above; no second parse is needed.
+    if not items and not feed.get("version"):
+        snippet = text[:200].replace("\n", " ").strip()
+        raise NotAFeedError(
+            f"rss: {url} could not be parsed as a feed: no RSS or Atom "
+            f"document (content-type={content_type!r}, "
+            f"excerpt={snippet!r})"
+        )
+    # A feed whose entries are broken: ``bozo=True`` (or a
+    # content type that isn't feed-like) with zero usable
+    # entries. Surface it as an error so the scheduler can
+    # record a useful tooltip instead of silently emptying
+    # the dashboard.
+    #
+    # Also guard the "feedparser happily parsed garbage"
+    # case: a truncated XML body can yield a non-empty
+    # ``entries`` list whose items have empty ``title`` /
+    # ``url``. Without this check, the pipeline lands
+    # phantom rows with ``title=''`` and ``url=<feed url>``
+    # that pollute the dashboard. We treat "any entry is
+    # missing title or url" as malformed and surface a
+    # useful tooltip instead of silently accepting the
+    # damage.
+    all_ok = bool(items) and all(
+        e.get("title") and e.get("url") for e in items
+    )
+    if not all_ok and (bool(feed.bozo) or not _looks_like_feed(content_type)):
+        snippet = text[:200].replace("\n", " ").strip()
+        raise ValueError(
+            f"rss: {url} returned malformed entries "
+            f"(bozo={feed.bozo}, ok={all_ok}, count={len(items)}, "
+            f"content-type={content_type!r}, "
+            f"excerpt={snippet!r})"
+        )
+    namespaces = feed.get("namespaces") or {}
+    podcast = _ITUNES_NS in {str(uri).rstrip("/").lower() for uri in namespaces.values()} or any(
+        "audio_url" in item for item in items
+    )
+    title = (feed.get("feed") or {}).get("title") or None
+    return ParsedFeed(items, title.strip() if isinstance(title, str) else None, podcast)
+
+
+def _looks_like_feed(content_type: str | None) -> bool:
     """Best-effort sniff: does the response Content-Type look like an
     RSS/Atom document? Used alongside ``feed.bozo`` to catch
     Cloudflare / paywall HTML bodies that return 200 but aren't
     actually feeds."""
-    ctype = resp.headers.get("content-type", "").lower()
+    ctype = (content_type or "").lower()
     return (
         "rss" in ctype
         or "atom" in ctype

@@ -26,6 +26,7 @@ import asyncio
 import datetime as dt
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlparse
 
 import httpx
@@ -42,6 +43,7 @@ from app.article_extract import (
     unresolved_host_error,
 )
 from app.sources.rss import fetch_rss
+from app.thread_work import run_in_thread
 from app.url_safety import check_url_safe
 
 logger = logging.getLogger("popping.feed_autodiscovery")
@@ -90,9 +92,26 @@ _CANDIDATE_PROBE_BUDGET = 20.0
 _DISCOVERY_TOTAL_BUDGET = 60.0
 
 
-async def discover_feed_url(page_url: str) -> str | None:
+async def discover_feed_url(
+    page_url: str,
+    headers: dict | None = None,
+    *,
+    tried_as_feed: bool = False,
+    page_html: str | None = None,
+    probe: Callable[[str], Awaitable[object]] | None = None,
+) -> str | None:
     """Return a working RSS/Atom feed URL for ``page_url``, or None
     if none could be found within the discovery time budget.
+
+    ``headers`` are sent with every request: the page fetch and each
+    feed probe (a feed's ``custom_headers``, or the Add preview's
+    browser headers). The Add preview (``app.source_preview``) has
+    already fetched ``page_url`` as a feed itself, so it passes
+    ``tried_as_feed`` to skip that first probe, ``page_html`` (the page
+    it got back, when it got one) so the page isn't fetched again, and
+    ``probe``, its own one-attempt feed fetch, which keeps what it
+    parsed. A probe returns something truthy when the candidate is a
+    feed with items; the default is ``fetch_rss`` with ``headers``.
 
     Tries ``page_url`` itself first — the user may have pasted a feed
     URL directly, which is the common case and needs no discovery at
@@ -116,23 +135,28 @@ async def discover_feed_url(page_url: str) -> str | None:
         logger.info("feed_autodiscovery: %s rejected by URL safety check (%s)", page_url, reason)
         return None
 
+    async def _is_feed(url: str) -> object:
+        if probe is not None:
+            return await probe(url)
+        return await fetch_rss(url, headers=headers)
+
     async def _probe_initial() -> str | None:
         """Phase 1: a quick probe of the user-supplied URL itself."""
-        items = await fetch_rss(page_url)
-        return page_url if items else None
+        return page_url if await _is_feed(page_url) else None
 
-    try:
-        result = await asyncio.wait_for(_probe_initial(), _INITIAL_PROBE_BUDGET)
-        if result:
-            return result
-    except asyncio.TimeoutError:
-        logger.info(
-            "feed_autodiscovery: initial probe of %s hit the %ss budget; "
-            "falling through to trafilatura",
-            page_url, _INITIAL_PROBE_BUDGET,
-        )
-    except Exception:  # noqa: BLE001 - not itself a feed; fall through to discovery
-        pass
+    if not tried_as_feed:
+        try:
+            result = await asyncio.wait_for(_probe_initial(), _INITIAL_PROBE_BUDGET)
+            if result:
+                return result
+        except asyncio.TimeoutError:
+            logger.info(
+                "feed_autodiscovery: initial probe of %s hit the %ss budget; "
+                "falling through to trafilatura",
+                page_url, _INITIAL_PROBE_BUDGET,
+            )
+        except Exception:  # noqa: BLE001 - not itself a feed; fall through to discovery
+            pass
 
     async def _trafilatura_find() -> list[str]:
         # Lazy import: trafilatura loads lxml at import time.
@@ -149,7 +173,7 @@ async def discover_feed_url(page_url: str) -> str | None:
                 page_url,
             )
             return []
-        html = await fetch_html(page_url)
+        html = page_html if page_html is not None else await fetch_html(page_url, headers)
         if html is None:
             logger.info(
                 "feed_autodiscovery: could not fetch %s — no page to scan for feed links",
@@ -157,7 +181,7 @@ async def discover_feed_url(page_url: str) -> str | None:
             )
             return []
         params = FeedParameters(baseurl, domain, page_url, False, None)
-        found = await asyncio.to_thread(determine_feed, html, params)
+        found = await run_in_thread(determine_feed, html, params)
         logger.info(
             "feed_autodiscovery: determine_feed found %d candidate(s) for %s: %s",
             len(found), page_url, found[:_MAX_FEED_CANDIDATES],
@@ -179,8 +203,7 @@ async def discover_feed_url(page_url: str) -> str | None:
 
     async def _probe_candidate(candidate: str) -> str | None:
         """Phase 2: probe a single trafilatura-discovered candidate."""
-        items = await fetch_rss(candidate)
-        return candidate if items else None
+        return candidate if await _is_feed(candidate) else None
 
     for candidate in candidates[:_MAX_FEED_CANDIDATES]:
         try:
@@ -581,7 +604,7 @@ async def _crawl_sitemaps(
             continue
         found, nested, listed = [], [], False
         if text:
-            found, nested, listed = await asyncio.to_thread(
+            found, nested, listed = await run_in_thread(
                 _read_sitemap,
                 text,
                 page_url,

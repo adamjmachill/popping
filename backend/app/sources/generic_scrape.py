@@ -56,6 +56,7 @@ from app.feed_autodiscovery import discover_sitemap_entries, looks_like_sitemap
 from app.ingest_rules import IngestTunables
 from app.models import Source
 from app.sources.base import KnownUrls, NoArticleListError, SourcePlugin, row_fetch_target
+from app.thread_work import run_in_thread
 
 logger = logging.getLogger("popping.sources.generic_scrape")
 
@@ -264,6 +265,57 @@ def _too_old(item: dict) -> bool:
     return published < cutoff
 
 
+# Why a page read for the Add preview isn't a story (``preview_page``).
+NO_TEXT = "no_text"          # no usable title or text in the page
+NOT_ARTICLE = "not_article"  # ``score_page`` says it isn't an article
+UNREADABLE = "unreadable"    # gone (404, 410, another 4xx), not HTML, empty
+REFUSED = "refused"          # the site refused it (401, 402, 403, 429)
+FAILED = "failed"            # a network error, a timeout or a 5xx
+TOO_OLD = "too_old"          # dated more than ``_MAX_AGE_DAYS`` ago
+
+
+def _judge_page(
+    html: str,
+    url: str,
+    final_url: str,
+    owner_configured: bool,
+    listed_date: dt.datetime | None = None,
+) -> tuple[tuple[dict, str, str] | None, str | None]:
+    """``_read_page`` with the reason a page was turned down:
+    ``(page, None)`` for an article, ``(None, NO_TEXT)`` or ``(None,
+    NOT_ARTICLE)`` otherwise."""
+    import trafilatura
+
+    doc = trafilatura.bare_extraction(
+        html,
+        url=url,
+        with_metadata=True,
+        favor_recall=True,
+    )
+    if doc is None:
+        return None, NO_TEXT
+    data = doc.as_dict()
+    title = (data.get("title") or "").strip()
+    text = (data.get("text") or "").strip()
+    if not title or not text:
+        logger.debug("generic_scrape: %s: no usable title/text extracted", url)
+        return None, NO_TEXT
+    score, reasons = score_page(
+        html,
+        url,
+        final_url=final_url,
+        text=text,
+        owner_configured=owner_configured,
+        listed_date=listed_date,
+    )
+    if score < ACCEPT_SCORE:
+        logger.debug(
+            "generic_scrape: %s: not an article (score %d: %s)", url, score, ", ".join(reasons)
+        )
+        return None, NOT_ARTICLE
+    return (data, title, text), None
+
+
 def _read_page(
     html: str,
     url: str,
@@ -277,36 +329,7 @@ def _read_page(
     ``listed_date`` is the date the site's list gave the page
     (``Candidate.published``). CPU-bound and synchronous;
     ``_extract_one`` runs it in a thread."""
-    import trafilatura
-
-    doc = trafilatura.bare_extraction(
-        html,
-        url=url,
-        with_metadata=True,
-        favor_recall=True,
-    )
-    if doc is None:
-        return None
-    data = doc.as_dict()
-    title = (data.get("title") or "").strip()
-    text = (data.get("text") or "").strip()
-    if not title or not text:
-        logger.debug("generic_scrape: %s: no usable title/text extracted", url)
-        return None
-    score, reasons = score_page(
-        html,
-        url,
-        final_url=final_url,
-        text=text,
-        owner_configured=owner_configured,
-        listed_date=listed_date,
-    )
-    if score < ACCEPT_SCORE:
-        logger.debug(
-            "generic_scrape: %s: not an article (score %d: %s)", url, score, ", ".join(reasons)
-        )
-        return None
-    return data, title, text
+    return _judge_page(html, url, final_url, owner_configured, listed_date)[0]
 
 
 async def _extract_one(
@@ -517,6 +540,60 @@ async def probe(url: str, limit: int = 3) -> list[dict]:
     return items[:limit]
 
 
+async def preview_page(
+    candidate: Candidate,
+    headers: dict | None = None,
+    *,
+    owner_configured: bool = False,
+) -> dict:
+    """Read one candidate for the Add preview (``app.source_preview``)
+    the way a poll would (``_extract_one``'s fetch, ``_read_page``'s
+    extraction and scoring, the ``_MAX_AGE_DAYS`` rule), and say what
+    became of it: ``{title, url, published_at, accepted, reason}``.
+    ``reason`` is None for a story and one of the module's reason
+    constants otherwise. ``title`` falls back to the list's title for
+    the candidate (None when it had none). Never raises an HTTP error:
+    a refusal or a failure is a reason, like a page that isn't an
+    article."""
+    verdict = {
+        "title": candidate.title,
+        "url": candidate.url,
+        "published_at": candidate.published,
+        "accepted": False,
+        "reason": UNREADABLE,
+    }
+    try:
+        fetched = await fetch_html_checked(
+            candidate.url, custom_headers=headers, return_final_url=True, raise_for_status=True
+        )
+    except FetchRefusedError:
+        return {**verdict, "reason": REFUSED}
+    except httpx.HTTPStatusError as exc:
+        return {**verdict, "reason": FAILED if exc.response.status_code >= 500 else UNREADABLE}
+    except NETWORK_ERRORS:
+        return {**verdict, "reason": FAILED}
+    except httpx.HTTPError:
+        return verdict
+    if fetched is None:
+        return verdict
+    html, final_url = fetched
+    try:
+        page, reason = await run_in_thread(
+            _judge_page, html, candidate.url, final_url, owner_configured, candidate.published
+        )
+    except Exception:  # noqa: BLE001 - one page's extraction failing is that page's verdict
+        logger.debug("generic_scrape: %s: extraction raised", candidate.url)
+        return {**verdict, "reason": NO_TEXT}
+    if page is None:
+        return {**verdict, "reason": reason}
+    data, title, _text = page
+    published = _parse_published_str(data.get("date")) or candidate.published
+    item = {**verdict, "title": title, "published_at": published, "accepted": True, "reason": None}
+    if _too_old(item):
+        return {**item, "accepted": False, "reason": TOO_OLD}
+    return item
+
+
 def _extract_links_from_html(html: str, page_url: str, pattern: str) -> list[str]:
     """Pull every ``<a href="...">`` from ``html`` whose URL matches
     ``pattern`` (a leading-slash path prefix like ``/library/``),
@@ -633,7 +710,7 @@ async def _discover_page_links(
     if fetched is None:
         return []
     html, final_url = fetched
-    links = await asyncio.to_thread(_page_links, html, page_url, final_url, pattern)
+    links = await run_in_thread(_page_links, html, page_url, final_url, pattern)
     return links[:limit]
 
 

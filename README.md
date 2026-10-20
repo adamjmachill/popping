@@ -124,6 +124,7 @@ Only pushes to `main` publish images. PR builds are validation-only and never re
 | `GET  /api/foryou`                | Personal top-N feed (with convergence boost; `max_age_hours=`). Leaves out paused feeds and your hidden stories | login |
 | `POST /api/ingest/{source_name}`  | Force a fetch now (instead of waiting) | login     |
 | `POST /api/sources/check-now`     | Check up to 20 feeds in the next minute (pull to refresh), keeping each feed's cooldown and failure backoff | login |
+| `POST /api/sources/preview`       | What an address will bring if added: its stories, how many the first check stores, and the type and address to add. Writes nothing; two at a time, within 60 s | login |
 | `GET  /auth/login`                | Kick off the OIDC flow (302 to IdP)    | n/a       |
 | `GET  /auth/callback`             | OIDC redirect URI                      | n/a       |
 | `POST /auth/local`                | Local-user login (form on login page)  | n/a       |

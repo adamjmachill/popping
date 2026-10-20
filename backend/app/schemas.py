@@ -217,6 +217,12 @@ class SourceUpdate(BaseModel):
     custom_headers: Optional[dict] = None
     # Free-text label shown in the app; blank clears it.
     display_name: Optional[str] = None
+    # Switches how a dynamic feed is read: ``rss``, ``podcast`` and
+    # ``generic_scrape`` only, both before and after (Find its feed
+    # turns a website feed into the feed the site links to). The URL is
+    # checked under the new type, and a change starts the feed over
+    # (``scheduler.update_source``). Built-ins refuse it.
+    type: Optional[str] = None
 
 
 class SourceTestRequest(BaseModel):
@@ -288,6 +294,96 @@ class SourceTestResult(BaseModel):
     error_kind: Optional[str] = None
     error: Optional[str] = None
     resolved_url: Optional[str] = None
+
+
+# What the Add preview reads a URL as. None reads it the way Add would:
+# a feed, else the feed the page links to, else the page as a website.
+PreviewType = Literal["rss", "podcast", "youtube_channel", "reddit", "generic_scrape"]
+
+
+class SourcePreviewRequest(BaseModel):
+    """Body of ``POST /api/sources/preview`` (``app.source_preview``).
+
+    ``type`` None reads the URL the way the Add field does; a type reads
+    it only that way. ``sitemap_url`` and ``link_pattern`` are a website
+    feed's options and ``custom_headers`` a feed's request headers, each
+    checked as Add checks them. Unknown fields are refused.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    url: str = Field(max_length=2048)
+    type: Optional[PreviewType] = None
+    sitemap_url: Optional[str] = Field(default=None, max_length=2048)
+    link_pattern: Optional[str] = Field(default=None, max_length=512)
+    custom_headers: Optional[dict] = None
+
+
+class SourcePreviewItem(BaseModel):
+    """One story the preview found. ``accepted`` says whether Add's
+    first check would store it; ``reason`` says why not (None when it
+    would): ``stored`` (already stored by a feed), ``older`` (outside
+    the first fetch's newest few and last couple of days),
+    ``over_cap`` (over one check's cap; a later check takes it), and
+    for a website's pages ``not_article``, ``no_text``, ``unreadable``,
+    ``refused``, ``failed`` or ``too_old``. ``title`` is plain text."""
+
+    title: Optional[str] = None
+    url: str
+    published_at: Optional[dt.datetime] = None
+    accepted: bool
+    reason: Optional[str] = None
+
+
+class SourcePreviewDuplicate(BaseModel):
+    """The feed already following the previewed address."""
+
+    id: int
+    name: str
+    display_name: Optional[str] = None
+
+
+class SourcePreviewResult(BaseModel):
+    """Body of ``POST /api/sources/preview``.
+
+    - ``kind``: the type Add should use (``rss``, ``podcast``,
+      ``youtube_channel``, ``reddit``, ``generic_scrape``); ``url`` the
+      address Add should store (a resolved YouTube or Apple link, or the
+      feed a page links to). ``mode``: how the stories were found:
+      ``feed``, ``page`` (the listing page), ``sitemap`` or ``reddit``.
+    - ``headers_used``: ``default``, ``browser`` (the site refused our
+      own User-Agent and answered Safari's, ``rss.BROWSER_HEADERS``) or
+      ``custom`` (the caller's). Header values are never returned.
+    - ``items``: up to 50 stories in the feed's order (a website: the
+      pages read, at most 8). ``total_count`` is every story the feed
+      lists (a website: every candidate page), ``will_add_count`` how
+      many Add's first check stores, ``older_skipped_count`` how many
+      the first-fetch rule leaves out as older, and
+      ``already_stored_count`` how many are stored already.
+    - ``feed_candidates``: the feed links a page offered (Find its
+      feed), when they are all that is known.
+    - ``error_kind`` and ``error`` (one short sentence for the kind)
+      when ``ok`` is false: ``invalid_url``, ``invalid_headers``,
+      ``blocked``, ``not_found``, ``not_a_feed``, ``no_list``,
+      ``http_error``, ``network``, ``timeout`` (with what was known by
+      then), ``busy`` (two previews already running) or ``reddit_off``.
+    """
+
+    ok: bool
+    kind: Optional[str] = None
+    url: Optional[str] = None
+    headers_used: Literal["default", "browser", "custom"] = "default"
+    mode: Optional[str] = None
+    feed_title: Optional[str] = None
+    items: list[SourcePreviewItem] = []
+    total_count: int = 0
+    will_add_count: int = 0
+    older_skipped_count: int = 0
+    already_stored_count: int = 0
+    duplicate_of: Optional[SourcePreviewDuplicate] = None
+    feed_candidates: list[str] = []
+    error_kind: Optional[str] = None
+    error: Optional[str] = None
 
 
 # Source ids are INTEGER primary keys. ``strict`` so ``"5"``, ``5.0``

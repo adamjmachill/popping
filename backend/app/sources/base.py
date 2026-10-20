@@ -62,15 +62,16 @@ class SourcePlugin(ABC):
     # ``ingest:<name>`` instead.
     source_id: int | None = None
     # Set by row-driven plugins to the address they were built to
-    # fetch: the backing row's ``(url, sitemap_url, link_pattern)`` at
-    # construction (``row_fetch_target``). A job keeps its plugin
+    # fetch: the backing row's ``(type, url, sitemap_url, link_pattern)``
+    # at construction (``row_fetch_target``). A job keeps its plugin
     # instance until ``update_source`` replaces it, so after an address
-    # change an older instance can still be fetching the old address;
-    # ``scheduler._ingest`` compares this with the row it commits
-    # against and discards a batch that came from an address the row
-    # no longer has. None for class-driven built-ins, whose address
-    # can't be edited; ``_ingest`` snapshots their row instead.
-    fetch_target: tuple[str | None, str | None, str | None] | None = None
+    # or type change an older instance can still be fetching the old
+    # address the old way; ``scheduler._ingest`` compares this with the
+    # row it commits against and discards a batch that came from an
+    # address or type the row no longer has. None for class-driven
+    # built-ins, whose address and type can't be edited; ``_ingest``
+    # snapshots their row instead.
+    fetch_target: tuple[str | None, str | None, str | None, str | None] | None = None
     # True for a plugin whose ``fetch`` takes the keyword arguments
     # ``known_urls`` (a ``KnownUrls`` lookup), ``max_undated``
     # (``ingest.max_undated_per_poll``) and ``backlog_before`` (the
@@ -102,14 +103,16 @@ class SourcePlugin(ABC):
         return validate_required(self.name, raw)
 
 
-def row_fetch_target(source_row) -> tuple[str | None, str | None, str | None]:
-    """The address a ``Source`` row points a plugin at: its URL, sitemap
-    URL and link pattern, the three fields whose change re-points a
-    feed (see ``scheduler.update_source``). Every row-driven plugin
+def row_fetch_target(source_row) -> tuple[str | None, str | None, str | None, str | None]:
+    """The address a ``Source`` row points a plugin at, and how it is
+    read: its type, URL, sitemap URL and link pattern, the four fields
+    whose change re-points a feed (see ``scheduler.update_source``; a
+    type change picks another plugin class). Every row-driven plugin
     records the full tuple, whatever its type, so it compares equal to
     the same tuple read from the row. ``getattr`` with a default keeps
     stand-in rows without the newer columns working."""
     return (
+        getattr(source_row, "type", None),
         source_row.url,
         getattr(source_row, "sitemap_url", None),
         getattr(source_row, "link_pattern", None),
