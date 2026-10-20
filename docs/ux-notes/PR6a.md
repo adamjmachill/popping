@@ -16,7 +16,10 @@ PR6b calls the route.
   2. `queued_ids`: a run that is still fetching (it hasn't stamped its result yet). It is left
      alone, because APScheduler drops a run that comes due while one executes.
   3. `cooling_down`: a run that has stamped its result but is still in its thumbnail and og:image
-     passes. It was checked just now, and it can't be moved up either.
+     passes. It was checked just now, and it can't be moved up either. Also a job with a run that
+     finished while `queue_check` was reading the rows (`_ingest_finished` moved since the
+     snapshot taken before the first await): the row can predate that run's result, so it was
+     checked just now and the job stays where the run left it.
   4. `cooling_down`: queued by check-now within the cooldown (`_last_queued`), or with a
      successful fetch (`last_fetch_at`) within the cooldown. The cooldown is
      `refresh.cooldown_seconds` (default 600, `[60, 86400]`, read through
@@ -25,7 +28,7 @@ PR6b calls the route.
   5. `backing_off`: without `force`, `error_count > 0` and the job's `next_run_time` still in the
      future (the backed-off interval). `force` skips this gate.
   6. Reddit in direct mode (`reddit_client.is_direct_mode()`: no proxy URL, direct mode on): a
-     subreddit fetched within its own refresh interval (not with `force`), and every subreddit
+     subreddit fetched within its own refresh interval (`force` included), and every subreddit
      after the first one this call moves, go to `cooling_down`.
   7. Otherwise queued: `next_run_time = min(next_run_time, now + i × 3 s)`, with `i` counting the
      feeds moved so far. A job due sooner is never postponed.
@@ -43,7 +46,9 @@ PR6b calls the route.
   successful run marks itself recorded just before it takes the `last_fetch_at` timestamp.
   Every other path is marked by the wrapper as it returns: a failure right after recording its
   error, and a deleted, paused or re-pointed feed without a write. Both are `Counter`s, so a manual
-  `/api/ingest` run overlapping a scheduled one is counted correctly.
+  `/api/ingest` run overlapping a scheduled one is counted correctly. A third `Counter`,
+  `_ingest_finished`, counts every run as it returns and is never counted down (one entry per job
+  id that has run).
 - **`POST /api/sources/check-now`** on the sources router, behind `_write_deps` and main.py's
   `_api_deps`. The body is `CheckNowRequest`: `source_ids` is a `conlist` of strict ints in
   `[1, 2^31 − 1]` with length 1 to 20, `force` is a `StrictBool` defaulting to false, and unknown
@@ -53,14 +58,14 @@ PR6b calls the route.
   scheduler doesn't read `_DIRECT_RPS`).
 - **`ingest_rules._parse_int` → `parse_int_knob`** (public, with a docstring), shared with the
   cooldown knob.
-- **Docs:** `ARCHITECTURE.md` lists `_last_queued`, `_reddit_calls_done_at`, `_ingest_running`
-  and `_ingest_unrecorded` as process-local state, with what breaks under several workers.
+- **Docs:** `ARCHITECTURE.md` lists `_last_queued`, `_reddit_calls_done_at`, `_ingest_running`,
+  `_ingest_unrecorded` and `_ingest_finished` as process-local state, with what breaks under several workers.
   `README.md` gains the route in the API table and `refresh.cooldown_seconds` in the runtime
   knobs.
 
 ## Tests
 
-`tests/test_check_now_queue.py`, 46 tests. They use a real `AsyncIOScheduler` started paused and
+`tests/test_check_now_queue.py`, 49 tests (46 in the first commit, 3 added by the review fixes). They use a real `AsyncIOScheduler` started paused and
 installed as the app's scheduler. Where a job has to run, the test awaits `_ingest` itself, the
 way the scheduler would.
 
@@ -71,7 +76,10 @@ way the scheduler would.
   `error_count` 1. `force` queues it, and the run's failure is recorded and backed off as usual. A
   failing feed whose job is already due is queued.
 - Running jobs: a run blocked in its fetch counts as queued and isn't modified, and its success
-  lands after `queued_at`. A run blocked in its og:image pass (with the force cooldown patched to
+  lands after `queued_at`. A run that finishes between the row read and the decision (the test
+  runs the whole `_ingest` inside `AsyncSession.scalars`, after the real SELECT): a failing one
+  comes back `cooling_down` with its job still at the backed-off time, nothing due and
+  `error_count` 1; a successful one comes back `cooling_down` with its job unmoved. A run blocked in its og:image pass (with the force cooldown patched to
   0, so only the run tracking decides) is `cooling_down` and isn't modified. A check made inside
   the success commit is either `cooling_down` or queued with `queued_at <= last_fetch_at`. A
   failed run leaves both counters empty.
@@ -83,7 +91,8 @@ way the scheduler would.
 - Reddit direct mode: one subreddit per call, with the rest `cooling_down` and unmoved, and
   `expected_done_s` 75 + 3 + 20. The next pull takes the next subreddit and reports about 150 + 20
   (it waits behind the first in the token bucket). A subreddit fetched 12 minutes ago (past the
-  cooldown, inside its 15-minute interval) is `cooling_down`. Proxy mode queues every subreddit. A
+  cooldown, inside its 15-minute interval) is `cooling_down`, and so is one fetched 2 minutes ago
+  under `force` (past force's 60 s, inside its interval), with its job unmoved. Proxy mode queues every subreddit. A
   running subreddit counts as queued and doesn't use up the call.
 - Route: every kind in one response, with the exact key set and an aware `queued_at` inside the
   call. `force` defaults to false, and `force: true` is passed through. 422 for 21 ids, an empty
@@ -103,7 +112,8 @@ way the scheduler would.
   `test_ingest_bugfixes.py` and `test_slice27_deferred_perf.py` still match.
 - **Mutation checks.** A script broke each guarded line, ran the named test(s), expected a
   failure, and restored the file. `git diff` was byte-identical before and after (the new test file
-  was intent-to-add, so it was covered too). All 39 mutations were caught:
+  was intent-to-add, so it was covered too). All 39 mutations were caught, and so were the 4
+  added with the review fixes (each restored from a copy of the file and checked with `cmp`):
 
   | Broken line | Failing test |
   |---|---|
@@ -134,9 +144,18 @@ way the scheduler would.
   | no cap; no dedupe | `test_repeated_and_extra_ids_are_taken_once_and_capped` |
   | schema cap 21; empty list allowed; non-strict ids; unbounded ids; non-strict `force`; extra fields allowed | `test_route_refuses_bad_bodies`, `test_the_route_and_the_scheduler_share_the_cap` |
   | route ignores `force` | `test_route_passes_force` |
+  | review fixes: finished-run check removed | `test_a_run_that_fails_during_the_row_read_keeps_its_backoff`, `test_a_run_that_succeeds_during_the_row_read_is_not_fetched_again` |
+  | review fixes: `_ingest_finished` never incremented | the same two |
+  | review fixes: snapshot taken after the row read instead of before it | the same two |
+  | review fixes: `force` lifts the subreddit interval rule again | `test_direct_mode_force_keeps_the_subreddit_interval_rule` |
 
 - **Security review.** `/security-review` couldn't run here (no `origin` remote: `git diff
-  origin/HEAD...` fails), so I went through the Rules checklist by hand:
+  origin/HEAD...` fails). The plan's fallback, and this unit's review step under D32, is one
+  separate security-lens review agent with the Rules security checklist on `git diff main...HEAD`.
+  That review is not done by the implementer: it runs in this workflow's review pass (or as its
+  own agent before merge), and its result replaces this paragraph and goes in the PR body. Until
+  then the security review is **pending**, and the unit doesn't merge. The list below is the
+  implementer's own pass over the checklist, kept as input for that review, not in place of it:
   - The route is on the sources router, inside main.py's `_api_deps` loop and behind
     `_write_deps`. `test_oidc_route_gating.py` probes every route, this one included, and passes.
   - It changes state only through a Pydantic JSON body: strict, bounded ints, at most 20, a strict
@@ -167,9 +186,8 @@ way the scheduler would.
   the spec says.
 - **Subreddits held back by the one-per-call limit are reported as `cooling_down`.** The response
   has no "deferred" list. It is Reddit's call budget that is cooling down, and the next pull takes
-  the next subreddit. `force` doesn't lift the one-per-call limit. It does lift the "fetched within
-  its own interval" rule, because PR9b's Check now on a subreddit polled 5 minutes ago would
-  otherwise never run, and the token bucket still protects Reddit.
+  the next subreddit. `force` lifts neither the one-per-call limit nor the "fetched within its own
+  interval" rule (see Review fixes).
 - **`expected_done_s` includes the token-bucket wait across calls.** Two pulls 5 s apart that
   each queue a subreddit would otherwise both say 95 s, while the second subreddit's call can't
   start until about 150 s. For a single call the number is the spec's.
@@ -217,8 +235,16 @@ way the scheduler would.
   next to it, so a check that saw the run as unrecorded always sees `last_attempt_at >=
   queued_at`. The error path is marked by the wrapper after its commit, which already holds.
 - **PR9b:** `checkNow([id], true)` returns that id in exactly one list. `cooling_down` with
-  `force` means a successful fetch or a check-now queue within the last 60 s, or a run that
-  stamped its result moments ago.
+  `force` means a successful fetch or a check-now queue within the last 60 s, a run that
+  stamped its result moments ago, or a run that finished while the call read the rows. In Reddit
+  direct mode it also means a subreddit fetched within its own refresh interval.
+- **For the plan owner (PR9b, Reddit direct mode):** a forced Check now on a subreddit fetched
+  within its own interval returns `cooling_down`, as the spec's Reddit bullet says, so on a
+  healthy subreddit it mostly reads `cooling_down` until its next scheduled poll. The first commit
+  lifted that rule under `force`. Review found that this undoes `dynamic_reddit`'s 429 skip: a run
+  after a 429 counts as a fetch, and a forced check would spend the one-cycle skip early and bring
+  the next reddit.com call forward. Proxy mode is unaffected. If PR9b needs Check now to fetch a
+  subreddit in direct mode, the plan needs a decision on how it treats a throttled subreddit.
 
 ## Device checks
 
@@ -233,3 +259,37 @@ was added to `docs/DEVICE_CHECKS.md`.
 - After the rebase, full backend pytest on `popping_test` gave **13 failed, 994 passed**. The 13
   diff clean against the DNS-only baseline list. 994 = main's 948 + the 46 new tests here.
   `ruff check --select F` on the changed files is still clean.
+
+## Review fixes
+
+The second commit, "PR6a: review fixes", handles the four confirmed review findings.
+
+- **A run that finished while `queue_check` read the rows could get past the backoff gate**
+  (two findings, the same race). `queue_check` reads the rows across awaits and only then checks
+  the run counters. A failing run could finish in that window: its job was already backed off,
+  both counters were empty again, and the stale row still said `error_count` 0, so the gate let
+  the pull move the job to now. A run that succeeded in the window was fetched again straight
+  away. Fix: `_ingest`'s `finally` now also counts the run in `_ingest_finished`, and
+  `queue_check` snapshots that counter before its first await. A job whose count moved is
+  `cooling_down` (it was checked just now) and isn't moved. Tests:
+  `test_a_run_that_fails_during_the_row_read_keeps_its_backoff` and
+  `test_a_run_that_succeeds_during_the_row_read_is_not_fetched_again`.
+- **`force` lifted the Reddit direct-mode "fetched within its own interval" rule.** The spec gives
+  `force` two exceptions (the backoff gate, and a 60 s cooldown), not this one, and lifting it let a
+  forced check spend `dynamic_reddit`'s one-cycle 429 skip early. Fix: the rule now applies under
+  `force` too, as the spec says. The PR9b tension is recorded under "Open items" for the plan
+  owner. Test: `test_direct_mode_force_keeps_the_subreddit_interval_rule`.
+- **The security review was the implementer's own checklist pass.** No code change. The
+  Verification section now says the required separate security-lens review agent (Rules
+  checklist on `git diff main...HEAD`) is pending, runs in this workflow's review pass or before
+  merge, and that its result replaces the self-check paragraph there and in the PR body. This
+  session had no way to start a separate review agent.
+
+Checks after the fixes:
+
+- Full backend pytest on `popping_test`: **13 failed, 997 passed**. The 13 diff clean against the
+  DNS-only baseline list. 997 = 994 + the 3 new tests.
+- `tests/test_check_now_queue.py` ran 5 times in a row: 49/49 each time.
+- `ruff check --select F` on the changed Python files: clean.
+- Mutation checks for the new lines (4, all caught) are in the table above.
+- No frontend files changed.

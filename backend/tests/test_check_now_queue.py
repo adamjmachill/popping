@@ -50,6 +50,7 @@ async def sched(monkeypatch):
     monkeypatch.setattr(scheduler, "_reddit_calls_done_at", 0.0)
     monkeypatch.setattr(scheduler, "_ingest_running", Counter())
     monkeypatch.setattr(scheduler, "_ingest_unrecorded", Counter())
+    monkeypatch.setattr(scheduler, "_ingest_finished", Counter())
     # Proxy mode unless a test says otherwise, so only the Reddit
     # tests get the direct-mode rules.
     monkeypatch.setattr(settings, "reddit_hydra_url", "http://reddit-proxy.test")
@@ -379,6 +380,78 @@ async def test_a_failed_run_is_cleared_from_the_running_counts(sched, monkeypatc
     assert scheduler._ingest_unrecorded == Counter()
 
 
+def finish_run_during_the_row_read(monkeypatch, plugin) -> dict:
+    """Make ``queue_check``'s row read return a snapshot taken before a
+    whole run of ``plugin``: the run starts and finishes after the
+    SELECT and before ``queue_check`` gets its rows back. Returns a dict
+    that holds the job's ``next_run_time`` as that run left it."""
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    real_scalars = AsyncSession.scalars
+    seen: dict = {}
+
+    async def _scalars(self, statement, *args, **kwargs):
+        result = await real_scalars(self, statement, *args, **kwargs)
+        if not seen:
+            seen["fired"] = True
+            await scheduler._ingest(plugin)
+            seen["next_run"] = scheduler._scheduler.get_job(
+                scheduler._ingest_job_id(plugin)
+            ).next_run_time
+        return result
+
+    monkeypatch.setattr(AsyncSession, "scalars", _scalars)
+    return seen
+
+
+async def test_a_run_that_fails_during_the_row_read_keeps_its_backoff(
+    sched, monkeypatch, no_favicon
+):
+    """The row read sees ``error_count`` 0, but by the time the rows
+    come back the run has failed and backed its job off. The stale row
+    must not let the pull move the job up past that backoff."""
+    async def _failing_fetch(self):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(DynamicRssPlugin, "fetch", _failing_fetch)
+    feed = await add_feed(sched, "cn_fail_in_read", last_fetch_ago_s=3600)
+    plugin = sched.get_job(job_id(feed)).args[0]
+    seen = finish_run_during_the_row_read(monkeypatch, plugin)
+
+    result = await scheduler.queue_check([feed.id])
+
+    assert seen["fired"]
+    assert result["queued_ids"] == []
+    assert result["cooling_down"] == [feed.id]
+    # Left where the failure put it: twice the 1 h interval.
+    assert next_run(sched, feed) == seen["next_run"]
+    assert next_run(sched, feed) - utcnow() > dt.timedelta(hours=1, minutes=55)
+    assert await run_due_jobs(sched) == 0
+    async with SessionLocal() as session:
+        row = await source_row(session, feed.name)
+    assert row.error_count == 1
+    assert row.active is True
+
+
+async def test_a_run_that_succeeds_during_the_row_read_is_not_fetched_again(
+    sched, monkeypatch, offline_ingest
+):
+    async def _empty(self):
+        return []
+
+    monkeypatch.setattr(DynamicRssPlugin, "fetch", _empty)
+    feed = await add_feed(sched, "cn_ok_in_read", last_fetch_ago_s=3600)
+    plugin = sched.get_job(job_id(feed)).args[0]
+    seen = finish_run_during_the_row_read(monkeypatch, plugin)
+
+    result = await scheduler.queue_check([feed.id])
+
+    assert seen["fired"]
+    assert result["queued_ids"] == []
+    assert result["cooling_down"] == [feed.id]
+    assert next_run(sched, feed) == seen["next_run"]
+
+
 # ---------------------------------------------------------------------------
 # Cooldown
 # ---------------------------------------------------------------------------
@@ -554,6 +627,25 @@ async def test_direct_mode_a_subreddit_fetched_within_its_interval_is_cooling_do
 
     assert result["cooling_down"] == [recent.id]
     assert result["queued_ids"] == [older.id]
+
+
+async def test_direct_mode_force_keeps_the_subreddit_interval_rule(sched, direct_reddit):
+    """``force`` shortens the cooldown to 60 s and skips the backoff
+    gate, but a subreddit fetched within its own interval stays
+    ``cooling_down``: a run after a 429 counts as fetched, and moving
+    it up would spend its one-cycle skip early and bring the next real
+    reddit.com call forward."""
+    recent = await add_feed(
+        sched, "cn_sub_forced", type="reddit", url="r/forced",
+        refresh_interval_seconds=900, last_fetch_ago_s=120,
+    )
+    before = next_run(sched, recent)
+
+    result = await scheduler.queue_check([recent.id], force=True)
+
+    assert result["cooling_down"] == [recent.id]
+    assert result["queued_ids"] == []
+    assert next_run(sched, recent) == before
 
 
 async def test_proxy_mode_queues_every_reddit_feed(sched):

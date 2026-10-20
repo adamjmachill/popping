@@ -392,9 +392,15 @@ def _should_retry_favicon(last_fetch_at: dt.datetime | None) -> bool:
 # og:image passes finish. ``queue_check`` reads both: APScheduler drops
 # a run that comes due while one is still executing
 # (``max_instances=1``), so a running job can't be moved up.
+# ``_ingest_finished`` counts the runs that have returned, and is
+# never counted down: ``queue_check`` reads its rows across awaits, so
+# it snapshots this first, and a job whose count moved while it was
+# reading has a run that finished after the row was read (its
+# ``error_count`` and ``last_fetch_at`` may be stale).
 # Process-local (see ARCHITECTURE.md).
 _ingest_running: Counter[str] = Counter()
 _ingest_unrecorded: Counter[str] = Counter()
+_ingest_finished: Counter[str] = Counter()
 
 
 def _count_down(counter: Counter[str], key: str) -> None:
@@ -431,6 +437,7 @@ async def _ingest(plugin_cls: Any) -> dict:
     finally:
         mark_recorded()
         _count_down(_ingest_running, job_id)
+        _ingest_finished[job_id] += 1
 
 
 async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> dict:
@@ -2353,11 +2360,12 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
       with ``force``), either queued here or with a successful fetch
       (``last_fetch_at``) that recent. A run that has recorded its
       result but is still finishing its image passes counts here too.
+      So does a feed whose run finished while its row was being read.
       In Reddit direct mode (one call per 75 s across the process), a
-      subreddit fetched within its own refresh interval, and every
-      subreddit after the first one this call queues: Reddit's call
-      budget is what is cooling down, so the next pull takes the next
-      one.
+      subreddit fetched within its own refresh interval (``force``
+      included), and every subreddit after the first one this call
+      queues: Reddit's call budget is what is cooling down, so the
+      next pull takes the next one.
     - ``backing_off``: without ``force``, a failing feed
       (``error_count > 0``) whose backed-off job isn't due yet. Each
       failure doubles the interval and the sixth disables the feed
@@ -2375,6 +2383,10 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
     from app import reddit_client
 
     wanted = list(dict.fromkeys(ids))[:_CHECK_NOW_MAX_FEEDS]
+    # Taken before the first await: a run that finishes while the rows
+    # below are being read changes its count, and its row may predate
+    # its result.
+    finished_before = Counter(_ingest_finished)
     configured_cooldown = await _refresh_cooldown_seconds()
     cooldown = _FORCE_COOLDOWN_SECONDS if force else configured_cooldown
     rows: dict[int, Source] = {}
@@ -2423,6 +2435,14 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
             # checked just now.
             cooling_down.append(sid)
             continue
+        if _ingest_finished.get(job_id, 0) != finished_before.get(job_id, 0):
+            # A run finished while the row was being read, so the row
+            # can predate its result: a failure's ``error_count`` (its
+            # job already backed off) or a success's ``last_fetch_at``.
+            # It was checked just now; leave the job where that run put
+            # it.
+            cooling_down.append(sid)
+            continue
         last_fetch = row.last_fetch_at
         if last_fetch is not None and last_fetch.tzinfo is None:
             last_fetch = last_fetch.replace(tzinfo=dt.timezone.utc)
@@ -2440,7 +2460,7 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
             fetched_this_interval = (
                 since_fetch is not None and since_fetch < row.refresh_interval_seconds
             )
-            if reddit_moved >= 1 or (not force and fetched_this_interval):
+            if reddit_moved >= 1 or fetched_this_interval:
                 cooling_down.append(sid)
                 continue
         run_at = now + dt.timedelta(seconds=moved * _CHECK_NOW_STAGGER_SECONDS)
