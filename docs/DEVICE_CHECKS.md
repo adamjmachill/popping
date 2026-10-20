@@ -27,6 +27,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #30 · Add a feed with a long back catalogue (a podcast or a blog with 50+ posts) and wait for its first check. Pass: its tab gains at most 10 stories plus any from the last 2 days.
 - [ ] #30 · A day or more after the deploy, open the On This Day tab. Pass: the stories that arrived in the last 24 hours number at most 10 (at most 5 per UTC day, which turns at 5 pm Pacific), and none of them are in For You. Stories fetched before the deploy don't count.
 - [ ] #30 · The day after adding that feed, open Brief. Pass: no highlight is one of the new feed's older stories.
+- [ ] #31 · Pause a feed that has a story in For You, then force-quit and reopen the app and open For You. Pass: none of that feed's stories are in For You (resume the feed afterwards).
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

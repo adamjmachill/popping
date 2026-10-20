@@ -382,50 +382,8 @@ class EntryRedditCommentSummaryOut(BaseModel):
     rate_limited: bool = False
 
 
-class EntryOut(BaseModel):
-    id: int
-    source_id: int
-    title: str
-    url: str
-    published_at: Optional[dt.datetime]
-    # When the row landed in our DB. Distinct from ``published_at``
-    # (when the source article was published) — Wikipedia OTD entries
-    # carry a very old ``published_at`` but a fresh ``fetched_at``.
-    # The frontend uses this to compute "new since last visit" /
-    # read/unread state. Optional for forward-compat with rows written
-    # before the column existed; in practice every row has a value.
-    fetched_at: Optional[dt.datetime] = None
-    composite_score: float
-    personal_score: float
-    raw_score: float
-    # ``= None`` is required for the v2 model_validate path: in v1
-    # ``Optional[dict]`` without a default was implicitly ``None``,
-    # but v2 requires the explicit default. The /api/entries list
-    # endpoint SELECTs ``meta`` (it's a JSONB blob) so the field is
-    # usually populated; the default is the safety net for any
-    # future code path that constructs an EntryOut from a partial
-    # row.
-    meta: Optional[dict] = None
-    # Remote URL of the entry's thumbnail (parsed from the feed).
-    image_url: Optional[str] = None
-    # Local path under /assets, e.g. "thumbnails/1234.jpg".
-    image_path: Optional[str] = None
-    # Joined source name. Populated by endpoints
-    # that JOIN sources for display (e.g. the
-    # by-ids endpoint used by the Settings
-    # overlay's Hidden and Starred tabs). The
-    # list endpoint deliberately omits it —
-    # the dashboard already has a source name
-    # map (sourcesById) so the JOIN would be
-    # redundant bytes on the wire for the
-    # common 200-row list poll.
-    source_name: Optional[str] = None
-
-    model_config = ConfigDict(from_attributes=True)
-
-
 class EntryListOut(BaseModel):
-    """Slim subset of ``EntryOut`` for the list endpoints.
+    """The card shape every list endpoint returns.
 
     The list payload is the dominant bytes-on-wire shape — the
     dashboard polls ``/api/entries`` every 60s and renders up to
@@ -436,9 +394,6 @@ class EntryListOut(BaseModel):
     ``meta`` is fetched on demand by ``POST /api/entries/{id}/summary``
     when the user expands a card. ``embedding`` is server-internal
     and never returned by any list endpoint.
-
-    The full ``EntryOut`` is still used for endpoints that need the
-    meta — the per-card summary endpoint, etc.
 
     ``reddit_thread_url`` + ``reddit_comment_count`` are pulled out of
     ``Entry.meta`` at projection time (``routes/entries.py``) so the
@@ -492,6 +447,21 @@ class EntryListOut(BaseModel):
     story_cluster_id: Optional[int] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class EntryOut(EntryListOut):
+    """A card plus its feed's name, for ``GET /api/entries/by-ids``
+    (Saved, and Settings' Hidden, Starred and Voted lists). Same
+    projection as ``/api/entries`` (``routes.entries._CARD_COLUMNS``),
+    so a story loaded by id renders the same card as one loaded by a
+    tab. The frontend's ``EntryOut`` is ``Entry`` plus
+    ``source_name``, matching this.
+
+    The list endpoint leaves ``source_name`` out: the dashboard
+    already has the feed map, so the JOIN's name would be redundant
+    bytes on every poll.
+    """
+    source_name: str
 
 
 class IngestResult(BaseModel):

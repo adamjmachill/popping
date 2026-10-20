@@ -119,8 +119,9 @@ Only pushes to `main` publish images. PR builds are validation-only and never re
 | `GET  /api/health`                | Liveness + counts                      | public    |
 | `GET  /api/sources`               | Registered sources + last-fetch state  | public    |
 | `GET  /api/sources/{id}`          | One source                             | public    |
-| `GET  /api/entries`               | List entries (`?category=&source=&limit=`) | public |
-| `GET  /api/foryou`                | Personal top-N feed (with convergence boost) | login |
+| `GET  /api/entries`               | List entries (`?category=&source=&limit=`; window: `max_age_hours=`, `per_source_cap=`, `active_only=`). Leaves out your hidden stories, except in search (`q=`) | public |
+| `GET  /api/entries/by-ids`        | Cards for up to 200 ids (`?ids=1,2,3`), same fields as the list plus `source_name` | public |
+| `GET  /api/foryou`                | Personal top-N feed (with convergence boost; `max_age_hours=`). Leaves out paused feeds and your hidden stories | login |
 | `POST /api/ingest/{source_name}`  | Force a fetch now (instead of waiting) | login     |
 | `GET  /auth/login`                | Kick off the OIDC flow (302 to IdP)    | n/a       |
 | `GET  /auth/callback`             | OIDC redirect URI                      | n/a       |

@@ -251,7 +251,7 @@ def _set_key_cap(key: str) -> int | None:
     return SET_KEY_CAPS.get(f"{name}:*" if sep else name)
 
 
-def _is_entry_id(value: object) -> bool:
+def is_entry_id(value: object) -> bool:
     # ``type(...) is int``: a JSON ``true`` decodes to ``bool``, which
     # ``isinstance(..., int)`` would let through.
     return type(value) is int and 1 <= value <= _ID_MAX
@@ -269,7 +269,7 @@ def _coerce_ids(value: object) -> list[int]:
     out: list[int] = []
     present: set[int] = set()
     for item in value:
-        if _is_entry_id(item) and item not in present:
+        if is_entry_id(item) and item not in present:
             out.append(item)
             present.add(item)
     return out
@@ -305,6 +305,25 @@ def _trim_votes(votes: dict[str, str], cap: int) -> dict[str, str]:
         return votes
     keep = set(sorted(votes, key=int)[-cap:])
     return {k: v for k, v in votes.items() if k in keep}
+
+
+async def hidden_entry_ids(session: AsyncSession, user_id: str) -> list[int]:
+    """The caller's hidden entry ids, for the list routes to exclude
+    (``/api/entries`` and ``/api/foryou``).
+
+    The row is client-written JSON, so it is read through the same
+    coercion as PATCH: real ints only (a JSON ``true`` is dropped),
+    1 to 2**63-1, de-duplicated, and the newest ``hidden_entries``
+    cap (1000) by id. A malformed row reads as fewer ids, never as an
+    error, so it can't take down the main feed.
+    """
+    value = await session.scalar(
+        select(UserPreference.value).where(
+            UserPreference.user_id == user_id,
+            UserPreference.key == "hidden_entries",
+        )
+    )
+    return _trim_ids(_coerce_ids(value), SET_KEY_CAPS["hidden_entries"])
 
 
 def _apply_patch(
