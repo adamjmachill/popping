@@ -17,14 +17,18 @@ The scheduler owns:
       preference-vector updates actually reach rows already in the table
       instead of only ever applying at the moment of ingest
     - One-shot embedding backfill for entries with NULL embedding (phase 2)
-    - Source-row bookkeeping (last_fetch_at, last_error, error_count)
+    - Source-row bookkeeping (last_fetch_at, last_error, error_count,
+      and for feed health last_attempt_at, last_item_count,
+      last_new_count)
     - Exponential backoff on consecutive failures (widens the job's own
       interval instead of retrying at full cadence) and a short error
-      category (blocked / not found / upstream error / network) prefixed
-      onto ``last_error`` so the FeedManager tooltip is diagnosable
-      without reading backend logs
+      kind (``ERROR_KINDS``: blocked / not found / network / not a
+      feed / ...) prefixed onto ``last_error`` so the feed's status and
+      its fix are diagnosable without reading backend logs
     - Auto-disabling sources after ``_AUTO_DISABLE_THRESHOLD``
-      consecutive failures (see comment on the constant)
+      consecutive failures (see comment on the constant). Setup states
+      (``SETUP_STATE_KINDS``: no article list, Reddit off) are recorded
+      but never count as failures
     - Periodic purge of expired sessions (DB-backed auth)
     - Daily Brief generation (phase 4)
     - Periodic convergence-check + alert Brief (phase 4)
@@ -57,20 +61,21 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import assets, framing, ingest_rules, runtime_settings
+from app import assets, framing, ingest_rules, reddit_client, runtime_settings
 from app.brief import BriefGenerator
 from app.config import settings
 from app.db import SessionLocal
 from app.embeddings import embedder
 from app.models import AppSetting, Entry, Interaction, NotificationDedup, Source, UserProfile
 from app.notify import Notifier
+from app.reddit_client import RedditDisabledError
 from app.schemas import CHECK_NOW_MAX_IDS
 from app.scoring import composite as composite_scorer
 from app.scoring import convergence as convergence_helper
 from app.scoring import personal as personal_scorer
 from app.scoring import recency
 from app.sources import list_sources
-from app.sources.base import SourcePlugin
+from app.sources.base import NoArticleListError, NotAFeedError, SourcePlugin
 from app.sources.dynamic_reddit import DynamicRedditPlugin
 from app.sources.dynamic_rss import DynamicRssPlugin
 from app.sources.generic_scrape import GenericScrapePlugin
@@ -235,7 +240,9 @@ async def _embed_text(norm: dict) -> list[float] | None:
         return None
 
 
-# Favicon retry gate: at most one attempt per source per hour. Catches
+# Favicon retry gate: at most one attempt per source per hour, measured
+# from the feed's last check of any outcome
+# (``_last_check_of_current_address``). Catches
 # the cold-start-with-unmounted-volume case (asset_dir became writable
 # after the first ingest) without hammering a permanently-broken host
 # (a 403 stays a 403, no amount of retrying helps). One hour is long
@@ -270,16 +277,74 @@ _BACKOFF_MULTIPLIER = 2
 _BACKOFF_MAX_SECONDS = 6 * 3600  # 6h cap regardless of base interval
 
 
-def _classify_error(exc: Exception) -> str:
-    """Short human category prefixed onto ``last_error``.
+def _backoff_seconds(base_seconds: float, error_count: int) -> float:
+    """The interval a feed's job runs at after ``error_count``
+    consecutive failures: its base interval doubled per failure, capped
+    at ``_BACKOFF_MAX_SECONDS``. ``queue_check``'s backoff gate uses
+    the same number, measured from ``last_attempt_at``."""
+    return min(base_seconds * (_BACKOFF_MULTIPLIER ** error_count), _BACKOFF_MAX_SECONDS)
 
-    Doesn't change retry/backoff behavior (that's keyed on the raw
-    consecutive-failure count, not the error kind) — this only makes
-    the FeedManager tooltip say something more useful than a bare
-    exception repr. "blocked" specifically flags the 401/402/403
-    family so a paywall/auth-gate (see rfd.py's Tollbit note) reads
-    as "this endpoint is refusing us" rather than an unexplained
-    error the user has to go dig through logs to understand.
+
+# Every kind ``_classify_error`` can return. A failed or setup-state
+# check writes ``last_error`` as ``[<kind>] <exception>``, and each kind
+# has one fix in the feed list (the frontend's table keys on the
+# bracketed prefix):
+#   blocked         HTTP 401, 402, 403
+#   not found       HTTP 404
+#   upstream error  HTTP 5xx
+#   http error      any other HTTP status, 429 included
+#   network         connect errors and timeouts (there is no separate
+#                   timeout kind)
+#   not a feed      the address answered with something that isn't a
+#                   feed (``NotAFeedError``)
+#   no list         a website feed found no list of articles
+#                   (``NoArticleListError``); a setup state
+#   reddit off      Reddit is off on this server; a setup state
+#   error           anything else
+ERROR_KINDS: tuple[str, ...] = (
+    "blocked",
+    "not found",
+    "upstream error",
+    "http error",
+    "network",
+    "not a feed",
+    "no list",
+    "reddit off",
+    "error",
+)
+
+# Setup states: the feed is set up in a way that can't bring stories
+# (no article list to read, Reddit off on the server), whatever its
+# age. They are recorded (``last_error``, ``last_attempt_at``) but are
+# not failures: they never count toward ``error_count``, never back the
+# job off and never auto-disable the feed, because retrying sooner or
+# later changes nothing and stopping the feed would hide the fix.
+SETUP_STATE_KINDS = frozenset({"no list", "reddit off"})
+
+# Connect errors, read and write errors, timeouts of every stage, and a
+# connection dropped mid-response. ``asyncio.TimeoutError`` covers a
+# plugin's own ``wait_for`` budget.
+_NETWORK_ERRORS: tuple[type[BaseException], ...] = (
+    httpx.TimeoutException,
+    httpx.NetworkError,
+    httpx.RemoteProtocolError,
+    httpx.ProxyError,
+    httpx.TooManyRedirects,
+    asyncio.TimeoutError,
+)
+
+
+def _classify_error(exc: Exception) -> str:
+    """Short kind (``ERROR_KINDS``) prefixed onto ``last_error``.
+
+    Retry/backoff is keyed on the raw consecutive-failure count, not on
+    the kind, except that a setup state (``SETUP_STATE_KINDS``) is not
+    a failure at all (see ``_ingest_once``). The kind tells the feed
+    list which fix to offer. "blocked" specifically flags the
+    401/402/403 family so a paywall/auth-gate (see rfd.py's Tollbit
+    note) reads as "this endpoint is refusing us" rather than an
+    unexplained error the user has to go dig through logs to
+    understand.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         code = exc.response.status_code
@@ -290,8 +355,14 @@ def _classify_error(exc: Exception) -> str:
         if 500 <= code < 600:
             return "upstream error"
         return "http error"
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout, httpx.TooManyRedirects)):
+    if isinstance(exc, _NETWORK_ERRORS):
         return "network"
+    if isinstance(exc, NotAFeedError):
+        return "not a feed"
+    if isinstance(exc, NoArticleListError):
+        return "no list"
+    if isinstance(exc, RedditDisabledError):
+        return "reddit off"
     return "error"
 
 
@@ -374,20 +445,51 @@ async def _is_first_fetch(
     return not has_rows
 
 
-def _should_retry_favicon(last_fetch_at: dt.datetime | None) -> bool:
-    if last_fetch_at is None:
+def _as_utc(value: dt.datetime | None) -> dt.datetime | None:
+    # Timestamps are timezone-aware UTC in practice, but tolerate a
+    # naive value coming from a pre-upgrade DB row.
+    if value is not None and value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value
+
+
+def _last_check_of_current_address(source: Source) -> dt.datetime | None:
+    """When the feed's current address was last checked, whatever the
+    outcome, for the favicon gate.
+
+    ``last_fetch_at`` moves only on a success; ``last_attempt_at`` also
+    moves on a failure or a setup state. Measured from the success
+    alone, a feed that never succeeds would retry its favicon on every
+    tick, and a setup state is never backed off or stopped.
+
+    An address change resets ``last_fetch_at`` and moves the baseline
+    (``created_at``) to the time of the edit (``update_source``), and a
+    new URL also clears the cached favicon. A ``last_attempt_at`` from
+    before the baseline is a check of the old address, so it doesn't
+    hold back the new address's favicon. (The baseline also moves when
+    a first fetch lands, inside the transaction that stamps
+    ``last_attempt_at``, so that stamp is never before it.)"""
+    last_success = _as_utc(source.last_fetch_at)
+    last_attempt = _as_utc(source.last_attempt_at)
+    baseline = _as_utc(source.created_at)
+    if last_attempt is None or (baseline is not None and last_attempt < baseline):
+        return last_success
+    if last_success is None or last_attempt > last_success:
+        return last_attempt
+    return last_success
+
+
+def _should_retry_favicon(last_check_at: dt.datetime | None) -> bool:
+    last_check_at = _as_utc(last_check_at)
+    if last_check_at is None:
         return True
-    # ``last_fetch_at`` is timezone-aware UTC in practice, but tolerate
-    # a naive value coming from a pre-upgrade DB row.
-    if last_fetch_at.tzinfo is None:
-        last_fetch_at = last_fetch_at.replace(tzinfo=dt.timezone.utc)
-    return (dt.datetime.now(dt.timezone.utc) - last_fetch_at) >= _FAVICON_RETRY_INTERVAL
+    return (dt.datetime.now(dt.timezone.utc) - last_check_at) >= _FAVICON_RETRY_INTERVAL
 
 
 # Ingest runs in progress, by job id (``_ingest_job_id``).
 # ``_ingest_running`` counts runs until they return.
 # ``_ingest_unrecorded`` counts the runs that haven't yet stamped their
-# result (``last_fetch_at``, or ``last_error`` on a failure); a run
+# result (``last_attempt_at``, see ``_stamp_attempt``); a run
 # stays in ``_ingest_running`` after that while its thumbnail and
 # og:image passes finish. ``queue_check`` reads both: APScheduler drops
 # a run that comes due while one is still executing
@@ -407,6 +509,25 @@ def _count_down(counter: Counter[str], key: str) -> None:
     counter[key] -= 1
     if counter[key] <= 0:
         del counter[key]
+
+
+def _stamp_attempt(source: Source, mark_recorded: Callable[[], None]) -> dt.datetime:
+    """Record when this run's check finished (``last_attempt_at``).
+
+    The one place the stamp is written. Every path that records an
+    outcome (success, failure, setup state) calls it inside the
+    transaction that writes that outcome, so the outcome and its time
+    land together. Paths that record nothing (deleted, paused, an
+    address changed mid-fetch) don't stamp.
+
+    The run is marked recorded first: a ``queue_check`` that still saw
+    it as unrecorded (and so reported it queued) took its ``queued_at``
+    before this stamp, so its caller sees ``last_attempt_at >=
+    queued_at`` and knows the check landed. Returns the stamp."""
+    mark_recorded()
+    at = dt.datetime.now(dt.timezone.utc)
+    source.last_attempt_at = at
+    return at
 
 
 async def _ingest(plugin_cls: Any) -> dict:
@@ -441,11 +562,14 @@ async def _ingest(plugin_cls: Any) -> dict:
 
 
 async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> dict:
-    """One ingest run (see ``_ingest``). A successful run calls
-    ``mark_recorded`` just before it stamps ``last_fetch_at``, so its
-    image passes run after it. Every other path returns soon after its
-    last write (a failure right after recording its error), and
-    ``_ingest`` marks it then."""
+    """One ingest run (see ``_ingest``). A run that records an outcome
+    (a success, a failure or a setup state) calls ``mark_recorded``
+    through ``_stamp_attempt`` just before it stamps
+    ``last_attempt_at``, so a success's image passes run after it.
+    Every other path (deleted, paused, re-pointed mid-fetch) writes
+    nothing and returns, and ``_ingest`` marks it then.
+
+    A paused feed's summary carries ``status: "paused"``."""
     summary = {
         "source": plugin_cls.name,
         "fetched": 0,
@@ -488,30 +612,32 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
     # image-less entries doesn't double the concurrency of the first
     # pass.
     og_image_jobs: list[tuple[int, str]] = []
+    # Decide whether to fetch the favicon BEFORE opening the long
+    # ingest transaction. ``fetch_favicon`` makes two network
+    # round-trips (HTML probe + icon download, each up to 10s) —
+    # running them inside the session would hold an idle DB
+    # transaction for ~20s per source on every retry, starving the
+    # pool. We snapshot the upserted source's id/url/state, close
+    # the session, run the network work, and re-open the session
+    # only to persist the result. Set before the ``try`` because the
+    # failure path below reads them too.
+    source_id: int | None = None
+    source_url: str | None = None
+    # What the plugin is about to fetch: the feed's URL, sitemap
+    # URL and link pattern. If the row no longer has that address
+    # when the batch (or the failure) is recorded, it came from the
+    # old address and is discarded (see the commit session and the
+    # failure path below). A row-driven plugin carries the address it
+    # was built from (``SourcePlugin.fetch_target``): its job keeps
+    # that instance until ``update_source`` replaces it after an
+    # edit's commit, so the row read below can already hold the new
+    # address while this instance still fetches the old one. A
+    # class-driven built-in's address can't be edited, so its row is
+    # the snapshot.
+    fetch_target: tuple[str | None, ...] | None = getattr(plugin, "fetch_target", None)
     try:
-        # Decide whether to fetch the favicon BEFORE opening the long
-        # ingest transaction. ``fetch_favicon`` makes two network
-        # round-trips (HTML probe + icon download, each up to 10s) —
-        # running them inside the session would hold an idle DB
-        # transaction for ~20s per source on every retry, starving the
-        # pool. We snapshot the upserted source's id/url/state, close
-        # the session, run the network work, and re-open the session
-        # only to persist the result.
-        source_id: int | None = None
-        source_url: str | None = None
-        # What the plugin is about to fetch: the feed's URL, sitemap
-        # URL and link pattern. If the row no longer has that address
-        # when the batch is committed, the batch came from the old
-        # address and is discarded (see the commit session below).
-        # A row-driven plugin carries the address it was built from
-        # (``SourcePlugin.fetch_target``): its job keeps that instance
-        # until ``update_source`` replaces it after an edit's commit,
-        # so the row read below can already hold the new address while
-        # this instance still fetches the old one. A class-driven
-        # built-in's address can't be edited, so its row is the
-        # snapshot.
-        fetch_target: tuple[str | None, ...] | None = getattr(plugin, "fetch_target", None)
         needs_favicon = False
+        reddit_off = False
         async with SessionLocal() as session:
             source = await _upsert_source(session, plugin_cls)
             if source is None:
@@ -524,9 +650,15 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             source_url = source.url
             if fetch_target is None:
                 fetch_target = (source.url, source.sitemap_url, source.link_pattern)
+            # Only subreddit feeds depend on the server's Reddit setting
+            # (``is_disabled`` is global). Read here so a Reddit-off feed
+            # doesn't ask reddit.com for its favicon either; raised
+            # below, after the paused check.
+            reddit_off = source.type == "reddit" and reddit_client.is_disabled()
             needs_favicon = (
                 source.favicon_url is None
-                and _should_retry_favicon(source.last_fetch_at)
+                and not reddit_off
+                and _should_retry_favicon(_last_check_of_current_address(source))
             )
 
         if needs_favicon and source_id is not None and source_url:
@@ -559,7 +691,16 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             # flag back and the next tick lands entries again.
             if not source.active:
                 logger.debug("ingest: %s paused — skipping", source.name)
+                summary["status"] = "paused"
                 return summary
+
+        # Raised before the fetch (``reddit_off`` is read above), so the
+        # failure path records it as the ``[reddit off]`` setup state
+        # instead of a silently empty success.
+        if reddit_off:
+            raise RedditDisabledError(
+                "Reddit isn't set up on this server (no proxy, and direct mode is off)"
+            )
 
         # Network fetch with no DB session open: some plugins (podcasts,
         # generic scrape) take minutes, and an idle transaction for that
@@ -716,14 +857,18 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 # still gets a first fetch when it finally works.
                 source.created_at = func.now()
             was_backed_off = (source.error_count or 0) > 0
-            # Marked before the timestamp is taken: a ``queue_check``
-            # that still saw this run as unrecorded has a
-            # ``queued_at`` at or before this ``last_fetch_at``, so its
-            # caller sees the check land.
-            mark_recorded()
-            source.last_fetch_at = dt.datetime.now(dt.timezone.utc)
+            # Marked before the timestamp is taken (``_stamp_attempt``):
+            # a ``queue_check`` that still saw this run as unrecorded
+            # has a ``queued_at`` at or before this stamp, so its caller
+            # sees the check land. On a success the two stamps are the
+            # same instant.
+            source.last_fetch_at = _stamp_attempt(source, mark_recorded)
             source.last_error = None
             source.error_count = 0
+            # How many items the feed listed, before the ingest rules
+            # cut them, and how many of them were new stories.
+            source.last_item_count = summary["fetched"]
+            source.last_new_count = summary["inserted"]
             await session.commit()
             if was_backed_off:
                 # Recovering from a failure streak — restore the
@@ -744,7 +889,13 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 for row in rows:
                     newly_inserted.append((row, source))
     except Exception as exc:
-        logger.exception("ingest failed for %s", plugin_cls.name)
+        category = _classify_error(exc)
+        # A setup state isn't a failure (``SETUP_STATE_KINDS``): no
+        # traceback (it is logged below, once the row says whether the
+        # feed just entered it), and none of the failure bookkeeping.
+        setup_state = category in SETUP_STATE_KINDS
+        if not setup_state:
+            logger.exception("ingest failed for %s", plugin_cls.name)
         # Strip newlines (multi-line traceback in a tooltip is
         # unreadable) and cap at 200 chars (native HTML ``title=``
         # balloons truncate past ~400 chars anyway, and the full
@@ -755,51 +906,89 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
         exc_type = type(exc).__name__
         msg = str(exc).strip()
         msg = msg.splitlines()[0][:200] if msg else ""
-        category = _classify_error(exc)
         detail = f"{exc_type}: {msg}" if msg else exc_type
         summary["error"] = f"[{category}] {detail}"
         try:
             async with SessionLocal() as session:
-                source = await session.scalar(
-                    select(Source).where(Source.name == plugin_cls.name)
-                )
+                if source_id is not None:
+                    # The same row lock as the commit session, so an
+                    # address change either lands first (and the check
+                    # below drops this result) or waits for this commit.
+                    source = await session.get(
+                        Source,
+                        source_id,
+                        with_for_update={"key_share": True},
+                        populate_existing=True,
+                    )
+                else:
+                    # Failed before the row was read (the upsert itself).
+                    source = await session.scalar(
+                        select(Source).where(Source.name == plugin_cls.name)
+                    )
+                if (
+                    source is not None
+                    and fetch_target is not None
+                    and (source.url, source.sitemap_url, source.link_pattern) != fetch_target
+                ):
+                    # The error came from an address the feed no longer
+                    # has. Recording it would count a failure (and back
+                    # off the job) against the new address, and its
+                    # ``last_attempt_at`` would tell a Check now waiting
+                    # on the new address that it had been checked.
+                    logger.info(
+                        "ingest: %s changed address during the fetch — not recording its error",
+                        plugin_cls.name,
+                    )
+                    source = None
                 if source is not None:
+                    if setup_state:
+                        # One INFO line when the feed enters the state,
+                        # DEBUG while it stays: a server with Reddit off
+                        # would otherwise log every subreddit every tick.
+                        entering = not (source.last_error or "").startswith(f"[{category}]")
+                        logger.log(
+                            logging.INFO if entering else logging.DEBUG,
+                            "ingest: %s can't bring stories [%s]: %s",
+                            plugin_cls.name, category, detail,
+                        )
                     source.last_error = summary["error"]
-                    source.error_count = (source.error_count or 0) + 1
-                    # Auto-disable after _AUTO_DISABLE_THRESHOLD consecutive
-                    # failures. The next ingest pass sees ``active=False``
-                    # and skips (line ~206), so a permanently-broken feed
-                    # stops hammering the host AND stops accumulating log
-                    # noise within one failure-cycle. The user reactivates
-                    # via FeedManager (which resets error_count, so a
-                    # manual retry starts from zero rather than being
-                    # immediately re-disabled).
-                    #
-                    # Log at WARNING so the auto-disable is visible in
-                    # ``docker compose logs backend`` even when the user
-                    # only has INFO-level logs configured.
-                    if (
-                        source.active
-                        and source.error_count >= _AUTO_DISABLE_THRESHOLD
-                    ):
-                        source.active = False
-                        logger.warning(
-                            "scheduler: auto-disabling source %s after %d consecutive failures (last_error=%r)",
-                            plugin_cls.name,
-                            source.error_count,
-                            source.last_error,
-                        )
-                    elif source.active:
-                        # Back off instead of retrying at full cadence —
-                        # see _BACKOFF_MULTIPLIER's comment. Skipped once
-                        # auto-disabled above (a disabled source doesn't
-                        # tick at all, so there's nothing to reschedule).
-                        backoff_seconds = min(
-                            plugin_cls.refresh_interval_seconds
-                            * (_BACKOFF_MULTIPLIER ** source.error_count),
-                            _BACKOFF_MAX_SECONDS,
-                        )
-                        _reschedule_ingest_job(plugin_cls, backoff_seconds)
+                    # A setup state skips all of this: ``error_count``,
+                    # the job's interval and ``active`` stay as they were.
+                    if not setup_state:
+                        source.error_count = (source.error_count or 0) + 1
+                        # Auto-disable after _AUTO_DISABLE_THRESHOLD consecutive
+                        # failures. The next ingest pass sees ``active=False``
+                        # and skips (line ~206), so a permanently-broken feed
+                        # stops hammering the host AND stops accumulating log
+                        # noise within one failure-cycle. The user reactivates
+                        # via FeedManager (which resets error_count, so a
+                        # manual retry starts from zero rather than being
+                        # immediately re-disabled).
+                        #
+                        # Log at WARNING so the auto-disable is visible in
+                        # ``docker compose logs backend`` even when the user
+                        # only has INFO-level logs configured.
+                        if (
+                            source.active
+                            and source.error_count >= _AUTO_DISABLE_THRESHOLD
+                        ):
+                            source.active = False
+                            logger.warning(
+                                "scheduler: auto-disabling source %s after %d consecutive failures (last_error=%r)",
+                                plugin_cls.name,
+                                source.error_count,
+                                source.last_error,
+                            )
+                        elif source.active:
+                            # Back off instead of retrying at full cadence —
+                            # see _BACKOFF_MULTIPLIER's comment. Skipped once
+                            # auto-disabled above (a disabled source doesn't
+                            # tick at all, so there's nothing to reschedule).
+                            _reschedule_ingest_job(
+                                plugin_cls,
+                                _backoff_seconds(plugin_cls.refresh_interval_seconds, source.error_count),
+                            )
+                    _stamp_attempt(source, mark_recorded)
                     await session.commit()
         except Exception:
             logger.exception("could not record error for %s", plugin_cls.name)
@@ -2241,9 +2430,13 @@ async def trigger_now(plugin_name: str) -> dict:
     (``bbc_news``, ``hn_top``, etc.) and dynamic ``Source`` row names
     (anything the user has added via Add custom or Track anyway).
     The class-driven path is the fast one — it goes through the
-    in-memory registry. The dynamic path opens a DB session and
-    dispatches via ``_plugin_for(row)`` so the same code path the
-    scheduled tick uses also runs for the manual fetch.
+    in-memory registry. The dynamic path opens a DB session and runs
+    the plugin instance the row's scheduler job holds, so the manual
+    fetch is the scheduled tick's own: the same in-flight address
+    (``fetch_target``) and the same per-instance state, such as a
+    website feed's ``_extracted_urls``, which a fresh instance would
+    lose (and re-extract every page). ``_plugin_for(row)`` builds one
+    only when there is no job (a paused feed, or no scheduler).
 
     Returns a small summary dict; ``error`` is set on the
     unknown-source case.
@@ -2263,7 +2456,13 @@ async def trigger_now(plugin_name: str) -> dict:
         row = await session.scalar(select(Source).where(Source.name == plugin_name))
     if row is None:
         return {"source": plugin_name, "error": "unknown source", "fetched": 0, "inserted": 0, "duplicates": 0}
-    plugin = _plugin_for(row)
+    plugin = None
+    if _scheduler is not None:
+        job = _scheduler.get_job(_dynamic_job_id(row.id))
+        if job is not None and job.args and isinstance(job.args[0], SourcePlugin):
+            plugin = job.args[0]
+    if plugin is None:
+        plugin = _plugin_for(row)
     if plugin is None:
         # The row exists but its ``type`` doesn't map to a dynamic
         # plugin class — should not happen since ``add_source``
@@ -2367,20 +2566,23 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
       queues: Reddit's call budget is what is cooling down, so the
       next pull takes the next one.
     - ``backing_off``: without ``force``, a failing feed
-      (``error_count > 0``) whose backed-off job isn't due yet. Each
-      failure doubles the interval and the sixth disables the feed
-      (``_AUTO_DISABLE_THRESHOLD``), so pulling every few minutes
-      must not run it early.
+      (``error_count > 0``) whose job isn't due yet and whose backoff
+      (``_backoff_seconds``) hasn't run out since its last check
+      (``last_attempt_at``). Each failure doubles the interval and the
+      sixth disables the feed (``_AUTO_DISABLE_THRESHOLD``), so pulling
+      every few minutes must not run it early. Measured from
+      ``last_attempt_at`` rather than from the job, because a restart
+      registers jobs at their base interval and forgets the backoff. A
+      row checked before migration 0031 has no ``last_attempt_at``: its
+      job's ``next_run_time`` decides.
 
     ``queued_at`` is the server's clock before any job moved. A queued
-    feed is done once its ``last_fetch_at`` is at or after it, or its
-    ``last_error`` changes. A failure that repeats the same
-    ``last_error`` can't be told from no run yet: no column records
-    when a failed run happened. ``expected_done_s`` estimates when the
-    last one finishes, Reddit's token bucket included.
+    feed is done once its ``last_attempt_at`` is at or after it,
+    whatever the check found (a success also moves ``last_fetch_at``).
+    ``expected_done_s`` estimates when the last one finishes, Reddit's
+    token bucket included.
     """
     global _reddit_calls_done_at
-    from app import reddit_client
 
     wanted = list(dict.fromkeys(ids))[:_CHECK_NOW_MAX_FEEDS]
     # Taken before the first await: a run that finishes while the rows
@@ -2394,7 +2596,7 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
         async with SessionLocal() as session:
             found = await session.scalars(select(Source).where(Source.id.in_(wanted)))
             rows = {row.id: row for row in found.all()}
-    registered = set(list_sources())
+    registered = list_sources()
     reddit_direct = reddit_client.is_direct_mode()
     reddit_call_seconds = reddit_client.direct_call_interval_seconds()
 
@@ -2454,8 +2656,24 @@ async def queue_check(ids: Sequence[int], force: bool = False) -> dict:
             cooling_down.append(sid)
             continue
         if not force and (row.error_count or 0) > 0 and job.next_run_time > now:
-            backing_off.append(sid)
-            continue
+            # The job's backed-off interval comes from the plugin: a
+            # built-in's class, or the row a dynamic plugin was built
+            # from.
+            plugin_cls = registered.get(row.name)
+            base = (
+                plugin_cls.refresh_interval_seconds
+                if plugin_cls is not None
+                else row.refresh_interval_seconds
+            )
+            last_attempt = row.last_attempt_at
+            if last_attempt is not None and last_attempt.tzinfo is None:
+                last_attempt = last_attempt.replace(tzinfo=dt.timezone.utc)
+            in_backoff = last_attempt is None or now < last_attempt + dt.timedelta(
+                seconds=_backoff_seconds(base, row.error_count)
+            )
+            if in_backoff:
+                backing_off.append(sid)
+                continue
         if is_reddit:
             fetched_this_interval = (
                 since_fetch is not None and since_fetch < row.refresh_interval_seconds

@@ -227,6 +227,8 @@ async def test_force_still_queues_a_backing_off_feed(sched, monkeypatch, no_favi
     async with SessionLocal() as session:
         row = await source_row(session, feed.name)
     assert row.error_count == 2
+    # A failure is stamped too, so the caller sees this check land.
+    assert row.last_attempt_at >= result["queued_at"]
     # error_count 2: four times the 1 h interval.
     assert next_run(sched, feed) - utcnow() > dt.timedelta(hours=3, minutes=55)
 
@@ -237,6 +239,85 @@ async def test_a_failing_feed_whose_job_is_due_is_queued(sched):
     result = await scheduler.queue_check([feed.id])
 
     assert result["queued_ids"] == [feed.id]
+
+
+async def set_last_attempt(row: Source, ago_s: float | None) -> None:
+    async with SessionLocal() as session:
+        await session.execute(
+            update(Source)
+            .where(Source.id == row.id)
+            .values(last_attempt_at=None if ago_s is None else utcnow() - dt.timedelta(seconds=ago_s))
+        )
+        await session.commit()
+
+
+async def test_the_gate_measures_the_backoff_from_the_last_attempt(sched):
+    # One failure half an hour ago on a 1 h feed: backed off for 2 h.
+    feed = await add_feed(sched, "cn_gate_inside", error_count=1, due_in_s=90 * 60)
+    await set_last_attempt(feed, 30 * 60)
+
+    result = await scheduler.queue_check([feed.id])
+
+    assert result["backing_off"] == [feed.id]
+    assert next_run(sched, feed) - utcnow() > dt.timedelta(minutes=85)
+
+
+async def test_a_backoff_that_ran_out_before_a_restart_is_queued(sched):
+    """A restart registers every job at its base interval (staggered),
+    so the job alone can't say whether the backoff is over. Three hours
+    after a failure that backed the feed off for 2 h, the job sits 50
+    minutes out: the feed is due, and the pull moves it up."""
+    feed = await add_feed(sched, "cn_gate_restart", error_count=1, due_in_s=50 * 60)
+    await set_last_attempt(feed, 3 * 3600)
+
+    result = await scheduler.queue_check([feed.id])
+
+    assert result["queued_ids"] == [feed.id]
+    assert result["backing_off"] == []
+    assert next_run(sched, feed) <= utcnow()
+
+
+async def test_a_row_from_before_0031_falls_back_to_the_job(sched):
+    # No ``last_attempt_at`` yet: the job's next run decides.
+    feed = await add_feed(sched, "cn_gate_legacy", error_count=1, due_in_s=50 * 60)
+    await set_last_attempt(feed, None)
+
+    result = await scheduler.queue_check([feed.id])
+
+    assert result["backing_off"] == [feed.id]
+
+
+async def test_the_gate_uses_a_built_ins_class_interval(sched, monkeypatch):
+    """A built-in's job runs at its class interval (here 5 min, backed
+    off to 10 after one failure), whatever the row's
+    ``refresh_interval_seconds`` says (here 1 h, which would back off
+    to 2 h)."""
+    from ingest_harness import make_plugin
+
+    plugin = make_plugin("cn_gate_builtin")
+    plugin.refresh_interval_seconds = 300
+    monkeypatch.setattr(scheduler, "list_sources", lambda: {"cn_gate_builtin": plugin})
+    async with SessionLocal() as session:
+        row = await make_source(session, "cn_gate_builtin", error_count=1, refresh_interval_seconds=3600)
+    sched.add_job(
+        scheduler._ingest,
+        args=[plugin],
+        id="ingest:cn_gate_builtin",
+        trigger="interval",
+        seconds=300,
+        next_run_time=utcnow() + dt.timedelta(minutes=4),
+    )
+    await set_last_attempt(row, 15 * 60)
+
+    result = await scheduler.queue_check([row.id])
+
+    assert result["queued_ids"] == [row.id]
+
+    # Five minutes after the failure it is still inside its 10 minutes.
+    scheduler._last_queued.clear()
+    sched.modify_job("ingest:cn_gate_builtin", next_run_time=utcnow() + dt.timedelta(minutes=4))
+    await set_last_attempt(row, 5 * 60)
+    assert (await scheduler.queue_check([row.id]))["backing_off"] == [row.id]
 
 
 # ---------------------------------------------------------------------------
@@ -274,11 +355,12 @@ async def test_a_running_job_counts_as_queued_and_is_not_modified(
         await asyncio.wait_for(run, 5)
     assert scheduler._ingest_running == Counter()
     assert scheduler._ingest_unrecorded == Counter()
-    # Its success landed after ``queued_at``, which is how the caller
+    # Its check landed after ``queued_at``, which is how the caller
     # tells it is done.
     async with SessionLocal() as session:
         row = await source_row(session, feed.name)
-    assert row.last_fetch_at >= result["queued_at"]
+    assert row.last_attempt_at >= result["queued_at"]
+    assert row.last_fetch_at == row.last_attempt_at
 
 
 async def test_a_run_that_recorded_its_result_counts_as_checked(
@@ -361,6 +443,53 @@ async def test_a_check_during_the_success_commit_still_sees_it_land(
         row = await source_row(session, feed.name)
     if feed.id in result["queued_ids"]:
         assert row.last_fetch_at >= result["queued_at"]
+        assert row.last_attempt_at == row.last_fetch_at
+    else:
+        assert result["cooling_down"] == [feed.id]
+
+
+async def test_a_check_during_the_failure_commit_still_sees_it_land(
+    sched, monkeypatch, no_favicon
+):
+    """The same for a failure: it is marked recorded before it stamps
+    ``last_attempt_at``, so a check that lands while the failure commit
+    is in flight either sees the stamp at or after its ``queued_at`` or
+    reports the feed as just checked."""
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async def _failing_fetch(self):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(DynamicRssPlugin, "fetch", _failing_fetch)
+    monkeypatch.setattr(scheduler, "_FORCE_COOLDOWN_SECONDS", 0)
+    feed = await add_feed(sched, "cn_fail_commit_race")
+    plugin = sched.get_job(job_id(feed)).args[0]
+    during: list[dict] = []
+    real_commit = AsyncSession.commit
+
+    async def _commit(self):
+        stamping = any(
+            isinstance(obj, Source)
+            and obj.id == feed.id
+            and sa_inspect(obj).attrs.last_attempt_at.history.has_changes()
+            for obj in self.dirty
+        )
+        if stamping and not during:
+            during.append(await scheduler.queue_check([feed.id], force=True))
+        return await real_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", _commit)
+    summary = await scheduler._ingest(plugin)
+
+    assert summary["error"].startswith("[network]")
+    assert len(during) == 1
+    result = during[0]
+    async with SessionLocal() as session:
+        row = await source_row(session, feed.name)
+    assert row.error_count == 1
+    if feed.id in result["queued_ids"]:
+        assert row.last_attempt_at >= result["queued_at"]
     else:
         assert result["cooling_down"] == [feed.id]
 

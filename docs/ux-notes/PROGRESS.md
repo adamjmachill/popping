@@ -31,9 +31,9 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR7b Tab ⋯ sheet and empty states | F | not started | |
 | PR8a Custom tabs | F | not started | |
 | PR8b Remove chips, presets and the old Sources UI | F | not started | |
-| PR9a Migration 0031 and feed health backend | B | in progress (owner merges) | |
+| PR9a Migration 0031 and feed health backend | B | in review | #35 |
 | PR9b Feed health UI | F | not started | |
-| PR10a article_detect library | B | in review | #34 |
+| PR10a article_detect library | B | merged | #34 |
 | PR10b Website crawl wiring and errors | B | not started (merges after the owner's VPS probe) | |
 | PR11a Preview endpoint, browser headers, PATCH type | B | not started | |
 | PR11b Add flow and 409 | F | not started | |
@@ -42,3 +42,9 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR12b Copy sweep | F | not started | |
 
 Work in progress is pushed to `claude/ux-<unit>` branches as it goes.
+
+## Owner decisions after the plan (2026-10-20)
+
+- Claude merges PR9a and PR10b once CI is green and the unit's review step has passed; the owner no longer holds those merges. PR10b's read-only probe of the live website feeds moves to `docs/DEVICE_CHECKS.md`, to run after deploying.
+- The device gates don't hold frontend merges. Their checks stay in `docs/DEVICE_CHECKS.md` for the owner to run after deploying, and any `fail:` becomes a fix unit.
+- PR2c still merges only after both devices run the PR2b build (`popping-update`, then relaunch each device), because merging it earlier makes old app copies fail to save.

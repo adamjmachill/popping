@@ -273,6 +273,13 @@ def is_disabled() -> bool:
     )
 
 
+class RedditDisabledError(Exception):
+    """A subreddit feed was due while Reddit is off on this server
+    (``is_disabled()``). The scheduler raises it before fetching and
+    records ``[reddit off]``: a setup state, not a failure, so the
+    feed is never backed off or stopped for it."""
+
+
 def is_direct_mode() -> bool:
     """True when Reddit calls go straight to reddit.com through the
     per-process token bucket (no proxy URL, direct mode not disabled),

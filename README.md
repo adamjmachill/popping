@@ -117,8 +117,8 @@ Only pushes to `main` publish images. PR builds are validation-only and never re
 | Endpoint                          | Purpose                                | Auth      |
 | --------------------------------- | -------------------------------------- | --------- |
 | `GET  /api/health`                | Liveness + counts                      | public    |
-| `GET  /api/sources`               | Registered sources + last-fetch state  | public    |
-| `GET  /api/sources/{id}`          | One source                             | public    |
+| `GET  /api/sources`               | Registered sources + last-fetch state and feed health (see [Feed health](#feed-health)) | public |
+| `GET  /api/sources/{id}`          | One source, with the same health fields | public    |
 | `GET  /api/entries`               | List entries (`?category=&source=&limit=`; window: `max_age_hours=`, `per_source_cap=`, `active_only=`). Leaves out your hidden stories, except in search (`q=`) | public |
 | `GET  /api/entries/by-ids`        | Cards for up to 200 ids (`?ids=1,2,3`), same fields as the list plus `source_name` | public |
 | `GET  /api/foryou`                | Personal top-N feed (with convergence boost; `max_age_hours=`). Leaves out paused feeds and your hidden stories | login |
@@ -404,6 +404,42 @@ sensitive), ESPN (sport-specific endpoints), Reddit / Mastodon
 (privacy-policy noise), Podcast Index and Keepa (API keys +
 tier-specific endpoints).
 
+### Feed health
+
+Every source the API returns (the list, `GET /api/sources/{id}`, and
+the rows that POST, PATCH and `/auto` send back) says whether the feed
+is pulling:
+
+| Field | Meaning |
+| --- | --- |
+| `last_attempt_at` | When the last check finished, whatever it found. Null until the feed's first check after migration 0031 |
+| `last_fetch_at` | When the last successful check finished |
+| `last_error` | What went wrong, as `[<kind>] <detail>` (below); null after a success |
+| `error_count` | Failures in a row. Each doubles the check interval (at most 6 h), and the sixth stops the feed (`active` false) |
+| `last_item_count`, `last_new_count` | The last successful check: items the feed listed (before the ingest rules cut them) and new stories stored |
+| `stories_24h`, `stories_7d` | Stories that arrived in the last 24 hours and 7 days |
+| `newest_story_at` | The newest arrival in the last 7 days (null when nothing arrived this week) |
+| `has_stories` | Whether the feed has ever stored a story |
+
+`last_error` kinds:
+
+| Kind | Comes from |
+| --- | --- |
+| `[blocked]` | HTTP 401, 402, 403 |
+| `[not found]` | HTTP 404 |
+| `[upstream error]` | HTTP 5xx |
+| `[http error]` | Any other HTTP error, 429 included |
+| `[network]` | Connect errors and timeouts |
+| `[not a feed]` | The address answered with something that isn't a feed (a web page, JSON, an empty body) |
+| `[no list]` | A website feed found no list of articles |
+| `[reddit off]` | A subreddit feed while Reddit is off on the server (no proxy, direct mode disabled) |
+| `[error]` | Anything else |
+
+`[no list]` and `[reddit off]` are setup states, not failures: they
+never count toward `error_count`, never slow the feed's checks and
+never stop it. A paused feed isn't checked; `POST /api/ingest/{name}`
+answers `"status": "paused"` for one.
+
 ### Adding a YouTube channel
 
 Settings → Feeds → Add, then either paste the link, `@handle` or
@@ -458,6 +494,12 @@ go).
            # Return [{title, url, published_at, ...extras}, ...]
            ...
    ```
+
+   Return `[]` only when there is nothing new. When the fetch fails,
+   let the error raise (an `httpx` error, or `NotAFeedError` from
+   `app.sources.base`): the scheduler records its kind on the feed
+   (see [Feed health](#feed-health)), where an empty list would look
+   like a quiet feed.
 
 2. Add the import to the bottom of `backend/app/sources/__init__.py`:
 
