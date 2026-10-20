@@ -34,11 +34,13 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.deps import current_user
+from app.auth.deps import current_user, resolve_user_id
 from app.brief import _HISTORICAL_SOURCE_SLUGS
 from app.config import settings
 from app.db import get_session
 from app.models import Entry, Source
+from app.routes.entries import not_hidden, window_start
+from app.routes.preferences import hidden_entry_ids
 from app.schemas import EntryListOut
 from app.scoring import composite as composite_scorer
 from app.scoring import convergence
@@ -52,6 +54,12 @@ async def foryou(
     user: dict | None = Depends(current_user),
     limit: int = Query(default=50, ge=1, le=200),
     category: str | None = Query(default=None, description="Filter by source category"),
+    max_age_hours: int | None = Query(
+        default=None,
+        ge=1,
+        le=8760,
+        description="Only stories that arrived (fetched_at) in the last N hours.",
+    ),
 ) -> list[EntryListOut]:
     """Top-N personal feed.
 
@@ -61,6 +69,9 @@ async def foryou(
          still have room to climb into the result.
       2. Apply the convergence multiplier to the stored composite_score.
       3. Re-sort and trim to ``limit``.
+
+    Paused feeds and the caller's hidden stories are always left out,
+    before the over-fetch, so they never use up candidate slots.
     """
     over_fetch = min(max(limit * 4, 200), 500)
     # Slim SELECT: we project only the columns the frontend renders plus
@@ -108,11 +119,22 @@ async def foryou(
         # On this day stays in its own tab: its stories are history,
         # not today's news, the same reason the brief leaves them out.
         .where(Source.name.notin_(_HISTORICAL_SOURCE_SLUGS))
+        # For You never wants a paused feed. Unconditional rather than
+        # an opt-in parameter, so bundles that predate the window get
+        # it too.
+        .where(Source.active.is_(True))
         .order_by(Entry.composite_score.desc(), Entry.published_at.desc().nullslast())
         .limit(over_fetch)
     )
     if category:
         stmt = stmt.where(Source.category == category)
+    if max_age_hours is not None:
+        stmt = stmt.where(Entry.fetched_at >= window_start(max_age_hours))
+    # Same defensive read as ``/api/entries``: a malformed stored value
+    # reads as fewer ids, never as an error.
+    hidden = await hidden_entry_ids(session, resolve_user_id(user))
+    if hidden:
+        stmt = stmt.where(not_hidden(hidden))
     rows = (await session.execute(stmt)).all()
     if not rows:
         return []
