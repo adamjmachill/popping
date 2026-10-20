@@ -377,6 +377,12 @@ export interface PreferencesContextValue {
    *  seed finishes). Consumers that need the state before the
    *  first paint can gate on this. */
   loading: boolean
+  /** True once the first GET /api/preferences has answered and its
+   *  rows are in ``state``. False while it is on the way, and for the
+   *  rest of the page's life when it failed (``loading`` is then false
+   *  too, and ``state`` holds only the seed or the defaults, so a
+   *  preference that is missing from it may only be unread). */
+  loaded: boolean
   /** True after the localStorage seed has been applied. Stays true
    *  for the lifetime of the page once the seed has run. */
   seeded: boolean
@@ -477,6 +483,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     return seeded ?? DEFAULT_STATE
   })
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
   const [seeded, setSeeded] = useState(false)
 
   // First-mount GET. Runs once per provider lifetime.
@@ -500,6 +507,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
         // seed and GET), seed wins on keys the server doesn't
         // have yet.
         setState((prev) => mergeStateFromServer(prev, next))
+        setLoaded(true)
         setSeeded(true)
       } catch (err) {
         // The server is unreachable. Fall back to whatever the
@@ -827,6 +835,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     () => ({
       state,
       loading,
+      loaded,
       seeded,
       setReadEntries,
       setLastViewed,
@@ -843,6 +852,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     [
       state,
       loading,
+      loaded,
       seeded,
       setReadEntries,
       setLastViewed,

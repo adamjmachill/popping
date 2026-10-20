@@ -360,6 +360,9 @@ const startPoll = (page) => page.evaluate(() => document.dispatchEvent(new Event
 
 const selectedTab = async (page) => ((await page.locator(`${STRIP} [aria-selected="true"]`).first().textContent()) || '').trim()
 const tabTexts = (page) => page.locator(`${STRIP} [role="tab"]`).allTextContents()
+// The phone tab whose text matches `re`, and the tab key the phone stored.
+const phoneTab = (page, re) => page.locator(`${STRIP} [role="tab"]`).filter({ hasText: re }).first()
+const storedTab = (page) => page.evaluate(() => localStorage.getItem('popping.v1.mobileTab'))
 
 // The element at the centre of `locator`'s box is it or inside it.
 const onTop = (locator) =>
@@ -1017,6 +1020,345 @@ module.exports = [
       if (!(await tabTexts(page)).some((t) => /hockey/i.test(t))) fail('FM', 'no Hockey tab after the move')
       const after = await selectedTab(page)
       if (!/video/i.test(after)) fail('FM', `the phone moved to ${JSON.stringify(after)} instead of staying on Video`)
+    },
+  }),
+
+  // --- PR1b: tabs by key ------------------------------------------------------
+
+  // Saving a story adds the Saved tab in front of News: the phone stays on
+  // News, stores it by key, and opens it again after a reload.
+  dashFlow('flow-tab-stays-on-star', {
+    run: async ({ page, fail, shot }) => {
+      await tap(page, phoneTab(page, /^news/i))
+      if (!/^news/i.test(await selectedTab(page))) return fail('TAB-STAR', 'could not select the News tab')
+      if ((await tabTexts(page)).some((t) => /^saved/i.test(t))) return fail('TAB-STAR', 'a Saved tab before anything was saved')
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('TAB-STAR', 'no Saved tab after saving')
+      await sleep(300)
+      const now = await selectedTab(page)
+      if (!/^news/i.test(now)) fail('TAB-STAR', `saving moved the phone to ${JSON.stringify(now)}`)
+      const heading = ((await page.locator(`${MOBILE_MAIN} section header h2`).first().textContent()) || '').trim()
+      if (heading !== 'News') fail('TAB-STAR', `the phone shows the ${JSON.stringify(heading)} column under the News tab`)
+      await shot('saved')
+      if ((await storedTab(page)) !== 'cat:news') fail('TAB-STAR', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
+      // The save is in the store before the reload.
+      const put = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PUT' && f.path === '/api/preferences/starred_entries'))
+      if (!(await waitFor(put, 3000))) return fail('TAB-STAR', 'the save sent no PUT')
+      await sleep(300)
+      await page.reload()
+      await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('TAB-STAR', 'no Saved tab after the reload')
+      await sleep(300)
+      const reloaded = await selectedTab(page)
+      if (!/^news/i.test(reloaded)) fail('TAB-STAR', `the reload opened ${JSON.stringify(reloaded)}`)
+    },
+  }),
+
+  // Unsaving the only saved story takes the Saved tab away: the phone
+  // moves to the tab now in its place (For You), that becomes its tab,
+  // and a save from there brings Saved back without moving the phone.
+  dashFlow('flow-unsave-last-saved', {
+    before: async ({ page }) => {
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences',
+        (route) =>
+          route.request().method() === 'GET'
+            ? route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ items: [{ key: 'starred_entries', value: [103], updated_at: new Date(F.NOW).toISOString() }] }),
+              })
+            : route.fallback(),
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
+      if (!(await waitFor(hasSaved, 3000))) return fail('UNSAVE', 'no Saved tab for the saved story')
+      // A new phone opens on For You, even with Saved in front of it.
+      const first = await selectedTab(page)
+      if (!/^for you/i.test(first)) fail('UNSAVE', `a new phone opened on ${JSON.stringify(first)}`)
+      await tap(page, phoneTab(page, /^saved/i))
+      const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
+      if ((await cards.count()) !== 1) return fail('UNSAVE', `Saved shows ${await cards.count()} stories, expected 1`)
+      await tap(page, cards.first().locator('button[aria-label="remove from saved"]'))
+      if (!(await waitFor(async () => !(await hasSaved()), 3000))) return fail('UNSAVE', 'the Saved tab stayed after unsaving its only story')
+      await sleep(300)
+      const moved = await selectedTab(page)
+      if (!/^for you/i.test(moved)) return fail('UNSAVE', `after unsaving, the phone shows ${JSON.stringify(moved)}, expected For You`)
+      if ((await storedTab(page)) !== 'meta:foryou') fail('UNSAVE', `the stored tab is ${JSON.stringify(await storedTab(page))} after Saved went`)
+      await tap(page, cards.first().locator('button[aria-label="save for later"]'))
+      if (!(await waitFor(hasSaved, 3000))) return fail('UNSAVE', 'no Saved tab after saving from For You')
+      await sleep(300)
+      const now = await selectedTab(page)
+      if (!/^for you/i.test(now)) fail('UNSAVE', `saving from For You moved the phone to ${JSON.stringify(now)}`)
+      await shot('end')
+    },
+  }),
+
+  // A phone that stored the old column index opens on the tab at that
+  // place, stores it as a key and drops the index, but only once the
+  // preferences have loaded: here they arrive 1.5 s late, after the
+  // stories, and bring the saved story that put Saved at index 0. Migrated
+  // before them, index 0 would be For You.
+  dashFlow('flow-tab-migrates-index', {
+    // The strip, not a card: a wrong migration can land on any tab.
+    wait: `${STRIP} [aria-selected="true"]`,
+    before: async ({ page }) => {
+      await page.addInitScript(() => localStorage.setItem('popping.v1.mobileCol.last', '0'))
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences',
+        async (route) => {
+          if (route.request().method() !== 'GET') return route.fallback()
+          await sleep(1500)
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ items: [{ key: 'starred_entries', value: [103], updated_at: new Date(F.NOW).toISOString() }] }),
+          })
+        },
+      )
+    },
+    run: async ({ page, fail }) => {
+      const stored = () => page.evaluate(() => [localStorage.getItem('popping.v1.mobileTab'), localStorage.getItem('popping.v1.mobileCol.last')])
+      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
+      if (!(await waitFor(hasSaved, 5000))) return fail('TAB-MIGRATE', 'no Saved tab once the preferences loaded')
+      if (!(await waitFor(async () => (await stored())[0] !== null, 3000))) return fail('TAB-MIGRATE', 'the old index was never migrated')
+      await sleep(300)
+      // Index 0 was Saved, the first column when it has stories.
+      const now = await selectedTab(page)
+      if (!/^saved/i.test(now)) fail('TAB-MIGRATE', `the old index 0 opened ${JSON.stringify(now)}, expected Saved`)
+      const after = await stored()
+      if (after[0] !== 'meta:saved') fail('TAB-MIGRATE', `the stored tab is ${JSON.stringify(after[0])}`)
+      if (after[1] !== null) fail('TAB-MIGRATE', `the old index is still stored: ${JSON.stringify(after[1])}`)
+    },
+  }),
+
+  // A stored tab whose category went while the phone was away opens on
+  // For You (the fresh-device tab), not on Brief, which is all the strip
+  // holds before the first refresh; For You is then the stored tab.
+  dashFlow('flow-tab-gone-on-load', {
+    wait: `${STRIP} [aria-selected="true"]`,
+    before: async ({ page }) => {
+      await page.addInitScript(() => localStorage.setItem('popping.v1.mobileTab', 'cat:gone'))
+    },
+    run: async ({ page, fail }) => {
+      if (!(await waitFor(async () => (await storedTab(page)) !== 'cat:gone', 3000))) return fail('TAB-GONE', 'the missing tab is still stored')
+      const now = await selectedTab(page)
+      if (!/^for you/i.test(now)) fail('TAB-GONE', `a stored tab that went opened ${JSON.stringify(now)}, expected For You`)
+      if ((await storedTab(page)) !== 'meta:foryou') fail('TAB-GONE', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
+    },
+  }),
+
+  // Clearing the source filter brings the phone back to its tab, even while
+  // the unfiltered stories are still on the way: until they land the strip
+  // holds only the filtered feed's category, so News looks gone.
+  dashFlow('flow-filter-clear-keeps-tab', {
+    run: async ({ page, fail }) => {
+      await tap(page, phoneTab(page, /^news/i))
+      if (!/^news/i.test(await selectedTab(page))) return fail('FILTER-TAB', 'could not select the News tab')
+      await openMenu(page)
+      await page.locator(`${MENU} input[aria-label="filter by Slickdeals Frontpage"]`).check()
+      await page.locator('button[aria-label="remove Slickdeals Frontpage from filter"]').waitFor({ state: 'visible' })
+      // The filtered refresh has landed: Brief and the filter's column.
+      if (!(await waitFor(async () => (await tabTexts(page)).length === 2, 3000))) return fail('FILTER-TAB', `the filter left ${JSON.stringify(await tabTexts(page))}`)
+      await sleep(500)
+      if ((await storedTab(page)) !== 'cat:news') fail('FILTER-TAB', `the filter replaced the stored tab with ${JSON.stringify(await storedTab(page))}`)
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries',
+        async (route) => {
+          await sleep(1500)
+          return route.fallback()
+        },
+      )
+      await tap(page, page.getByRole('button', { name: 'clear all' }))
+      // The unfiltered refresh is still on the way.
+      await sleep(700)
+      if ((await storedTab(page)) !== 'cat:news') fail('FILTER-TAB', `clearing the filter stored ${JSON.stringify(await storedTab(page))} before the stories came back`)
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^news/i.test(t)), 5000))) return fail('FILTER-TAB', 'no News tab after clearing the filter')
+      await sleep(300)
+      const now = await selectedTab(page)
+      if (!/^news/i.test(now)) fail('FILTER-TAB', `after clearing the filter the phone shows ${JSON.stringify(now)}, expected News`)
+      if ((await storedTab(page)) !== 'cat:news') fail('FILTER-TAB', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
+    },
+  }),
+
+  // A For You request that fails takes the tab away for one refresh: the
+  // phone shows its neighbour but keeps For You as its tab, and goes back to
+  // it when For You loads again.
+  dashFlow('flow-foryou-fails-keeps-tab', {
+    expectedFailedLoads: ['/api/foryou'],
+    run: async ({ page, fail }) => {
+      if (!/^for you/i.test(await selectedTab(page))) return fail('FY-FAIL', `a new phone opened on ${JSON.stringify(await selectedTab(page))}`)
+      if (!(await waitFor(async () => (await storedTab(page)) === 'meta:foryou', 3000))) return fail('FY-FAIL', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
+      let failing = true
+      await page.route(
+        (u) => new URL(u).pathname === '/api/foryou',
+        (route) => (failing ? route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' }) : route.fallback()),
+      )
+      const hasForYou = async () => (await tabTexts(page)).some((t) => /^for you/i.test(t))
+      await startPoll(page)
+      if (!(await waitFor(async () => !(await hasForYou()), 3000))) return fail('FY-FAIL', 'For You stayed after its request failed')
+      await sleep(300)
+      if ((await storedTab(page)) !== 'meta:foryou') fail('FY-FAIL', `a failed For You request stored ${JSON.stringify(await storedTab(page))}`)
+      failing = false
+      await startPoll(page)
+      if (!(await waitFor(hasForYou, 3000))) return fail('FY-FAIL', 'For You did not come back')
+      await sleep(300)
+      const now = await selectedTab(page)
+      if (!/^for you/i.test(now)) fail('FY-FAIL', `when For You came back the phone stayed on ${JSON.stringify(now)}`)
+    },
+  }),
+
+  // While For You stays down, only what hangs on it waits: a new phone
+  // shows its first tab without storing it, but a tab the phone stored
+  // still gives way to its neighbour when it goes, so Saved coming back
+  // can't pull the phone to it.
+  dashFlow('flow-foryou-down-settles', {
+    expectedFailedLoads: ['/api/foryou'],
+    before: async ({ page }) => {
+      await page.route(
+        (u) => new URL(u).pathname === '/api/foryou',
+        (route) => route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' }),
+      )
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences',
+        (route) =>
+          route.request().method() === 'GET'
+            ? route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({ items: [{ key: 'starred_entries', value: [103], updated_at: new Date(F.NOW).toISOString() }] }),
+              })
+            : route.fallback(),
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
+      if (!(await waitFor(hasSaved, 3000))) return fail('FY-DOWN', 'no Saved tab for the saved story')
+      if ((await tabTexts(page)).some((t) => /^for you/i.test(t))) return fail('FY-DOWN', 'a For You tab although its request fails')
+      await sleep(500)
+      const first = await selectedTab(page)
+      if (!/^saved/i.test(first)) fail('FY-DOWN', `with For You down a new phone opened on ${JSON.stringify(first)}, expected Saved`)
+      if ((await storedTab(page)) !== null) fail('FY-DOWN', `a new phone stored ${JSON.stringify(await storedTab(page))} while For You is down`)
+      await tap(page, phoneTab(page, /^saved/i))
+      if ((await storedTab(page)) !== 'meta:saved') return fail('FY-DOWN', `a tap on Saved stored ${JSON.stringify(await storedTab(page))}`)
+      const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
+      await tap(page, cards.first().locator('button[aria-label="remove from saved"]'))
+      if (!(await waitFor(async () => !(await hasSaved()), 3000))) return fail('FY-DOWN', 'the Saved tab stayed after unsaving its only story')
+      await sleep(300)
+      const moved = await selectedTab(page)
+      const stored = await storedTab(page)
+      if (stored === 'meta:saved') return fail('FY-DOWN', `Saved went but stays the stored tab; the phone shows ${JSON.stringify(moved)}`)
+      if (!stored || !stored.startsWith('cat:')) fail('FY-DOWN', `after Saved went the stored tab is ${JSON.stringify(stored)}`)
+      await shot('moved')
+      await tap(page, cards.first().locator('button[aria-label="save for later"]'))
+      if (!(await waitFor(hasSaved, 3000))) return fail('FY-DOWN', 'no Saved tab after saving again')
+      await sleep(300)
+      const now = await selectedTab(page)
+      if (now !== moved) fail('FY-DOWN', `saving moved the phone from ${JSON.stringify(moved)} to ${JSON.stringify(now)}`)
+    },
+  }),
+
+  // While For You stays down, a phone with nothing stored (or only the old
+  // index) shows a tab without storing it. Saving a story there adds Saved
+  // in front of it; the phone stays on that tab and still stores nothing.
+  ...[
+    ['flow-foryou-down-holds-fresh', null],
+    ['flow-foryou-down-holds-index', '1'],
+  ].map(([name, index]) =>
+    dashFlow(name, {
+      expectedFailedLoads: ['/api/foryou'],
+      before: async ({ page }) => {
+        if (index != null) await page.addInitScript((i) => localStorage.setItem('popping.v1.mobileCol.last', i), index)
+        await page.route(
+          (u) => new URL(u).pathname === '/api/foryou',
+          (route) => route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' }),
+        )
+      },
+      run: async ({ page, fail }) => {
+        const hasSaved = async () => (await tabTexts(page)).some((t) => /^saved/i.test(t))
+        if ((await tabTexts(page)).some((t) => /^for you/i.test(t))) return fail('FY-HOLD', 'a For You tab although its request fails')
+        if (await hasSaved()) return fail('FY-HOLD', 'a Saved tab before anything was saved')
+        await sleep(500)
+        const before = await selectedTab(page)
+        if (/^brief/i.test(before)) return fail('FY-HOLD', 'the phone opened on Brief')
+        if ((await storedTab(page)) !== null) fail('FY-HOLD', `stored ${JSON.stringify(await storedTab(page))} while For You is down`)
+        const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+        await tap(page, card.locator('button[aria-label="save for later"]'))
+        if (!(await waitFor(hasSaved, 3000))) return fail('FY-HOLD', 'no Saved tab after saving')
+        await sleep(300)
+        const now = await selectedTab(page)
+        if (now !== before) fail('FY-HOLD', `saving moved the phone from ${JSON.stringify(before)} to ${JSON.stringify(now)}`)
+        if ((await storedTab(page)) !== null) fail('FY-HOLD', `saving stored ${JSON.stringify(await storedTab(page))} while For You is down`)
+        if (index != null) {
+          const old = await page.evaluate(() => localStorage.getItem('popping.v1.mobileCol.last'))
+          if (old !== index) fail('FY-HOLD', `the old index was migrated while For You is down (now ${JSON.stringify(old)})`)
+        }
+      },
+    }),
+  ),
+
+  // A failed GET /api/preferences leaves Saved unread, not gone: a phone
+  // that stored Saved keeps it stored, and shows another tab meanwhile.
+  dashFlow('flow-prefs-fail-keeps-saved', {
+    expectedFailedLoads: ['/api/preferences'],
+    before: async ({ page }) => {
+      await page.addInitScript(() => localStorage.setItem('popping.v1.mobileTab', 'meta:saved'))
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences',
+        (route) =>
+          route.request().method() === 'GET'
+            ? route.fulfill({ status: 500, contentType: 'text/plain', body: 'error' })
+            : route.fallback(),
+      )
+    },
+    run: async ({ page, fail }) => {
+      if ((await tabTexts(page)).some((t) => /^saved/i.test(t))) return fail('PREFS-FAIL', 'a Saved tab although the preferences failed')
+      await sleep(1000)
+      const now = await selectedTab(page)
+      if (!now || /^brief/i.test(now)) fail('PREFS-FAIL', `the phone shows ${JSON.stringify(now)}`)
+      if ((await storedTab(page)) !== 'meta:saved') fail('PREFS-FAIL', `a failed preferences load stored ${JSON.stringify(await storedTab(page))}`)
+      // A later poll doesn't settle it either.
+      await startPoll(page)
+      await sleep(1000)
+      if ((await storedTab(page)) !== 'meta:saved') fail('PREFS-FAIL', `after a poll the stored tab is ${JSON.stringify(await storedTab(page))}`)
+    },
+  }),
+
+  // Tapping the tab already shown scrolls its list to the top: smoothly,
+  // or at once under reduced motion. Another tab opens at its own top.
+  // Only the phone list carries data-scroller.
+  dashFlow('flow-tap-tab-scrolls-top', {
+    run: async ({ page, fail, shot }) => {
+      await tap(page, phoneTab(page, /^news/i))
+      const count = await page.locator('[data-scroller]').count()
+      if (count !== 1) fail('TAP-TOP', `${count} elements carry data-scroller, expected 1`)
+      const list = page.locator(`${MOBILE_MAIN} section [data-scroller]`)
+      const top = () => list.evaluate((el) => el.scrollTop)
+      const down = async () => {
+        await list.evaluate((el) => el.scrollTo(0, el.scrollHeight))
+        return waitFor(async () => (await top()) > 200, 2000)
+      }
+      if (!(await down())) return fail('TAP-TOP', 'the News list did not scroll down')
+      await tap(page, phoneTab(page, /^news/i))
+      if (!(await waitFor(async () => (await top()) === 0, 3000))) fail('TAP-TOP', `a tap on the shown tab left the list at ${await top()}`)
+      if (!/^news/i.test(await selectedTab(page))) fail('TAP-TOP', `the tap moved the phone to ${JSON.stringify(await selectedTab(page))}`)
+      await shot('top')
+
+      await page.emulateMedia({ reducedMotion: 'reduce' })
+      if (!(await down())) return fail('TAP-TOP', 'the News list did not scroll down again')
+      await tap(page, phoneTab(page, /^news/i))
+      const at = await top()
+      if (at !== 0) fail('TAP-TOP', `under reduced motion the list is at ${at} right after the tap, expected 0`)
+      await page.emulateMedia({ reducedMotion: null })
+
+      if (!(await down())) return fail('TAP-TOP', 'the News list did not scroll down a third time')
+      await tap(page, phoneTab(page, /^deals/i))
+      if (!/^deals/i.test(await selectedTab(page))) return fail('TAP-TOP', 'could not select the Deals tab')
+      await sleep(100)
+      const deals = await top()
+      if (deals !== 0) fail('TAP-TOP', `Deals opened at ${deals}, not at its top`)
     },
   }),
 

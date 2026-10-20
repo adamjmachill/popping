@@ -4,13 +4,17 @@
 // What lives here now
 // -------------------
 //
-// Three keys live in localStorage (two kept through the server-side
-// preferences migration of 2026-07-02, one added later):
+// Four keys live in localStorage (two kept through the server-side
+// preferences migration of 2026-07-02, two added later):
 //
-//   - ``mobileColLast`` -- the column index the user was last
-//     viewing on the mobile swipe layout. Per-device because
-//     "the column the user is currently looking at" has no
-//     meaning when shared across two devices.
+//   - ``mobileTab`` -- the key of the tab the phone shows
+//     (``lib/columns.ts``: ``meta:foryou``, ``cat:news`` ...).
+//     Per-device because "the tab the user is currently looking
+//     at" has no meaning when shared across two devices.
+//
+//   - ``mobileColLast`` -- the index ``mobileTab`` replaced. Read
+//     once, to migrate, and removed when ``mobileTab`` is first
+//     written.
 //
 //   - ``briefCollapsed`` -- whether the BriefCard is collapsed
 //     in the drawer. Same argument: a screen position, not
@@ -47,11 +51,13 @@ const SCHEMA = 'v1'
 const NAMESPACE = 'popping'
 
 export const STORAGE_KEYS = {
-  // The last mobile-view column index (0..N-1). Tracked so swiping
-  // between columns on phone doesn't reset position on refresh.
-  // Pure screen position; per-device is correct (the user looking
-  // at column 3 on their phone shouldn't shift their laptop to
-  // column 3 too).
+  // The phone's tab, by key, so a reload (or a tab that comes or
+  // goes around it) keeps the phone where it was. Pure screen
+  // position; per-device is correct (the user looking at News on
+  // their phone shouldn't move their laptop to News too).
+  mobileTab: `${NAMESPACE}.${SCHEMA}.mobileTab`,
+  // The old phone column index (-1 = Brief, 0..N-1), from before
+  // tab keys. Only read to migrate it into ``mobileTab``.
   mobileColLast: `${NAMESPACE}.${SCHEMA}.mobileCol.last`,
   // BriefCard collapse preference. Boolean stored as '0' / '1' to
   // match the codebase's storage convention.

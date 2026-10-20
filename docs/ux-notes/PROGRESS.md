@@ -8,7 +8,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | H1 Test harness groundwork and local loop | F | merged | #29 |
 | PR1r Build stamp and reload on a new build | F | merged | #32 |
 | PR1a Scheduler defaults, extraction off the loop, Reddit Test, History | B | merged | #27 |
-| PR1b Tab keys, resolveTab, tap-to-top, phone scroller | F | in progress | |
+| PR1b Tab keys, resolveTab, tap-to-top, phone scroller | F | in review | #36 |
 | PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | not started | |
 | PR2a Preference PATCH routes | B | merged | #28 |
 | PR2b prefSync client and sync rules | F | not started | |
@@ -31,7 +31,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR7b Tab ⋯ sheet and empty states | F | not started | |
 | PR8a Custom tabs | F | not started | |
 | PR8b Remove chips, presets and the old Sources UI | F | not started | |
-| PR9a Migration 0031 and feed health backend | B | in review | #35 |
+| PR9a Migration 0031 and feed health backend | B | merged | #35 |
 | PR9b Feed health UI | F | not started | |
 | PR10a article_detect library | B | merged | #34 |
 | PR10b Website crawl wiring and errors | B | not started (merges after the owner's VPS probe) | |
