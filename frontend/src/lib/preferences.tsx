@@ -449,7 +449,8 @@ export interface PreferencesContextValue {
 
   /** Send every write still queued, or waiting on a retry, now; wait for
    *  those and the writes already on the way. True when none of them is
-   *  left to retry: each was saved, or refused for good, which a reload
+   *  left to retry: each was saved, or refused for good, or answered with
+   *  a 404 or 405 (a server rolled back to before PATCH), which a reload
    *  onto the matching build is the cure for. The reload onto a new
    *  build runs it first and doesn't reload on false (PR1r). */
   flushPending: () => Promise<boolean>
@@ -459,12 +460,14 @@ export interface PreferencesContextValue {
    *  Returns the unregister function. */
   registerBeforeFlush: (fn: () => void) => () => void
 
-  /** Reset only, which reloads next: drop every queued write and its
-   *  retries, wait for the writes on the way (at most 3 s: a request
-   *  that never settles must not stop Reset), and send nothing more,
-   *  not even when the page goes. Without it, the reload's leave flush
-   *  would write the queued rows back after Reset's DELETEs. */
-  discardPending: () => Promise<void>
+  /** Reset only, which reloads next. ``drop`` names the keys Reset
+   *  deletes: their queued writes and retries are dropped, and nothing
+   *  more is queued or sent for them, not even when the page goes
+   *  (otherwise the reload's leave flush would write the rows back after
+   *  Reset's DELETEs). Writes for every other key (saves, hides, votes,
+   *  saved views) go now. Waits for those and the writes on the way, at
+   *  most 3 s: a request that never settles must not stop Reset. */
+  discardPending: (drop: (key: string) => boolean) => Promise<void>
 }
 
 const PreferencesContext = createContext<PreferencesContextValue | null>(null)

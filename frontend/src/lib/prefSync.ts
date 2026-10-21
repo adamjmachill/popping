@@ -272,38 +272,54 @@ export function splitDelta(delta: Delta, limit: number): { now: Delta; later: De
 
 const has = (o: object, k: string) => Object.prototype.hasOwnProperty.call(o, k)
 
-/** What ``older`` may have undone of ``net``, a later write to the same
- *  key that holds ``older``'s change folded with a newer one, given
- *  ``value``: the key's value the server answered ``older`` with. It is
- *  the part of ``net`` that reverses ``older`` (an id ``older`` added and
- *  ``net`` removes, a vote ``net`` changes, a whole value ``net``
- *  replaces) where ``value`` still shows ``older``'s side. Null when
- *  there is none. */
-export function overridden(older: Write, net: Write, value: unknown): Write | null {
+/** The part of ``net`` that reverses ``older``, an earlier write to the
+ *  same key that ``net`` holds folded with a newer change: an id
+ *  ``older`` added and ``net`` removes (or the other way round), a vote
+ *  ``net`` changes, a whole value ``net`` replaces. When ``older`` lands
+ *  after ``net``, that is what it undid. Null when there is none. (Which
+ *  of the two landed last can't be read from either row's value: each
+ *  shows its own change whichever went first. The caller reads it from
+ *  their ``updated_at`` stamps.) */
+export function overridden(older: Write, net: Write): Write | null {
   if (older.op === 'patch' && net.op === 'patch') {
     const o = older.delta
     const n = net.delta
     if (isVoteDelta(o) && isVoteDelta(n)) {
-      const votes = coerceVotes(value)
       const set: Record<string, Vote | null> = {}
-      for (const [id, v] of Object.entries(o.set)) {
-        if (!has(n.set, id) || n.set[id] === v) continue
-        if ((has(votes, id) ? votes[id] : null) === v) set[id] = n.set[id]
-      }
+      for (const [id, v] of Object.entries(o.set)) if (has(n.set, id) && n.set[id] !== v) set[id] = n.set[id]
       return Object.keys(set).length ? { op: 'patch', delta: { set } } : null
     }
     if (isVoteDelta(o) || isVoteDelta(n)) return null
-    const held = new Set(coerceIds(value))
     const removes = new Set(n.remove)
     const adds = new Set(n.add)
-    const add = o.remove.filter((id) => adds.has(id) && !held.has(id))
-    const remove = o.add.filter((id) => removes.has(id) && held.has(id))
+    const add = o.remove.filter((id) => adds.has(id))
+    const remove = o.add.filter((id) => removes.has(id))
     return add.length || remove.length ? { op: 'patch', delta: { add, remove } } : null
   }
   if (older.op === 'patch' || net.op === 'patch') return null
   const was = older.op === 'put' ? older.value : undefined
   const want = net.op === 'put' ? net.value : undefined
-  return !sameValue(was, want) && sameValue(value, was) ? net : null
+  return !sameValue(was, want) ? net : null
+}
+
+/** ``write`` without what ``covered`` already carry: each id whose op (or
+ *  vote) in ``write`` is the same in one of them. A whole value or a
+ *  delete comes back as it is. Null when nothing is left. */
+export function withoutOps(write: Write, covered: readonly Write[]): Write | null {
+  if (write.op !== 'patch') return write
+  const d = write.delta
+  const others = covered.flatMap((w) => (w.op === 'patch' ? [w.delta] : []))
+  if (isVoteDelta(d)) {
+    const set: Record<string, Vote | null> = {}
+    for (const [id, v] of Object.entries(d.set)) {
+      if (!others.some((o) => isVoteDelta(o) && has(o.set, id) && o.set[id] === v)) set[id] = v
+    }
+    return Object.keys(set).length ? { op: 'patch', delta: { set } } : null
+  }
+  const ids = others.filter((o): o is IdDelta => !isVoteDelta(o))
+  const add = d.add.filter((id) => !ids.some((o) => o.add.includes(id)))
+  const remove = d.remove.filter((id) => !ids.some((o) => o.remove.includes(id)))
+  return add.length || remove.length ? { op: 'patch', delta: { add, remove } } : null
 }
 
 /** What a merge must leave alone, and what it re-applies. */
@@ -377,13 +393,24 @@ export function laterStamp(a: string | null, b: string): string | null {
   return ma == null || mb > ma ? b : a
 }
 
+const errorStatus = (err: unknown): number => (isPlainObject(err) && typeof err.status === 'number' ? err.status : 0)
+
 /** How a failed write ends: tried again (it may get through later: no
  *  answer, a 5xx, or a 404 / 405 from a server rolled back to before
  *  PATCH), or refused for good (400, 409, 422 and other 4xx). */
 export function classifyWriteError(err: unknown): 'retry' | 'refuse' {
-  const status = isPlainObject(err) && typeof err.status === 'number' ? err.status : 0
+  const status = errorStatus(err)
   if (status === 0 || status >= 500) return 'retry'
   return [404, 405, 408, 429].includes(status) ? 'retry' : 'refuse'
+}
+
+/** A 404 or 405: the server has no route for the write (rolled back to
+ *  before PATCH). Tried again like any retry (rule 2), but only a reload
+ *  onto the build the server serves can save it, so it doesn't hold that
+ *  reload back (``flushPending``). */
+export function isRolledBack(err: unknown): boolean {
+  const status = errorStatus(err)
+  return status === 404 || status === 405
 }
 
 /** What an old build's localStorage still holds, written so it can't take
@@ -429,9 +456,9 @@ export const POLL_OVERLAP_MS = 60_000
 export const GET_TIMEOUT_MS = 20_000
 /** A poll this soon after the last GET was sent is answered by it. */
 export const RESYNC_COALESCE_MS = 1000
-/** Reset waits at most this long for the writes on the way before its
- *  DELETEs (sync rule 9), like PR1r's flush before a reload: a fetch
- *  that never settles must not stop Reset. */
+/** Reset waits at most this long for the writes on the way, and the ones
+ *  it sends, before its DELETEs (sync rule 9), like PR1r's flush before a
+ *  reload: a fetch that never settles must not stop Reset. */
 export const DISCARD_WAIT_MS = 3000
 
 export type SyncTransport = {
@@ -469,10 +496,18 @@ type Flight = {
   epoch: number
   whileHidden: boolean
   done: Promise<void>
-  // How it settled, once it has.
+  // How it settled, once it has, and the row it was answered with when
+  // that was OK (a DELETE's answer has none).
   outcome?: 'ok' | 'retry' | 'refused'
-  // Folded by the leave flush into this later request (see settleStale).
+  row?: PrefRow
+  // Its last failure was a 404 or 405 (``isRolledBack``).
+  rolledBack?: boolean
+  // The leave flush folded it into this later request (``by``) while it
+  // was on the way; ``carries`` on that request lists the ones it holds.
+  // ``gaveUp``: given up on (rule 4) while folded.
   by?: Flight
+  carries?: Flight[]
+  gaveUp?: boolean
 }
 
 type Get = { seq: number; full: boolean; ctrl: AbortController; done: Promise<void> }
@@ -525,7 +560,10 @@ export function createPrefSync(deps: SyncDeps) {
   let deadlineTimer: unknown | null = null
   let hideEpoch = 0
   let resumedEpoch = 0
-  let closed = false
+  // Reset has begun (sync rule 9): no more GETs, and nothing is sent or
+  // queued for the keys ``dropped`` names (the ones Reset deletes).
+  let resetting = false
+  let dropped: (key: string) => boolean = () => false
   const beforeFlush = new Set<() => void>()
 
   const emit = (next: Rows) => {
@@ -567,11 +605,11 @@ export function createPrefSync(deps: SyncDeps) {
 
   // The server's value for `key` was just adopted, from a request sent
   // after anything given up on: that settles what was given up on, and
-  // the adds sent before it are in it or gone. A write the leave flush
-  // folded away may still land after it, so its adds are kept meanwhile.
+  // the adds sent before it are in it or gone. (A write the leave flush
+  // folded away may still land after it; what that undoes is ``checkLate``'s.)
   const adopted = (key: string) => {
     limbo.delete(key)
-    if (!busy(key) && !stale.has(key)) sentAdds.delete(key)
+    if (!busy(key)) sentAdds.delete(key)
   }
 
   const setBase = (key: string, value: unknown, at: number) => {
@@ -597,7 +635,6 @@ export function createPrefSync(deps: SyncDeps) {
   }
 
   const schedule = (kind: 'patch' | 'put') => {
-    if (closed) return
     if (kind === 'patch') {
       if (patchTimer == null) patchTimer = setTimer(() => {
         patchTimer = null
@@ -651,17 +688,28 @@ export function createPrefSync(deps: SyncDeps) {
       if (!givenUp(f, at, back)) continue
       removeFlight(f)
       settledAt.set(f.key, ++seq)
-      needFullAfter = seq
-      const l = limbo.get(f.key)
-      limbo.set(f.key, l ? foldWrite(l, f.write) : f.write)
+      toLimbo(f)
     }
-    for (const f of allStale()) if (givenUp(f, at, back)) removeStale(f)
+    // Folded into a later request, which carries its change: only its
+    // late answer is ignored from now on (``unfold`` reads ``gaveUp``).
+    for (const f of allStale()) {
+      if (!givenUp(f, at, back)) continue
+      removeStale(f)
+      f.gaveUp = true
+    }
+  }
+
+  // Given up on (rule 4): its change stays shown, never sent again, until
+  // the next answer about the key, which the next full GET is sure to be.
+  const toLimbo = (f: Flight) => {
+    const l = limbo.get(f.key)
+    limbo.set(f.key, l ? foldWrite(l, f.write) : f.write)
+    needFullAfter = seq
   }
 
   // Sync rule 1: one write in flight per key; a key waiting on a retry
   // timer waits for it.
   const sendBatch = (kind: 'patch' | 'put') => {
-    if (closed) return
     expire()
     let deadline = Infinity
     for (const key of Array.from(queue.keys())) {
@@ -704,15 +752,14 @@ export function createPrefSync(deps: SyncDeps) {
     return remove.length === delta.remove.length ? delta : { add: delta.add, remove }
   }
 
-  const noteSent = (key: string, delta: Delta) => {
-    const ids = isVoteDelta(delta)
-      ? Object.entries(delta.set).flatMap(([id, v]) => (v == null ? [] : [id]))
-      : delta.add.map(String)
+  const mayHold = (key: string, ids: readonly string[]) => {
     if (!ids.length) return
     let s = sentAdds.get(key)
     if (!s) sentAdds.set(key, (s = new Set()))
     for (const id of ids) s.add(id)
   }
+  const noteSent = (key: string, delta: Delta) =>
+    mayHold(key, isVoteDelta(delta) ? Object.entries(delta.set).flatMap(([id, v]) => (v == null ? [] : [id])) : delta.add.map(String))
 
   // The queued write for `key` goes out. A change goes as the server can
   // take it (``forServer``), at most one PATCH's worth at a time
@@ -758,27 +805,32 @@ export function createPrefSync(deps: SyncDeps) {
       settleStale(f, row, err)
       return
     }
-    // Off the list: discarded, or given up on (rule 4).
+    // Off the list: dropped by Reset, or given up on (rule 4).
     if (!(flights.get(f.key) ?? []).includes(f)) return
     const key = f.key
     removeFlight(f)
     settledAt.set(key, ++seq)
     if (err == null) {
       f.outcome = 'ok'
+      if (f.write.op !== 'delete') f.row = row
       // The whole row after this write. A newer answer about the key
       // (a later write's, or a GET sent after this write) wins.
       if (f.seq > (baseSeq.get(key) ?? -1)) setBase(key, f.write.op === 'delete' ? undefined : row?.value, f.seq)
       retries.delete(key)
+      for (const p of f.carries ?? []) checkLate(p, f)
       recompute([key])
       if (queue.has(key)) schedule(kindOf(key))
       return
     }
-    if (closed) return
     if (classifyWriteError(err) === 'retry') {
       // Sync rule 2.
       f.outcome = 'retry'
-      putBack(key, f.write)
-      armRetry(key)
+      f.rolledBack = isRolledBack(err)
+      const again = f.carries ? unfold(f) : f.write
+      if (again) {
+        putBack(key, again)
+        armRetry(key)
+      } else if (queue.has(key)) schedule(kindOf(key))
     } else {
       // Sync rule 3: dropped, and the screen goes back to what the
       // server has. A newer write queued behind it still goes, with a
@@ -792,29 +844,82 @@ export function createPrefSync(deps: SyncDeps) {
     recompute([key])
   }
 
+  // A request of the leave flush (``c``) failed and is tried again. What it
+  // carried for the requests folded into it doesn't simply go again with
+  // it: a resend of a change that landed undoes whatever another device
+  // changed since. Each folded request keeps its own fate instead. One
+  // that answered OK landed, and its row becomes base unless a newer
+  // answer is in. One still on the way is waited for again like any
+  // request (rule 1), and settles as one. One given up on (rule 4) stays
+  // shown and isn't sent again. Only the change of one that failed too
+  // goes again, inside ``c``'s. Returns what of ``c`` goes back in the
+  // queue, null when nothing does.
+  const unfold = (c: Flight): Write | null => {
+    const key = c.key
+    const carried = c.carries ?? []
+    const covered: Write[] = []
+    for (const p of carried) {
+      if (p.outcome !== 'ok') continue
+      covered.push(p.write)
+      if (p.seq > (baseSeq.get(key) ?? -1)) setBase(key, p.write.op === 'delete' ? undefined : p.row?.value, p.seq)
+    }
+    for (const p of carried) {
+      if (p.outcome != null) continue
+      covered.push(p.write)
+      if (p.gaveUp) toLimbo(p)
+      else if ((stale.get(key) ?? []).includes(p)) {
+        removeStale(p)
+        p.by = undefined
+        flights.set(key, [...(flights.get(key) ?? []), p].sort((a, b) => a.seq - b.seq))
+      }
+      // Otherwise it is already back on the list, or given up on there.
+    }
+    return withoutOps(c.write, covered)
+  }
+
   // A write the leave flush folded into a later request (``f.by``)
-  // settled. Its answer never sets base, because ``f.by`` carries its
-  // change too. But two requests for one key were on the way at once, so
-  // this one may have reached the server after ``f.by`` and put back what
-  // ``f.by`` reversed (an Undo made just before the page hid). When
-  // ``f.by``'s answer is already in, the row this one answered with
-  // shows whether it did; if so, that part goes again. When this answer
-  // comes first, it most likely landed first, and nothing goes. (Not by
-  // ``updated_at``: it is the transaction's start, not the order in which
-  // the two took the row lock.)
+  // settled. Its answer never sets base: ``f.by`` carries its change too.
+  // How it went is kept for ``f.by``'s answer (``checkLate``, ``unfold``).
   const settleStale = (f: Flight, row: PrefRow | undefined, err: unknown) => {
-    const key = f.key
     removeStale(f)
-    settledAt.set(key, ++seq)
-    if (err != null || closed || f.by?.outcome !== 'ok') return
-    const value = f.write.op === 'delete' ? undefined : row?.value
-    const fix = overridden(f.write, f.by.write, value)
+    settledAt.set(f.key, ++seq)
+    if (err != null) {
+      f.outcome = classifyWriteError(err) === 'retry' ? 'retry' : 'refused'
+      return
+    }
+    f.outcome = 'ok'
+    if (f.write.op !== 'delete') f.row = row
+    if (f.by) checkLate(f, f.by)
+  }
+
+  // ``p``, folded into ``c`` by the leave flush, and ``c`` both landed. Two
+  // requests for one key were on the way at once, so ``p`` may have landed
+  // last and put back what ``c`` reversed of it (an Undo made just before
+  // the page hid); that part then goes again. Which one landed last can't
+  // be read from either row's value (each shows its own change whichever
+  // went first), nor from which answer came first. It is read from the
+  // rows' stamps: a write stamps its row later than the one it replaced
+  // (``_next_stamp`` in routes/preferences.py), so of two writes to one row
+  // the later stamp landed last. Without both answers' stamps (one not in
+  // yet, or not OK; a DELETE's answer has none) nothing goes.
+  const checkLate = (p: Flight, c: Flight) => {
+    const stampOf = (f: Flight) => (typeof f.row?.updated_at === 'string' ? stampMicros(f.row.updated_at) : null)
+    const a = stampOf(p)
+    const b = stampOf(c)
+    if (a == null || b == null || a <= b) return
+    const fix = overridden(p.write, c.write)
     if (!fix) return
-    putBack(key, fix)
-    recompute([key])
+    putBack(p.key, fix)
+    // The server holds what the fix removes or clears, whatever base says,
+    // so ``forServer`` must keep it.
+    if (fix.op === 'patch') {
+      const d = fix.delta
+      mayHold(p.key, isVoteDelta(d) ? Object.entries(d.set).flatMap(([id, v]) => (v == null ? [id] : [])) : d.remove.map(String))
+    }
+    recompute([p.key])
     // Still hidden: it may be the last chance to send it.
-    if (!visible() && !busy(key)) send(key, true)
-    else schedule(kindOf(key))
+    if (!visible() && !busy(p.key)) send(p.key, true)
+    else schedule(kindOf(p.key))
   }
 
   // Sync rule 2: retries after RETRY_MS; once they are used up, one toast
@@ -831,13 +936,14 @@ export function createPrefSync(deps: SyncDeps) {
     }
     r.timer = setTimer(() => {
       r.timer = null
-      if (closed) return
       expire()
       if (queue.has(key) && !busy(key)) send(key, false)
     }, RETRY_MS[r.attempt - 1])
   }
 
   const enqueue = (key: string, write: Write) => {
+    // Reset deletes this key next: a write made now would write it back.
+    if (dropped(key)) return
     const q = queue.get(key)
     queue.set(key, q ? foldWrite(q, write) : write)
     recompute([key])
@@ -970,7 +1076,7 @@ export function createPrefSync(deps: SyncDeps) {
    *  one, is answered by it; a full request during a poll runs right
    *  after it. */
   const resync = (opts: { full?: boolean } = {}): Promise<void> => {
-    if (closed) return Promise.resolve()
+    if (resetting) return Promise.resolve()
     expire()
     const full = !!opts.full || !loadedOnce || watermark == null || needFullAfter != null
     if (get) {
@@ -1004,10 +1110,9 @@ export function createPrefSync(deps: SyncDeps) {
    *  sends its first part; the rest waits for the return). A key whose
    *  earlier write is still on the way sends that change again, folded
    *  with the queued one, because the page may never come back to send
-   *  it after the answer; the earlier request is kept as stale, and its
-   *  answer is checked (``settleStale``). */
+   *  it after the answer; the earlier request is kept as stale (``by``,
+   *  ``carries``), and its answer is checked (``settleStale``). */
   const leave = () => {
-    if (closed) return
     runBeforeFlush()
     stopBatches()
     if (get) {
@@ -1033,6 +1138,11 @@ export function createPrefSync(deps: SyncDeps) {
         f.by = carrier
       }
       stale.set(key, folded)
+      // One that answered OK while folded into an earlier request of the
+      // leave flush stays on the list too: it landed, and this one carries
+      // its change again.
+      const landed = older.flatMap((f) => (f.carries ?? []).filter((p) => p.outcome === 'ok'))
+      carrier.carries = [...landed, ...folded]
     }
     if (!visible()) hideEpoch++
   }
@@ -1042,7 +1152,7 @@ export function createPrefSync(deps: SyncDeps) {
    *  everything queued, those waiting on a retry included, goes now with
    *  a new round of retries. (The full resync is the caller's.) */
   const resume = () => {
-    if (closed || resumedEpoch === hideEpoch) return
+    if (resumedEpoch === hideEpoch) return
     resumedEpoch = hideEpoch
     expire()
     for (const [key, r] of retries) {
@@ -1052,64 +1162,84 @@ export function createPrefSync(deps: SyncDeps) {
     for (const key of Array.from(queue.keys())) if (!busy(key)) send(key, false)
   }
 
-  /** Send everything queued now (one behind an earlier write goes after
-   *  its answer; a change over one PATCH's worth goes in parts) and wait.
-   *  A write this sends that fails isn't sent again here. True when
-   *  nothing is left to try again: each write was saved, or refused for
-   *  good. The reload onto a new build runs this first (PR1r). */
-  const flushPending = async (): Promise<boolean> => {
-    if (closed) return true
+  // Everything queued goes now (one behind an earlier write after its
+  // answer; a change over one PATCH's worth in parts), and this waits. A
+  // write it sent that fails isn't sent again here; it waits on its retry
+  // timer. True when nothing is left to try again, or what is left failed
+  // with a 404 or 405 (``isRolledBack``).
+  const flush = async (keepalive: boolean): Promise<boolean> => {
     runBeforeFlush()
     stopBatches()
     const mine = new Set<Flight>()
     const failed = new Set<string>()
+    const rolledBack = new Set<string>()
     for (;;) {
       expire()
       for (const key of Array.from(queue.keys())) {
         if (failed.has(key) || busy(key)) continue
         stopRetry(key)
-        const f = send(key, false)
+        const f = send(key, keepalive)
         if (f) mine.add(f)
       }
       const waiting = allFlights()
       if (!waiting.length) break
       await Promise.all(waiting.map((f) => f.done))
-      for (const f of waiting) if (mine.has(f) && f.outcome === 'retry') failed.add(f.key)
+      for (const f of waiting) {
+        if (!mine.has(f) || f.outcome !== 'retry') continue
+        failed.add(f.key)
+        if (f.rolledBack) rolledBack.add(f.key)
+        else rolledBack.delete(f.key)
+      }
     }
-    // Keys that failed here wait on their retry timers.
-    return queue.size === 0 && allFlights().length === 0
+    return allFlights().length === 0 && Array.from(queue.keys()).every((key) => rolledBack.has(key))
   }
 
-  /** Reset only (it reloads next): drop everything queued and its timers,
-   *  ignore what the writes on the way settle with, and wait for them, at
-   *  most ``DISCARD_WAIT_MS`` (one given up on by rule 4 isn't waited for
-   *  at all). A write that lands after Reset's DELETEs can at worst put
-   *  back a few read marks or one tab's setting. From here on nothing more
-   *  is sent, not even when the page goes. */
-  const discardPending = async (): Promise<void> => {
+  /** Send everything queued now and wait (see ``flush``). True when
+   *  nothing is left to try again: each write was saved, or refused for
+   *  good. The reload onto a new build runs this first and holds off on
+   *  false (PR1r). A write the server answered with a 404 or 405 doesn't
+   *  count: the server has no route for it, a rollback, and only that
+   *  reload, onto the build the server serves, can cure it. (The reload's
+   *  leave flush sends it once more.) */
+  const flushPending = (): Promise<boolean> => flush(false)
+
+  /** Reset only (it reloads next). ``drop`` names the keys Reset deletes.
+   *  For those, everything queued and its retries is dropped, what their
+   *  writes on the way answer is ignored, and from here on nothing is
+   *  queued or sent, not a write made meanwhile, nor the leave flush's:
+   *  sent after the DELETEs, it would write the row back. Every other key
+   *  goes on as before, and what is queued for it goes now, with
+   *  ``keepalive`` (a save, hide or vote must outlive the reload). Waits
+   *  for all of it and for the writes on the way, at most
+   *  ``DISCARD_WAIT_MS`` (one given up on by rule 4 isn't waited for):
+   *  what isn't answered by then goes on, and the reload's leave flush
+   *  sends what is still queued. No GET from here on. */
+  const discardPending = async (drop: (key: string) => boolean): Promise<void> => {
     const at = now()
     const back = visible()
-    closed = true
-    stopBatches()
-    for (const key of retries.keys()) stopRetry(key)
-    retries.clear()
+    const before = dropped
+    dropped = (key) => before(key) || drop(key)
+    resetting = true
     get?.ctrl.abort()
     followUp?.resolve()
     followUp = null
     const waiting = [...allFlights(), ...allStale()].filter((f) => !givenUp(f, at, back)).map((f) => f.done)
-    const keys = new Set([...queue.keys(), ...flights.keys(), ...limbo.keys()])
-    queue.clear()
-    flights.clear()
-    stale.clear()
-    limbo.clear()
-    sentAdds.clear()
+    const keys = new Set([...queue.keys(), ...flights.keys(), ...stale.keys(), ...limbo.keys(), ...retries.keys()].filter(dropped))
+    for (const key of keys) {
+      stopRetry(key)
+      retries.delete(key)
+      queue.delete(key)
+      flights.delete(key)
+      stale.delete(key)
+      limbo.delete(key)
+      sentAdds.delete(key)
+    }
     recompute(keys)
-    if (!waiting.length) return
     let timer: unknown = null
     const capped = new Promise<void>((resolve) => {
       timer = setTimer(resolve, DISCARD_WAIT_MS)
     })
-    await Promise.race([Promise.allSettled(waiting), capped])
+    await Promise.race([Promise.allSettled([flush(true), ...waiting]), capped])
     clearTimer(timer)
   }
 

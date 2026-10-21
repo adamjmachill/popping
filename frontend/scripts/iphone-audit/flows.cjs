@@ -1699,9 +1699,10 @@ module.exports = [
 
   // Reset takes the reading state (read marks, last visits, tab prefs,
   // section folds, History grouping) and keeps saves, hides, votes and
-  // saved views. A read mark and a save still queued when Reset is tapped
-  // are dropped: no PATCH or PUT goes after the DELETEs (the reload's
-  // leave flush would otherwise write the read marks back).
+  // saved views. Of a read mark and a save still queued when Reset is
+  // tapped, the save goes before the DELETEs and is kept; the read mark is
+  // dropped, and nothing for a key Reset deletes goes after the DELETEs
+  // (the reload's leave flush would otherwise write the read marks back).
   dashFlow('flow-reset-keeps-saves', {
     before: async ({ page }) => {
       await installClock(page)
@@ -1741,8 +1742,15 @@ module.exports = [
       await page.clock.resume()
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
       const firstDelete = writes.findIndex((w) => w.method === 'DELETE')
-      const after = writes.slice(firstDelete).filter((w) => w.method !== 'DELETE')
+      const resetKey = (k) => k === 'history_group_by' || /^(read_entries|last_viewed|column_prefs|column_sections):/.test(k)
+      const after = writes.slice(firstDelete).filter((w) => w.method !== 'DELETE' && resetKey(w.key))
       if (after.length) fail('RESET', `writes after the DELETEs: ${JSON.stringify(after)}`)
+      const saveAt = writes.findIndex((w) => w.method === 'PATCH' && w.key === 'starred_entries' && (w.body.add || []).includes(Number(id)))
+      if (saveAt < 0) fail('RESET', `the queued save was never sent: ${JSON.stringify(writes)}`)
+      else if (saveAt > firstDelete) fail('RESET', 'the queued save went after the DELETEs, not before them')
+      const saves = prefMock(page.context()).value('starred_entries') || []
+      if (!saves.includes(103) || !saves.includes(Number(id))) fail('RESET', `the store's saves are ${JSON.stringify(saves)}, expected 103 and ${id}`)
+      if (writes.some((w) => resetKey(w.key) && w.method !== 'DELETE')) fail('RESET', `a write for a key Reset deletes went: ${JSON.stringify(writes.filter((w) => resetKey(w.key) && w.method !== 'DELETE'))}`)
       const deleted = writes.filter((w) => w.method === 'DELETE').map((w) => w.key)
       for (const k of ['starred_entries', 'hidden_entries', 'filter_presets', 'voted_entries']) {
         if (deleted.includes(k)) fail('RESET', `Reset deleted ${k}`)
@@ -1977,6 +1985,106 @@ module.exports = [
         if (!(await waitFor(() => page.locator(`${MOBILE_MAIN} article[data-card-id="${want}"]`).count().then((n) => n > 0), 3000))) fail('PREFS-FAIL-SAVE', `story ${want} is not in Saved`)
       }
       await shot('saved')
+    },
+  }),
+
+  // Back in front with the hide's keepalive PATCH still unanswered (not
+  // yet at the server): it is given up on (sync rule 4) and not sent again,
+  // also once it does get through.
+  dashFlow('flow-prefs-return-before-answer', {
+    before: async ({ page }) => {
+      await installClock(page)
+      page._held = []
+      page._holdPatch = false
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences/starred_entries',
+        async (route) => {
+          if (route.request().method() !== 'PATCH' || !page._holdPatch) return route.fallback()
+          page._holdPatch = false
+          await new Promise((r) => page._held.push(r))
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, context, fail }) => {
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      const patches = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      page._holdPatch = true
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      await sleep(400)
+      if ((await patches()).length) return fail('PREFS-RETURN', 'the save went out before its batch')
+      await setHidden(page, true)
+      if (!(await waitFor(() => page._held.length === 1, 3000))) return fail('PREFS-RETURN', 'hiding the page sent no PATCH')
+      await setHidden(page, false)
+      await page.clock.runFor(5000)
+      await sleep(500)
+      const atReturn = (await patches()).length
+      page._held[0]()
+      if (!(await waitFor(() => (prefMock(context).value('starred_entries') || []).includes(id), 3000))) fail('PREFS-RETURN', `story ${id} is not in the store`)
+      await page.clock.runFor(35_000)
+      await sleep(500)
+      const n = (await patches()).length
+      if (n !== 1) fail('PREFS-RETURN', `${n} PATCHes of one save (${atReturn} by the return)`)
+    },
+  }),
+
+  // The hide's keepalive PATCH lands but its answer is held (iOS suspends
+  // the page); meanwhile another device unsaves the story; then the page
+  // comes back. The other device's unsave stands: the save is not sent
+  // again, and the story shows unsaved after the return's full GET.
+  dashFlow('flow-prefs-landed-unread', {
+    before: async ({ page, context }) => {
+      await installClock(page)
+      page._held = []
+      page._holdAnswer = false
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences/starred_entries',
+        async (route) => {
+          if (route.request().method() !== 'PATCH' || !page._holdAnswer) return route.fallback()
+          page._holdAnswer = false
+          const body = route.request().postDataJSON() || {}
+          const cur = prefMock(context).value('starred_entries') || []
+          const next = cur.filter((x) => !(body.remove || []).includes(x))
+          for (const x of body.add || []) if (!next.includes(x)) next.push(x)
+          prefMock(context).seed({ starred_entries: next })
+          await new Promise((r) => page._held.push(r))
+          return route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({ key: 'starred_entries', value: next, updated_at: new Date(F.NOW + 50).toISOString() }),
+          })
+        },
+      )
+    },
+    run: async ({ page, context, fail }) => {
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      const patches = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      const saved = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="remove from saved"]`).count().then((c) => c > 0)
+      page._holdAnswer = true
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      await sleep(400)
+      await setHidden(page, true)
+      if (!(await waitFor(() => page._held.length === 1, 3000))) return fail('PREFS-LANDED', 'hiding the page sent no PATCH')
+      if (!(prefMock(context).value('starred_entries') || []).includes(id)) return fail('PREFS-LANDED', 'the keepalive PATCH did not land')
+      // Another device unsaves it while this page is away.
+      prefMock(context).seed({ starred_entries: [] })
+      await setHidden(page, false)
+      await page.clock.runFor(5000)
+      await sleep(800)
+      page._held[0]()
+      await page.clock.runFor(35_000)
+      await sleep(800)
+      const n = (await patches()).length
+      const stored = prefMock(context).value('starred_entries') || []
+      if (stored.includes(id)) fail('PREFS-LANDED', `the other device's unsave was undone: the store holds ${JSON.stringify(stored)} after ${n} PATCHes`)
+      if (n !== 1) fail('PREFS-LANDED', `${n} PATCHes of one save`)
+      if (await saved()) fail('PREFS-LANDED', `story ${id} still shows as saved after the return`)
     },
   }),
 
@@ -2447,7 +2555,8 @@ module.exports = [
   // that didn't get through is still unsaved, only once the pending
   // writes are saved, and once per build. A check cut off by hiding
   // doesn't hold up the next return's, and a save the server refuses for
-  // good (400, 409) doesn't hold up the reload.
+  // good (400, 409), or can't take at all (405: rolled back to before
+  // PATCH), doesn't hold up the reload.
   dashFlow('flow-reload-on-new-build', {
     // Step 4's HEAD of the missing script and steps 6-8's refused saves
     // fail on purpose.
@@ -2651,6 +2760,25 @@ module.exports = [
       await page.clock.resume()
       if (!(await reloaded(3))) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 3`)
 
+      // 8d. Another build, served by a server rolled back to before PATCH:
+      // every save answers 405. Hiding sends the pending save; the return
+      // and the reload's flush send it again and get 405 too. Only the
+      // reload onto the served build can cure that, so it goes ahead.
+      page._nextScript = '/static/index-next4.js'
+      now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      saves = page._saves
+      await tap(page, saveButton())
+      await sleep(400)
+      if (page._saves !== saves) return fail('RELOAD-ROLLBACK', 'the save went out before the page hid; nothing was pending')
+      page._refuse = Array(12).fill(405)
+      if (!(await awayAfterAnswer(11, page._refused + 1))) return fail('RELOAD-ROLLBACK', 'hiding the page did not send the pending save')
+      if (!(await waitFor(() => log.navs === 4, 6000))) return fail('RELOAD-ROLLBACK', `saves answered 405 kept the page from reloading onto the served build: ${JSON.stringify(log)}`)
+      if (page._saves < saves + 2) fail('RELOAD-ROLLBACK', `the save was not sent again before the reload (${page._saves - saves} PATCHes)`)
+      await page.clock.resume()
+      if (!(await reloaded(4))) return fail('RELOAD-ONCE', `${log.navs} reloads, expected 4`)
+      page._refuse = []
+
       // 9. The reloaded page still runs the old build (vite preview), and
       // the server still names the new one: it checks, but doesn't reload
       // again for the same build.
@@ -2658,7 +2786,7 @@ module.exports = [
       await away(page, 11)
       if (!(await waitFor(() => log.checks === checks + 1, 3000))) return fail('RELOAD-ONCE', 'the reloaded page ran no check')
       await sleep(1200)
-      if (log.navs !== 3) fail('RELOAD-ONCE', `reloaded again for the same build (${log.navs} reloads)`)
+      if (log.navs !== 4) fail('RELOAD-ONCE', `reloaded again for the same build (${log.navs} reloads)`)
     },
   }),
 

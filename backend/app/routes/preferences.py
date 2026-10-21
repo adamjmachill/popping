@@ -86,6 +86,20 @@ from app.schemas import (
 
 logger = logging.getLogger("popping.routes.preferences")
 
+# A write stamps its row with ``now()``, the transaction's start, but never
+# at or before the stamp it replaces: ``greatest(now(), updated_at + 1 µs)``,
+# read under the row lock. So of two writes to one row, the one that took
+# the lock last always carries the later stamp, even when its transaction
+# started first. The client reads which of two of its own writes to a key
+# landed last from these stamps (PR2b's leave flush, ``settleStale`` in
+# ``prefSync.ts``). The stamp still lies between the transaction's start and
+# its commit, so the since poll and its 60 s overlap are unchanged.
+_STAMP_STEP = dt.timedelta(microseconds=1)
+
+
+def _next_stamp():
+    return func.greatest(func.now(), UserPreference.updated_at + _STAMP_STEP)
+
 router = APIRouter(tags=["preferences"])
 
 
@@ -386,8 +400,9 @@ async def list_preferences(
     equivalent, is a 422) keeps only rows with ``updated_at > since``. Deletions don't show up in a
     since-response; a full GET is how they arrive.
 
-    ``updated_at`` is ``now()``, the writing transaction's START time,
-    and writes to different keys don't block each other. So a write
+    ``updated_at`` is ``now()``, the writing transaction's START time
+    (moved just past the replaced stamp when that one is later, see
+    ``_next_stamp``), and writes to different keys don't block each other. So a write
     that started first can commit after a poll has already returned a
     later row: a client polls with an overlap (``since`` = the newest
     ``updated_at`` it has seen, minus 60 s), not from that timestamp
@@ -474,16 +489,16 @@ async def put_preference(
         .values(user_id=user_id, key=key, value=body.value)
         .on_conflict_do_update(
             index_elements=["user_id", "key"],
-            # ``func.now()``, not the column's own current value: an
-            # ON CONFLICT DO UPDATE SET clause only touches columns
-            # explicitly listed here (unlike a plain UPDATE, it does
-            # NOT fall back to the column's ``onupdate=func.now()``
-            # default for anything omitted), so referencing
-            # ``UserPreference.__table__.c.updated_at`` here would
-            # compile to ``SET updated_at = user_preferences.updated_at``
-            # — a no-op that freezes the timestamp at insert time
-            # forever.
-            set_={"value": body.value, "updated_at": func.now()},
+            # ``updated_at`` is set explicitly: an ON CONFLICT DO UPDATE
+            # SET clause only touches columns listed here (unlike a
+            # plain UPDATE, it does NOT fall back to the column's
+            # ``onupdate=func.now()`` default for anything omitted), so
+            # ``SET updated_at = user_preferences.updated_at`` alone
+            # would be a no-op that freezes the timestamp at insert
+            # time forever. ``_next_stamp()`` is ``now()``, moved past
+            # the replaced row's stamp (``user_preferences.updated_at``
+            # here is the existing, locked row) when that one is later.
+            set_={"value": body.value, "updated_at": _next_stamp()},
         )
         .returning(UserPreference.updated_at)
     )
@@ -535,7 +550,10 @@ async def patch_preference(
          ``_coerce_votes``), since a PUT may have stored anything.
       3. ``remove`` is applied before ``add``, then the result is
          trimmed to the cap, smallest entry id first.
-      4. The value is written with ``updated_at = now()``.
+      4. The value is written with ``updated_at = now()``, or 1 µs
+         after the stamp it replaces when that one is later (a write
+         whose transaction started after this one's but took the lock
+         first): see ``_next_stamp``.
     """
     _validate_key(key)
     cap = _set_key_cap(key)
@@ -584,7 +602,7 @@ async def patch_preference(
     result = await session.execute(
         update(UserPreference)
         .where(*where)
-        .values(value=value, updated_at=func.now())
+        .values(value=value, updated_at=_next_stamp())
         .returning(UserPreference.updated_at)
     )
     row_updated_at = result.scalar_one()

@@ -1353,10 +1353,14 @@ export function App() {
         allKeys.push(`${k}:${id}`)
       }
     }
-    // Queued writes are dropped, and the ones on the way waited for (at
-    // most 3 s), before the DELETEs: sent after them (the reload's leave
-    // flush sends what is queued) they would write the rows back.
-    void discardPrefs()
+    // The keys Reset deletes, by kind. Their queued writes are dropped
+    // before the DELETEs: sent after them (the reload's leave flush sends
+    // what is queued) they would write the rows back. Every other key's
+    // queued writes (a save, a hide, a vote, a saved view) go first, and
+    // the writes on the way are waited for (at most 3 s).
+    const resetDeletes = (key: string) =>
+      key === PREFERENCE_KEYS.historyGroupBy || perColumnKinds.some((k) => key.startsWith(`${k}:`))
+    void discardPrefs(resetDeletes)
       .then(() => Promise.allSettled(allKeys.map((k) => api.deletePreference(k))))
       .finally(() => {
         window.location.reload()

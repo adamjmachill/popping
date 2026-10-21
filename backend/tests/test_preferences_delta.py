@@ -20,13 +20,14 @@ from pathlib import Path
 from urllib.parse import quote
 
 import pytest
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.auth.deps import ANONYMOUS_USER_ID, current_user
 from app.db import SessionLocal
 from app.models import UserPreference
-from app.routes.preferences import SET_KEY_CAPS
+from app.routes.preferences import SET_KEY_CAPS, patch_preference, put_preference
+from app.schemas import UserPreferenceIn, UserPreferencePatchIn
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -180,6 +181,43 @@ async def test_concurrent_first_patches_on_a_new_key_all_land(app_client):
     )
     assert [r.status_code for r in results] == [200] * 8
     assert sorted(await _value(app_client, key)) == list(range(1, 9))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["PATCH", "PUT"])
+async def test_the_write_that_lands_last_carries_the_later_stamp(app_client, method):
+    """``updated_at`` is ``now()``, the transaction's start. Session A's
+    transaction starts first; B's starts later, takes the row and commits;
+    then A writes the row. A landed last, so its stamp must be the later
+    one, although its ``now()`` is earlier: the client reads which of two
+    of its writes to one key landed last from these stamps (PR2b's leave
+    flush). Plain ``now()`` stamps A before B."""
+    key = "hidden_entries" if method == "PATCH" else "column_prefs:stamps"
+
+    async def write(session=None, n=0):
+        if method == "PATCH":
+            if session is None:
+                return await _patch(app_client, key, {"add": [n]})
+            return await patch_preference(key, UserPreferencePatchIn(add=[n]), None, session)
+        if session is None:
+            return await app_client.put(_url(key), json={"value": {"n": n}})
+        return await put_preference(key, UserPreferenceIn(value={"n": n}), None, session)
+
+    assert (await write(n=1)).status_code == 200
+    async with SessionLocal() as a:
+        started = (await a.execute(select(func.now()))).scalar_one()
+        await asyncio.sleep(0.05)
+        b = await write(n=2)
+        assert b.status_code == 200, b.text
+        b_stamp = _ts(b.json()["updated_at"])
+        assert b_stamp > started
+        a_out = await write(session=a, n=3)
+
+    assert a_out.updated_at > b_stamp, (a_out.updated_at, b_stamp)
+    stored = await app_client.get(_url(key))
+    assert _ts(stored.json()["updated_at"]) == a_out.updated_at
+    if method == "PATCH":
+        assert sorted(stored.json()["value"]) == [1, 2, 3]
 
 
 # ---------------------------------------------------------------------------
