@@ -274,10 +274,13 @@ export function ColumnInner({
   // App holds arrivals back meanwhile; the rows between the marker and
   // Earlier stay as they were drawn (``end``, below).
   const [held, setHeld] = useState(false)
-  // Set when the end row's "Mark as read" held keyboard or VoiceOver
-  // focus: the snapshot it was pressed in. The row turns into "You're
-  // all caught up" and the focus goes there, not to <body>.
+  // Set when the end row's "Mark as read" was pressed with the keyboard
+  // or a screen reader: the snapshot it was pressed in. The row turns
+  // into "You're all caught up" and the focus goes there, not to <body>.
   const refocusRef = useRef<{ generation: number | undefined } | null>(null)
+  // The pointer type ("mouse", "pen", "touch") of a pointerdown on the
+  // end row's button, until the click it starts reads and clears it.
+  const endPointerRef = useRef<string | null>(null)
   const sortLabelId = useId()
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const prefsButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -469,10 +472,11 @@ export function ColumnInner({
     if (foldedSelection != null) onSelectionFolded?.(foldedSelection)
   }, [foldedSelection, onSelectionFolded])
 
-  // The end row's "Mark as read" was pressed with the keyboard or
-  // VoiceOver: once the tab has started over, caught up, the focus that
-  // fell to <body> with the button goes to "You're all caught up" in its
-  // place, so the reader keeps their place in the page. The first run
+  // The end row's "Mark as read" was pressed with the keyboard or a
+  // screen reader (never a mouse, pen or finger: its ``onClick``): once
+  // the tab has started over, caught up, the focus that fell to <body>
+  // with the button goes to "You're all caught up" in its place, so the
+  // reader keeps their place in the page. The first run
   // after the press can still see the button that went (the new row's
   // element reaches ``marker`` a render later), so it waits for a marker
   // in the page. Focused without a scroll, then brought into view only
@@ -707,11 +711,28 @@ export function ColumnInner({
                     ref={setMarker}
                     type="button"
                     data-caught-up
+                    onPointerDown={(e) => {
+                      endPointerRef.current = e.pointerType
+                    }}
                     onClick={(e) => {
-                      // Pressed with the keyboard or VoiceOver (focus on
-                      // it, or a click with ``detail`` 0): the focus goes
-                      // on to the row that replaces it (the effect above).
-                      if (e.detail === 0 || e.currentTarget === document.activeElement) refocusRef.current = { generation }
+                      // Pressed with the keyboard or a screen reader, the
+                      // focus goes on to the row that replaces it (the
+                      // effect above). That is a click with ``detail`` 0
+                      // (a key, or a reader's simulated click: VoiceOver,
+                      // TalkBack, NVDA or JAWS in Chrome), or one on the
+                      // focused button that no pointerdown started (NVDA
+                      // and JAWS in Firefox send mouse events only). A
+                      // mouse, pen or finger press is neither, though
+                      // Chrome and Edge (and Firefox on Windows and
+                      // Linux) focus the button on mousedown or a tap: in
+                      // the desktop grid the new marker can be far above
+                      // the screen, and bringing it into view would move
+                      // the page under the pointer. (``:focus-visible``
+                      // can't tell them apart: a button focused with Tab
+                      // keeps it through a click.)
+                      const pointer = endPointerRef.current
+                      endPointerRef.current = null
+                      if (e.detail === 0 || (!pointer && e.currentTarget === document.activeElement)) refocusRef.current = { generation }
                       onMarkAll?.()
                     }}
                     className="w-full min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated"

@@ -3648,12 +3648,33 @@ module.exports = [
       if (after.win !== 0 || after.wrapper <= 0) fail('DESK-LAYOUT', `the scroll moved the window by ${after.win}px and the wrapper by ${after.wrapper}px; only the wrapper should move`)
       await shot('scrolled')
 
+      // PR3b: Deals's end row (in NHL's grid row) clicked with the mouse,
+      // far down the page. Chromium focuses a button on mousedown, but a
+      // mouse click is not a keyboard press: the focus is not handed to
+      // the marker that replaces the row far above the screen, and the
+      // page does not move under the pointer.
+      const column = (re) => page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: re }) })
+      const scrollTop = () => page.evaluate(() => document.querySelector('[data-scroller]').scrollTop)
+      const deals = column(/^deals$/i)
+      const dealsRow = deals.locator('button[data-caught-up]')
+      if ((await dealsRow.count()) !== 1) return fail('DESK-LAYOUT', `the Deals column has no end row: ${JSON.stringify(await deals.locator('[data-caught-up]').allTextContents())}`)
+      await dealsRow.evaluate((el) => el.scrollIntoView({ block: 'end' }))
+      const atClick = await scrollTop()
+      await dealsRow.click()
+      if (!(await waitFor(async () => (await deals.locator('div[data-caught-up]').count()) === 1, 3000))) return fail('DESK-LAYOUT', `after a mouse click on Deals's end row the column still draws ${await cardCount(deals)} cards`)
+      // The hand-over would run within a render or two of the marker.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+      await sleep(300)
+      const afterClick = await scrollTop()
+      if (afterClick !== atClick) fail('DESK-LAYOUT', `a mouse click on Deals's end row moved the wrapper from ${atClick} to ${afterClick}`)
+      if ((await focusedNow(page)) === 'DIV[data-caught-up]') fail('DESK-LAYOUT', "after a mouse click on Deals's end row the focus went to its marker")
+
       // PR3b: News's end row pressed with the keyboard, far down the
       // page. The column shrinks to its marker while NHL's 60 cards keep
       // the grid row (and the page) as tall as it was, so the marker
       // that takes the focus is far above the screen: it is brought into
       // the wrapper's view, not left out of sight.
-      const news = page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: /^news$/i }) })
+      const news = column(/^news$/i)
       const endRow = news.locator('button[data-caught-up]')
       if ((await endRow.count()) !== 1) return fail('DESK-LAYOUT', `the News column has no end row: ${JSON.stringify(await news.locator('[data-caught-up]').allTextContents())}`)
       await endRow.evaluate((el) => el.scrollIntoView({ block: 'end' }))
@@ -3672,6 +3693,22 @@ module.exports = [
       if (!/^news$/i.test(String(seen.inNews))) fail('DESK-LAYOUT', `the focused marker is in ${JSON.stringify(seen.inNews)}, expected News`)
       if (seen.top < seen.from || seen.bottom > seen.to) fail('DESK-LAYOUT', `after News's end row from the keyboard (the wrapper at ${deep}) the focused marker is at ${seen.top}..${seen.bottom}, outside the wrapper's ${seen.from}..${seen.to} (wrapper now at ${seen.scrollTop})`)
       await shot('news-marked')
+
+      // PR3b: Security's end row pressed by a screen reader that sends
+      // mouse events alone (NVDA or JAWS in Firefox): a click with detail
+      // 1 on the focused button, with no pointerdown. That is not a
+      // mouse's press: the focus goes on to the marker.
+      const security = column(/^security$/i)
+      const securityRow = security.locator('button[data-caught-up]')
+      if ((await securityRow.count()) !== 1) return fail('DESK-LAYOUT', `the Security column has no end row: ${JSON.stringify(await security.locator('[data-caught-up]').allTextContents())}`)
+      await securityRow.evaluate((el) => {
+        el.scrollIntoView({ block: 'end' })
+        el.focus({ preventScroll: true })
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, view: window }))
+      })
+      if (!(await waitFor(async () => (await security.locator('div[data-caught-up]').count()) === 1, 3000))) return fail('DESK-LAYOUT', `after a screen reader's click on Security's end row the column still draws ${await cardCount(security)} cards`)
+      const onSecurity = () => page.evaluate(() => { const a = document.activeElement; return !!a && a.hasAttribute('data-caught-up') && a.closest('section').querySelector('header h2').textContent.trim() })
+      if (!(await waitFor(async () => /^security$/i.test(String(await onSecurity())), 1000))) fail('DESK-LAYOUT', `after a screen reader's click on Security's end row the focus is on ${await focusedNow(page)} (${JSON.stringify(await onSecurity())}), expected its marker`)
 
       // PR3b: ⋯ → Mark all as read on the NHL column: its 70 stories go
       // under the marker, folded, and its "70 new" goes.
@@ -3932,8 +3969,8 @@ module.exports = [
 
   // The end of a tab (D4, D24): with stories still unseen it reads "N not
   // seen · Mark as read"; opening two leaves them in place and counts them
-  // out; one tap on the row marks the rest, with Undo, and the focus the
-  // row held goes to the marker in its place. Undo puts them back above
+  // out; one tap on the row marks the rest, with Undo, and leaves the
+  // focus alone (a finger's press). Undo puts them back above
   // the marker. Marked again from the keyboard with Earlier open, Earlier
   // folds (a new snapshot of the same Column) and the focus is on the
   // marker. Marked, the tab opens on the marker, with Earlier (N) folded
@@ -3968,11 +4005,13 @@ module.exports = [
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('CAUGHT-UP', `after Mark as read ${(await groupIds(page, 'unseen')).length} stories are still above the marker`)
       if (!/^✓\s*You.re all caught up$/.test(await markerText(page))) fail('CAUGHT-UP', `after Mark as read the marker reads ${JSON.stringify(await markerText(page))}`)
       if (!(await page.getByText('Marked 38 as read', { exact: true }).isVisible())) fail('CAUGHT-UP', 'no "Marked 38 as read" toast')
-      // The tapped row held the focus; it goes to the marker in its place.
-      if (!(await waitFor(async () => (await focusedNow(page)) === 'DIV[data-caught-up]', 1000))) fail('CAUGHT-UP', `after Mark as read the focus is on ${await focusedNow(page)}, expected the marker`)
       const rest = all.slice(2)
       const sameSet = (a, b) => JSON.stringify([...a].sort((x, y) => x - y)) === JSON.stringify([...b].sort((x, y) => x - y))
       if (!(await waitFor(() => sameSet(seenAdded(writes, 'nhl'), all), 3000))) return fail('CAUGHT-UP', `seen:nhl got ${JSON.stringify(seenAdded(writes, 'nhl'))}, expected all 40`)
+      // A tap is a finger's press, not the keyboard's or a screen
+      // reader's: Chromium focused the row on the tap (an iPhone doesn't),
+      // but the focus is not handed to the marker in its place.
+      if ((await focusedNow(page)) === 'DIV[data-caught-up]') fail('CAUGHT-UP', 'after a tap on Mark as read the focus went to the marker')
       await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
       // The tab starts over at its first 30: load the rest.
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length > 0, 3000))) return fail('CAUGHT-UP', 'Undo brought nothing back above the marker')
@@ -4102,8 +4141,9 @@ module.exports = [
       if (!(await page.getByText(`Marked ${before.length} as read`, { exact: true }).isVisible())) fail('MARK-ALL', `no "Marked ${before.length} as read" toast`)
       const sorted = (a) => JSON.stringify([...a].sort((x, y) => x - y))
       if (!(await waitFor(() => sorted(seenAdded(writes, 'news')) === sorted(before), 3000))) return fail('MARK-ALL', `seen:news got ${JSON.stringify(seenAdded(writes, 'news'))}`)
-      await shot('marked')
 
+      // Undo while its toast is up (5 s): no screenshot before the tap,
+      // which with --out can take longer than that under load.
       await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
       if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(before), 3000))) fail('MARK-ALL', `after Undo the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected ${JSON.stringify(before)}`)
       if (await page.locator(PHONE_EARLIER).count()) fail('MARK-ALL', 'after Undo Earlier is still there')
@@ -4120,6 +4160,8 @@ module.exports = [
       await page.keyboard.press('Enter')
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('MARK-ALL', 'the second Mark all left stories above the marker')
       if ((await focusedNow(page)) !== onMore) fail('MARK-ALL', `after Mark all from the keyboard the focus is on ${await focusedNow(page)}, expected ⋯`)
+      // The marked tab and its toast; no Undo follows this one.
+      await shot('marked')
       await tap(page, more)
       await markAll.waitFor({ state: 'visible' })
       if (!(await markAll.isDisabled())) fail('MARK-ALL', 'Mark all as read is enabled with nothing left to mark')

@@ -412,9 +412,11 @@ History are gone, so a story is used up only by opening it or by Mark all
   middle-click on the headline, and from re-check round 1 on the
   Reddit-thread link and Listen),
   `flow-badge-cap` (99+, the tab's name with the full count, none at 0),
-  `flow-caught-up`, `flow-next-tab` (C8, the row's name, a hidden tab
+  `flow-caught-up` (from re-check round 3 the tap on the end row leaves
+  the focus alone), `flow-next-tab` (C8, the row's name, a hidden tab
   never named),
-  `flow-mark-all-read`, `flow-new-arrival-appends` (append, and hold
+  `flow-mark-all-read` (from re-check round 3 its `marked` screenshot
+  after the keyboard Mark all, not before the Undo tap), `flow-new-arrival-appends` (append, and hold
   while the marker is above the screen), `flow-return-after-10-min` (C1:
   9 min nothing; 11 min reset, the arrival first and the list at its top;
   an open straight before leaving: nothing; from the review fixes, an open
@@ -439,7 +441,9 @@ History are gone, so a story is used up only by opening it or by Mark all
   opens and an arrival goes in at once).
 - Changed flows: `flow-auto-append` ends with the marker;
   `flow-desktop-layout` adds a Mark all step (and from re-check round 2
-  News's end row pressed with the keyboard far down the page); `flow-reset-keeps-saves`
+  News's end row pressed with the keyboard far down the page; from
+  re-check round 3 Deals's end row clicked with the mouse there, and
+  Security's pressed the way NVDA or JAWS in Firefox press it); `flow-reset-keeps-saves`
   seeds `seen:news` and opens a story where it tapped ✓;
   `flow-foryou-fails-keeps-tab` and `flow-scroller-rotate` as under
   Deviations. FN's toast regex is `/^(\d+ new|Nothing new)$/`, looked for
@@ -564,7 +568,7 @@ in `feedOrder.test.ts`).
 | `flow-open-marks-seen` (review fix 3) | the headline's `onAuxClick` dropped | OPEN-SEEN: "a middle-click on story 103's headline sent no PATCH adding it to seen:news"; the badge reads "11", expected "10" |
 | `flow-earlier-keys-fold` (review fix 4) | Earlier opened on every render while the selection is in it (`!earlierOpen` for `selectedId !== openedFor`) | EARLIER-KEYS: "with the selection inside, the Earlier button left it expanded true with 2 cards drawn" |
 | `flow-arrival-batch-edge` (review fix 5) | no `drewAllUnseen` growth (`drewAllUnseen ? unseenTotal : 0` → `0`) | BATCH-EDGE: "the marker and Earlier left the page when the 31st story arrived" |
-| `flow-caught-up` (review fix 6) | the end row's focus not handed to the marker (the effect's `focus` call removed) | CAUGHT-UP: "after Mark as read the focus is on BODY, expected the marker", and the same from the keyboard |
+| `flow-caught-up` (review fix 6) | the end row's focus not handed to the marker (the effect's `focus` call removed) | CAUGHT-UP: "after Mark as read the focus is on BODY, expected the marker", and the same from the keyboard (since re-check round 3 only the keyboard step expects the hand-over; the tap step expects none) |
 | `flow-mark-all-read` (review fix 6) | the ⋯ row's Mark all doesn't focus ⋯ | MARK-ALL: "after Mark all the focus is on BODY, expected ⋯", and the same from the keyboard |
 | `flow-refresh-resets`, `flow-caught-up` (review fix 8) | `setEarlierOpen(false)` deleted from the generation reset | REFRESH: "after the second Refresh Earlier is expanded true with 1 cards drawn, expected it folded"; CAUGHT-UP: "after the second Mark as read Earlier is expanded true with 30 cards drawn" |
 | `flow-badge-cap` (review fix 9) | `col.key === SAVED_KEY ? 0 :` dropped in `countFor` | BADGE: "the Saved tab has a badge "3", named "Saved, 3 new"" |
@@ -627,7 +631,9 @@ Every one was fixed; none was skipped.
    so they never act on the old snapshot's values.
 6. **Both Mark-as-read controls dropped focus to `<body>`.** The caught-up
    marker is `tabIndex={-1}`. When the end row is pressed with the
-   keyboard or VoiceOver (it held focus, or a click with `detail` 0), an
+   keyboard or VoiceOver (it held focus, or a click with `detail` 0;
+   since re-check round 3, a click with `detail` 0, or one on the
+   focused button that no pointerdown started), an
    effect moves the focus to the new marker once the tab has started
    over, only if the focus fell to `<body>`, and without scrolling
    (re-check round 2: then brought into view if it isn't all inside the
@@ -844,7 +850,8 @@ tests, so that case changed too.
    now calls `marker.scrollIntoView({ block: 'nearest' })` when the
    marker isn't all inside `sentinelRoot`'s box. On the phone the list
    has shrunk to the marker, so nothing moves there (`flow-caught-up`'s
-   focus checks pass unchanged). `flow-desktop-layout` presses News's end
+   focus checks passed unchanged; re-check round 3 changed its tap
+   check, since a tap no longer hands the focus over). `flow-desktop-layout` presses News's end
    row with Enter while NHL's 60 cards keep the row tall, and checks the
    focused marker is inside the wrapper's box. `docs/DEVICE_CHECKS.md`
    gains a line for it.
@@ -982,6 +989,126 @@ this unit, which this pass did not stop, so every preview here bound
   re-run once. Loops 2 and 3: 0 failures (189 to 270 s a loop).
 - Mutation checks: the table above; every mutant failed its flow, and
   the flows the fixes made deterministic failed every run under load.
+
+## Review fixes (re-check round 3, "PR3b: re-check fixes, round 3")
+
+The re-check confirmed two minor findings, one in the app and one in the
+tests. Both were fixed; nothing was skipped.
+
+1. **A mouse click on the desktop end row could jump the page thousands
+   of pixels** (minor). Chrome and Edge (and Firefox on Windows and
+   Linux) focus a `<button>` on mousedown, so the end row's `onClick`
+   saw `e.currentTarget === document.activeElement` and took a mouse
+   click for a keyboard press. Round 2's `scrollIntoView` then brought
+   the new marker, far above the screen in the desktop grid, into view:
+   the page moved under the pointer and the longer column next to it
+   lost its place, which Undo doesn't give back. Before round 2 the same
+   mistake was harmless (the focus moved with `preventScroll`). Now a
+   `pointerdown` on the button records its `pointerType`
+   (`endPointerRef`), and the click reads and clears it. A press counts
+   as the keyboard's or a screen reader's when its click has `detail` 0
+   (a key, or a reader's simulated click: VoiceOver, TalkBack, NVDA or
+   JAWS in Chrome), or when it lands on the focused button and no
+   pointerdown started it (NVDA and JAWS in Firefox send mouse events
+   only, as round 2 found). A mouse, pen or finger press never does, so
+   it neither hands the focus over nor scrolls. The finding's first
+   suggestion, `:focus-visible`, was not used: a probe on a bare button
+   in this Chromium showed that a button focused with Tab keeps
+   `:focus-visible` through a mouse click or a tap on it, so a click
+   after a Tab would still have jumped the page; and
+   `matches(':focus-visible')` throws where the selector is unknown (iOS
+   before 15.4). The second suggestion (the last pointerdown's type) is
+   what was done.
+   This changes the phone too: Chromium also focuses the button on a
+   tap, so `flow-caught-up`'s tap used to hand the focus to the marker.
+   A tap now leaves the focus alone, as on an iPhone, where a tap never
+   focuses the button. VoiceOver on the iPhone keeps the hand-over as
+   long as its double-tap reaches the page as a simulated click with
+   `detail` 0, which is how WebKit sends an accessibility press; this
+   container has no WebKit, so the VoiceOver device check is still the
+   proof (see the risk under Verification below).
+   Tests: `flow-desktop-layout` clicks Deals's end row (in NHL's grid
+   row, next to News) with the mouse, scrolled to the wrapper's bottom
+   edge: the wrapper must not move and the focus must not go to Deals's
+   marker. After News's Enter step, Security's end row is focused and
+   sent a click with `detail` 1 and no pointerdown (the press NVDA and
+   JAWS make in Firefox): the focus must go to Security's marker.
+   `flow-caught-up`'s tap must leave the focus off the marker; its
+   keyboard step still expects the hand-over. `docs/DEVICE_CHECKS.md`
+   gains a mouse line next to the keyboard one.
+2. **`flow-mark-all-read` tapped Undo after its 5 s toast had gone when
+   screenshots were on** (minor, tests). `shot('marked')` sat between
+   the "Marked 12 as read" toast and the Undo tap, and with `--out` a
+   screenshot under load takes 3 to 5 s. The shot moved to after the
+   second Mark all (from the keyboard), where no Undo follows, so it
+   still shows the marked tab and its toast. The `seenAdded` wait stays
+   before Undo, so the add PATCH is seen before the removal. No other
+   PR3b flow has a screenshot between a toast and its Undo: all of them
+   pass with every screenshot slowed by 4 s (below).
+
+Changed: `Column.tsx` (the end row's `onPointerDown`, its `onClick` test
+and the comments), `flows.cjs` (`flow-desktop-layout`, `flow-caught-up`,
+`flow-mark-all-read`), the README rows for those three flows,
+`docs/DEVICE_CHECKS.md`, and the earlier text here that described the
+old test (review fix 6, round 2's fix 2, the Tests section and the
+review-fix mutation row for `flow-caught-up`).
+
+### Mutation checks (re-check round 3)
+
+Each mutant was a scratch copy of `frontend/` with one edit (the
+worktree untouched), built, served on port 4173 of its own loopback
+address, run with `--only flow-desktop-layout,flow-caught-up` and stopped
+by PID. The flow check used this build with `flows.cjs` from HEAD
+(1302051) in a scratch copy.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `flow-desktop-layout`, `flow-caught-up` (1) | round 2's test: `detail` 0 or the focus on the button | DESK-LAYOUT: "a mouse click on Deals's end row moved the wrapper from 4673 to 2614", "after a mouse click on Deals's end row the focus went to its marker"; CAUGHT-UP: "after a tap on Mark as read the focus went to the marker" (2 of 2) |
+| `flow-desktop-layout` (1) | `detail` 0 alone (the focused-button case dropped) | DESK-LAYOUT: "after a screen reader's click on Security's end row the focus is on BODY (false), expected its marker" (2 of 2) |
+| `flow-caught-up` (1) | only a mouse excluded (`pointer !== 'mouse'`) | CAUGHT-UP: "after a tap on Mark as read the focus went to the marker" (2 of 2) |
+| `flow-mark-all-read` (2) | HEAD's flow (the shot before Undo), `--out` | SETUP: "locator.tap: Timeout 30000ms exceeded" in 2 of 4 runs at load 1.5 to 3; with `shot()` slowed by 4 s in a scratch `smoke.cjs`, 2 of 2. The new flow: 0 of 4, and 0 of 2 slowed |
+
+### Verification (re-check round 3)
+
+On the same base (`e1f0390`), with the same local loop (`popping_test_f`,
+`vite preview` on port 4173, started and stopped by PID). 127.0.0.1:4173
+was still held by an orphaned preview from an earlier verifier of this
+unit (as in round 2), which this pass did not stop, so the final build
+was served on 127.0.0.2:4173 and the mutants on 127.0.0.3 to .5 (same
+port).
+
+- `npm run lint`: 0 errors (the same 4 react-refresh warnings).
+  `npm run build`: clean. `git diff --exit-code package.json
+  package-lock.json`: clean.
+- Unit tests: 193 of 193 pass (no library changed).
+- Backend pytest, the ten tests that read frontend source (slice 21,
+  slice 19 and the rest), on `popping_test_f`, run again after the last
+  edit: 210 passed. No prop, comparator entry or handler changed; the
+  end row's `onPointerDown` is an inline handler on its own button.
+- Strict smoke (`--csp --strict`, fonts-ci.conf), every state and flow,
+  on the final build: 0 failures, 0 warnings (172 runs, 564 s, load
+  about 3 to 4).
+- The PR3b flows and states (the 23 flows and 3 states of re-check round
+  1 at 390 and 320, 29 runs), looped 3 times on the final build: 0
+  failures each time (177 to 183 s a loop).
+- The same 29 runs with `--out` and every screenshot slowed by 4 s (a
+  scratch `smoke.cjs`): 0 failures (446 s), so no other PR3b flow waits
+  on a timer across a screenshot.
+- `flow-desktop-layout`, `flow-caught-up` and `flow-mark-all-read` with
+  `--out` on the final flows: 0 failures.
+- Mutation checks: the table above; every mutant failed its flow.
+- Risk: the VoiceOver hand-over on the iPhone now rests on the click
+  having `detail` 0. WebKit's accessibility press is a simulated click,
+  whose `detail` is 0; if a VoiceOver double-tap ever reached the page
+  as a tap with a pointerdown and `detail` 1, the focus would fall to
+  `<body>` as it does after a finger's tap, and VoiceOver would not land
+  on "You're all caught up". Nothing here can run WebKit, so the
+  existing VoiceOver device check is what decides it.
+- A pointerdown that never becomes a click (a drag off the button)
+  leaves its record until the next click on the end row, which then
+  counts as a pointer's press. Only a press that relies on the focused
+  button (NVDA or JAWS in Firefox) could be misread that way, and then
+  the focus falls to `<body>`, as with no hand-over at all.
 
 ## Open items for later units
 
