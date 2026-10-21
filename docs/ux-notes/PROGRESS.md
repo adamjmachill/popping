@@ -13,7 +13,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR2a Preference PATCH routes | B | merged | #28 |
 | PR2b prefSync client and sync rules | F | merged | #40 |
 | PR2c Refuse whole-list PUTs of set keys | B (floating) | waits for both devices on the PR2b build | |
-| PR3a Desktop single scroller and batching | F | in review | |
+| PR3a Desktop single scroller and batching | F | in review | #43 |
 | PR3b Read model | F | not started | |
 | PR3c Seen on scroll | F | not started | |
 | Gate 1 | owner | | |
@@ -27,14 +27,14 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR6b Pull to refresh and checkTabNow | F | not started | |
 | PR6c Slim phone header and the first-feed row | F | not started | |
 | Gate 2 | owner | | |
-| PR7a Tab order and hiding | F | in review | #42 |
+| PR7a Tab order and hiding | F | merged | #42 |
 | PR7b Tab ⋯ sheet and empty states | F | not started | |
 | PR8a Custom tabs | F | not started | |
 | PR8b Remove chips, presets and the old Sources UI | F | not started | |
 | PR9a Migration 0031 and feed health backend | B | merged | #35 |
 | PR9b Feed health UI | F | not started | |
 | PR10a article_detect library | B | merged | #34 |
-| PR10b Website crawl wiring and errors | B | in review | #39 |
+| PR10b Website crawl wiring and errors | B | merged | #39 |
 | PR11a Preview endpoint, browser headers, PATCH type | B | not started | |
 | PR11b Add flow and 409 | F | not started | |
 | PR11c Find its feed | F | not started | |

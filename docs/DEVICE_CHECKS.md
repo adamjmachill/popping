@@ -51,10 +51,10 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #42 · After moving any tab, give a feed a new category (Menu → Settings → Feeds, open the feed, New category). Pass: the new category's tab is last in the strip, and the feed's category list follows the tab order.
 - [ ] #42 · With VoiceOver on, open Edit and tap ↑ on a tab. Pass: VoiceOver reads the tab's name and new place, such as "News, 5 of 9", and focus stays on that ↑.
 - [ ] #42 · Turn on Airplane Mode, force-quit the home-screen app and open it again. Pass: the red error line shows, and no tab offers "Add your first feed".
-- [ ] #<pr> · On the laptop, make the browser window shorter than the For You row, then scroll down with the trackpad or mouse wheel. Pass: everything under the header (Brief, For You and the columns) scrolls as one page, the header stays at the top, and the columns under For You show their stories at full height, not as a thin strip.
-- [ ] #<pr> · On the phone, open a tab with more than 30 stories and scroll steadily to its end. Pass: more stories appear before you reach the bottom, with no tap and no visible jump, and the list ends with the tab's last story.
-- [ ] #<pr> · On the laptop, scroll down past the 30th story of a column with more than 30. Pass: the next stories appear as you near the end of the column.
-- [ ] #<pr> · With rotation unlocked, open the home-screen app with the phone held sideways, on a tab with more than 30 stories, then turn it upright. Pass: scrolling the tab to its end loads more stories, and tapping the tab again takes the list back to its top.
+- [ ] #43 · (If you have a desktop) On the laptop, make the browser window shorter than the For You row, then scroll down with the trackpad or mouse wheel. Pass: everything under the header (Brief, For You and the columns) scrolls as one page, the header stays at the top, and the columns under For You show their stories at full height, not as a thin strip.
+- [ ] #43 · On the phone, open a tab with more than 30 stories and scroll steadily to its end. Pass: more stories appear before you reach the bottom, with no tap and no visible jump, and the list ends with the tab's last story.
+- [ ] #43 · (If you have a desktop) On the laptop, scroll down past the 30th story of a column with more than 30. Pass: the next stories appear as you near the end of the column.
+- [ ] #43 · With rotation unlocked, open the home-screen app with the phone held sideways, on a tab with more than 30 stories, then turn it upright. Pass: scrolling the tab to its end loads more stories, and tapping the tab again takes the list back to its top.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
