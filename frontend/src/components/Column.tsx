@@ -3,6 +3,7 @@ import type { Entry } from '../api'
 import { Card } from './Card'
 import { FORYOU_KEY, SAVED_KEY, type ColKey } from '../lib/columns'
 import type { TabCount } from '../lib/feedOrder'
+import type { SeenRegistry } from '../lib/seen'
 import { FirstFeedButton } from './FirstFeedButton'
 import { normalizeSort, type Sort, type TabPrefs } from '../lib/sorting'
 
@@ -157,6 +158,16 @@ type Props = {
   // would always hold the sentinel. Null until App has the element;
   // nothing more loads until then.
   sentinelRoot?: HTMLElement | null
+  // Seen on scroll (PR3c): the phone tab's unseen cards and its marker
+  // register with ``seenRegistry`` (App's ``useSeenObserver``), which
+  // marks a card seen once it has been read on screen and scrolled off
+  // the top. Only the phone Column, and never Saved; App keys that
+  // Column by tab, so this never changes while it is mounted. Brief,
+  // search, the desktop and Saved are open only.
+  trackSeen?: boolean
+  // Stable for the App's life; the memo comparator ignores it, like the
+  // callbacks, and Column reads it through a ref.
+  seenRegistry?: SeenRegistry<Element>
 }
 
 // Cards render 30 at a time. A ``[data-more]`` sentinel after the last
@@ -179,11 +190,12 @@ type EndRows = { generation: number | undefined; count: number; next: TabCount |
 // ``onMarkAll``, ``onOpenTab``, ``onHoldChange``,
 // ``onSelectionFolded``, ``onHideEntry``,
 // ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
-// ``onToggleSummary``, ``onPrefsChange``) and the per-card
-// ``cardRefs`` — they're inherently per-render at the App layer; the
-// data-driven props (``sections``, ``unseenCount``, ``nextTab``,
-// ``generation``, ``sourcesById``, ``sourcesByName``, ``starredSet``,
-// ``hiddenSet``, ``votedMap``, ``prefs``, ``sentinelRoot``) and the
+// ``onToggleSummary``, ``onPrefsChange``), the per-card ``cardRefs``
+// and the stable ``seenRegistry`` — they're inherently per-render at the
+// App layer; the data-driven props (``sections``, ``unseenCount``,
+// ``nextTab``, ``generation``, ``trackSeen``, ``sourcesById``,
+// ``sourcesByName``, ``starredSet``, ``hiddenSet``, ``votedMap``,
+// ``prefs``, ``sentinelRoot``) and the
 // phone's ``scrollerRef`` (a stable setter or undefined, so comparing
 // it costs no render) are what we actually re-render against.
 //
@@ -234,6 +246,8 @@ export function ColumnInner({
   votedMap,
   scrollerRef,
   sentinelRoot,
+  trackSeen,
+  seenRegistry,
 }: Props) {
   const [popoverOpen, setPopoverOpen] = useState(false)
   // How many unseen cards render, and how many of Earlier's once it is
@@ -288,6 +302,9 @@ export function ColumnInner({
   // old callbacks; this one must reach App's current tab).
   const holdRef = useRef(onHoldChange)
   holdRef.current = onHoldChange
+  // The seen-on-scroll registry, for the stable card ref callback below.
+  const seenRef = useRef(seenRegistry)
+  seenRef.current = seenRegistry
 
   // Keep the latest ``cardRefs`` value in a ref so we can ship a
   // stable ref callback to each ``Card``. Without this, the inline
@@ -308,9 +325,17 @@ export function ColumnInner({
   // that card: the same story can be registered by the phone layout
   // and the desktop grid, and the grid unmounting (the window crossing
   // 768px) must not drop the phone card's entry.
-  // (PR3c registers the unseen cards it tracks for seen-on-scroll here,
-  // when ``trackSeen`` is set, so Card's memo stays untouched.)
-  const setCardRef = useCallback((entryId: number) => (el: HTMLElement | null, prev?: HTMLElement | null) => {
+  // An unseen card of a tab that tracks seen-on-scroll (``track``: the
+  // phone Column, above the marker) also registers with the seen
+  // registry here, so Card's memo stays untouched. A detach always
+  // unregisters, with the element going away (a card that moved to
+  // Earlier with a new snapshot is a new element).
+  const setCardRef = useCallback((entryId: number, track: boolean) => (el: HTMLElement | null, prev?: HTMLElement | null) => {
+    if (el) {
+      if (track) seenRef.current?.card(entryId, el)
+    } else {
+      seenRef.current?.card(entryId, null, prev)
+    }
     const refs = cardRefsLatest.current
     if (!refs) return
     const map = 'current' in refs ? refs.current : refs
@@ -472,6 +497,17 @@ export function ColumnInner({
     if (foldedSelection != null) onSelectionFolded?.(foldedSelection)
   }, [foldedSelection, onSelectionFolded])
 
+  // Seen on scroll's end rule (PR3c): the marker, in either form, is the
+  // end of the tab. Once it has been on screen for the dwell, the cards
+  // still on screen with it count as seen: nothing scrolls past the last
+  // ones.
+  useEffect(() => {
+    const reg = seenRef.current
+    if (!trackSeen || !marker || !reg) return
+    reg.marker(marker)
+    return () => reg.marker(null, marker)
+  }, [trackSeen, marker])
+
   // The end row's "Mark as read" was pressed with the keyboard or a
   // screen reader (never a mouse, pen or finger: its ``onClick``): once
   // the tab has started over, caught up, the focus that fell to <body>
@@ -498,6 +534,7 @@ export function ColumnInner({
 
   const empty = unseenTotal === 0 && earlierTotal === 0
   const cardProps = {
+    trackSeen: !!trackSeen,
     sourcesById,
     selectedId,
     cardRefs,
@@ -789,13 +826,16 @@ export function ColumnInner({
 type CardListProps = {
   entries: Entry[]
   dimmed: boolean
+  // The Column tracks seen-on-scroll: this run's cards register when
+  // they are the unseen ones (Earlier's are seen already).
+  trackSeen: boolean
   sourcesById: Map<number, string>
   selectedId: number | undefined
   cardRefs:
     | Map<number, HTMLElement | null>
     | React.MutableRefObject<Map<number, HTMLElement | null>>
     | undefined
-  setCardRef: (entryId: number) => (el: HTMLElement | null, prev?: HTMLElement | null) => void
+  setCardRef: (entryId: number, track: boolean) => (el: HTMLElement | null, prev?: HTMLElement | null) => void
   categoriesBySourceId: Map<number, string> | undefined
   faviconBySourceId: Map<number, string | null> | undefined
   onOpenEntry: ((entry: Entry) => void) | undefined
@@ -814,6 +854,7 @@ type CardListProps = {
 function CardList({
   entries,
   dimmed,
+  trackSeen,
   sourcesById,
   selectedId,
   cardRefs,
@@ -832,6 +873,7 @@ function CardList({
   votedMap,
   onSourceTap,
 }: CardListProps) {
+  const track = trackSeen && !dimmed
   return (
     <div className="space-y-2" data-group={dimmed ? 'earlier' : 'unseen'}>
       {entries.map((e) => {
@@ -854,7 +896,7 @@ function CardList({
             sourceFaviconPath={faviconBySourceId?.get(e.source_id)}
             dimmed={dimmed}
             selected={selectedId === e.id}
-            cardRef={cardRefs ? setCardRef(e.id) : undefined}
+            cardRef={cardRefs || track ? setCardRef(e.id, track) : undefined}
             onActivate={onOpenEntry ? () => onOpenEntry(e) : undefined}
             category={categoriesBySourceId?.get(e.source_id)}
             expanded={expandedSummaries?.has(e.id) ?? false}
@@ -1017,6 +1059,9 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     prev.nextTab === next.nextTab &&
     // A new snapshot: the batches start over and Earlier folds.
     prev.generation === next.generation &&
+    // Seen on scroll: fixed for a mounted Column (App keys the phone one
+    // by tab), compared all the same.
+    prev.trackSeen === next.trackSeen &&
     prev.selectedId === next.selectedId &&
     // ``prefs`` is a fresh object per columnPrefs write, but its
     // contents only change when the user opens the popover and picks

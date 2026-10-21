@@ -61,16 +61,21 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #45 · With VoiceOver on, go to the end of a tab and double-tap "N not seen · Mark as read". Pass: VoiceOver lands on "You're all caught up" in its place, not at the top of the page, and can reach the toast's Undo.
 - [ ] #45 · (If you have a desktop) On the laptop, scroll down to the end of a short column that sits next to a much longer one, press Tab until its "N not seen · Mark as read" is focused, then press Enter. Pass: the page scrolls up to that column's "You're all caught up", which shows the focus ring, and the next Tab goes on from there without a jump.
 - [ ] #45 · (If you have a desktop) In Chrome or Edge on the laptop, scroll down to the end of a short column that sits next to a much longer one and click its "N not seen · Mark as read" with the mouse (or trackpad). Pass: the page stays where it is, and the longer column next to it is still at the story you were looking at.
+- [ ] #<pr> · On the phone, open a tab with only 2 or 3 new stories (all on screen with the "N not seen · Mark as read" row under them) and wait 2 seconds. Pass: the row turns into "You're all caught up" and the tab's badge goes, with nothing moving.
+- [ ] #<pr> · On a tab with a badge, read the top story's card for a couple of seconds, scroll it off the top, and switch to another app straight away; force-quit Popping from the app switcher and reopen it. Pass: that tab's badge is one lower than before you scrolled.
+- [ ] #<pr> · Tap a tab with a badge and straight away (within a second) open the Menu; leave it open for a few seconds, close it, and flick the top story off the screen at once. Pass: the badge doesn't drop (a story behind the Menu wasn't being read).
+- [ ] #<pr> · Scroll slowly through Saved, and through a search's results. Pass: no tab's badge changes; only opening a story from there counts it as seen.
+- [ ] #<pr> · (If you have a desktop) On the laptop, scroll slowly down a column past several stories. Pass: its "N new" doesn't change; on the desktop only opening a story counts it as seen.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
-Opens when PR3c merges.
+Opens when PR3c merges. Every line is on the phone (the home-screen app).
 
 - [ ] Open the top story of a badged tab and come back. Pass: the badge drops by 1 and the list hasn't moved.
-- [ ] Scroll slowly past 5 cards. Pass: they count as seen.
-- [ ] Fling past 20. Pass: those stay unseen, and the end row offers "N not seen · Mark as read".
-- [ ] Dwell feel. Too eager → `SEEN_DWELL_MS` 1500, right → 1000, too slow → 700. This is a retune, not a stop.
-- [ ] Rotate to landscape and back, then scroll. Pass: marks still happen.
+- [ ] Scroll slowly down a badged tab past 5 stories, about a second on each, then look at the badge. Pass: it is 5 lower (they count as seen), and scrolling back up shows those 5 still in their places.
+- [ ] On a tab with 30 or more new stories, fling past 20 in one go. Pass: those stay unseen (the badge drops only by the few you had on screen before the fling), and at the end the row offers "N not seen · Mark as read", not "You're all caught up".
+- [ ] Dwell feel: read a tab at your normal pace for a minute. Too eager (stories you only glanced at count as seen) → `SEEN_DWELL_MS` 1500, right → 1000, too slow (stories you read don't count) → 700. This is a retune, not a stop.
+- [ ] With rotation unlocked, turn the phone sideways and back upright, then scroll slowly past 2 stories. Pass: the badge drops by 2 (marks still happen).
 
 ## Gate 2: pull to refresh (PR6b and PR6c, deployed together; also PR5a's swipe and sheet)
 

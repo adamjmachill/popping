@@ -36,7 +36,10 @@
 // installClock(page) in `before` and move time with page.clock.runFor (as
 // flow-fn-quiet-poll does). runFor also fires the regular visible poll, so
 // GET counts allow for it. Where real time is kept, pause at least twice
-// the delay under test.
+// the delay under test. On the phone a card is used up by being read on
+// screen and scrolled past, or by staying on screen with the marker
+// (PR3c): a flow that counts unseen stories while cards or the marker are
+// on screen holds the page's clock (holdClock) before it opens the tab.
 'use strict'
 
 const F = require('./fixtures.cjs')
@@ -782,6 +785,97 @@ const arrival = (id, like = 601) => {
   return { ...from, id, title: `Breaking story ${id}`, url: `https://example.com/${from.source_id}/arrival-${id}`, image_url: null, image_path: null, published_at: at, fetched_at: at }
 }
 const arrivalNhl = (id) => arrival(id, 601)
+
+// --- PR3c: seen on scroll ------------------------------------------------------
+
+// lib/seen.ts: a card qualifies after this long at least half on screen;
+// scroll-seen stories are collected this long before they are written.
+// Read from its source, so a retune at Gate 1 (SEEN_DWELL_MS 700 or 1500)
+// is one edit there.
+function seenConstant(name) {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', '..', 'src', 'lib', 'seen.ts'), 'utf8')
+  const m = src.match(new RegExp(`export const ${name} = (\\d+)\\b`))
+  if (!m) throw new Error(`flows.cjs: no ${name} in src/lib/seen.ts`)
+  return Number(m[1])
+}
+const SEEN_DWELL_MS = seenConstant('SEEN_DWELL_MS')
+const SEEN_BATCH_MS = seenConstant('SEEN_BATCH_MS')
+// Holds the page's timers where they are (installClock in `before`
+// first): nothing that waits on a timer runs until the flow moves the
+// clock with runFor. On the phone a card on screen for SEEN_DWELL_MS
+// and then scrolled past is used up (PR3c), and so are the cards on
+// screen with the marker; a flow that counts unseen stories with cards
+// or the marker on screen holds the clock, so it counts what it tests
+// and not how long a step took. It pauses a second ahead, as the other
+// flows do: the page's clock keeps running until the pause lands, so a
+// smaller step can land in its past. Hold before the tap that opens the
+// tab under test (its cards then start with no time on screen).
+async function holdClock(page) {
+  const now = await page.evaluate(() => Date.now())
+  await page.clock.pauseAt(now + 1000)
+}
+// Resolves once every IntersectionObserver has reported the page as it
+// is now: a new observer's first report comes in the same task as every
+// older observer's (one task notifies them all, oldest first), so the
+// app's have run by then. Works with the clock held (no rAF needed).
+const observersSettled = (page) =>
+  page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const io = new IntersectionObserver(() => {
+          io.disconnect()
+          resolve()
+        })
+        io.observe(document.body)
+      }),
+  )
+// The phone list's cards above the marker, by id: at least half on
+// screen now (`half`), or entirely above its top (`above`).
+const listCards = (page) =>
+  page.locator(PHONE_LIST).evaluate((el) => {
+    const box = el.getBoundingClientRect()
+    const half = []
+    const above = []
+    for (const a of el.querySelectorAll('[data-group="unseen"] article[data-card-id]')) {
+      const r = a.getBoundingClientRect()
+      const id = Number(a.getAttribute('data-card-id'))
+      const shown = Math.max(0, Math.min(r.bottom, box.bottom) - Math.max(r.top, box.top))
+      if (r.height > 0 && shown >= 0.5 * Math.min(r.height, box.height)) half.push(id)
+      if (r.bottom <= box.top) above.push(id)
+    }
+    return { half, above }
+  })
+// Scrolls the phone list by `px` and waits for the observers to see it.
+async function scrollListBy(page, px) {
+  await page.locator(PHONE_LIST).evaluate((el, d) => {
+    el.scrollTop += d
+  }, px)
+  await observersSettled(page)
+}
+// Scrolls the phone list so card `id`'s top is at the list's top: every
+// card before it is above the top.
+async function scrollCardToTop(page, id) {
+  await page.locator(PHONE_LIST).evaluate((el, cid) => {
+    const card = el.querySelector(`article[data-card-id="${cid}"]`)
+    el.scrollTop += card.getBoundingClientRect().top - el.getBoundingClientRect().top
+  }, id)
+  await observersSettled(page)
+}
+// The cards on screen stay there for the dwell (they qualify).
+const dwell = (page) => page.clock.runFor(SEEN_DWELL_MS + 100)
+// The scroll-seen batch, then prefSync's PATCH batch, go out, and every
+// request sent is answered, so `prefWrites` holds it: a check that
+// nothing was written can follow.
+async function writeSeen(page) {
+  await page.clock.runFor(SEEN_BATCH_MS + 50)
+  await page.clock.runFor(1100)
+  await requestsSettled(page)
+}
+// Every request to /api/preferences and /api/interactions the page has
+// sent is answered (the harness's fetch log): one a timer just sent has
+// reached the flow's routes.
+const requestsSettled = (page) => waitFor(() => harnessLog(page).then((h) => h.fetches.every((f) => f.answered)), 5000)
+const sortedIds = (a) => [...a].sort((x, y) => x - y)
 
 module.exports = [
   flow('flow-fj-youtube-handle', {
@@ -2740,6 +2834,8 @@ module.exports = [
 
   // The fetch wrapper records keepalive: the load-time GET without it, and
   // the views still queued when the page hides with it (beacon refused).
+  // Since PR3c a card sends its view when it is seen on scroll, not when
+  // it is drawn: one read on screen and scrolled off the top queues one.
   dashFlow('flow-h1-keepalive', {
     before: async ({ page }) => {
       // Views stay queued (no idle callback) and the beacon is refused, so
@@ -2755,6 +2851,12 @@ module.exports = [
       if (!load) fail('H1-KEEPALIVE', `the load-time GET /api/preferences was not recorded: ${JSON.stringify(fetches)}`)
       else if (load.keepalive) fail('H1-KEEPALIVE', 'the load-time GET /api/preferences was recorded with keepalive')
       if (fetches.some((f) => f.keepalive)) fail('H1-KEEPALIVE', `a keepalive fetch before the page hid: ${JSON.stringify(fetches)}`)
+      // Real time: twice the dwell on screen, then the top card scrolled
+      // off the top.
+      await sleep(2 * SEEN_DWELL_MS + 200)
+      const { half } = await listCards(page)
+      if (half.length < 2) return fail('H1-KEEPALIVE', `the shown tab has ${JSON.stringify(half)} on screen, expected two cards or more`)
+      await scrollCardToTop(page, half[1])
       await setHidden(page, true)
       const sent = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'POST' && f.path === '/api/interactions/batch' && f.keepalive))
       if (!(await waitFor(sent, 3000))) {
@@ -3731,11 +3833,15 @@ module.exports = [
 
   // A long tab grows as you scroll: 30 cards, then 60 once the list is
   // within 600px of its end, then all 70, with no "load more" row left.
+  // The page's clock is held (PR3c): the list is flicked through, so no
+  // card is read on screen and scrolled past, and none is used up.
   dashFlow('flow-auto-append', {
     before: async ({ page }) => {
+      await installClock(page)
       await withStories(page, moreNhl(67))
     },
     run: async ({ page, fail, shot }) => {
+      await holdClock(page)
       await tap(page, phoneTab(page, /^nhl/i))
       if (!/^nhl/i.test(await selectedTab(page))) return fail('AUTO-APPEND', 'could not select the NHL tab')
       const column = page.locator(`${MOBILE_MAIN} section`)
@@ -3968,19 +4074,25 @@ module.exports = [
   }),
 
   // The end of a tab (D4, D24): with stories still unseen it reads "N not
-  // seen · Mark as read"; opening two leaves them in place and counts them
-  // out; one tap on the row marks the rest, with Undo, and leaves the
-  // focus alone (a finger's press). Undo puts them back above
-  // the marker. Marked again from the keyboard with Earlier open, Earlier
+  // seen · Mark as read". Flung to the end (the page's clock held: no card
+  // read on the way), all 40 are unseen; once the last cards have been on
+  // screen with the marker for the dwell they are used up (PR3c's end
+  // rule), and the flung ones keep "You're all caught up" away: the row
+  // counts them. Opening two leaves them in place and counts them out;
+  // one tap on the row marks the rest, with Undo, and leaves the focus
+  // alone (a finger's press). Undo puts them back above the marker.
+  // Marked again from the keyboard with Earlier open, Earlier
   // folds (a new snapshot of the same Column) and the focus is on the
   // marker. Marked, the tab opens on the marker, with Earlier (N) folded
   // under it, also after leaving it and coming back.
   dashFlow('flow-caught-up', {
     before: async ({ page }) => {
+      await installClock(page)
       await withStories(page, moreNhl(37))
     },
     run: async ({ page, fail, shot }) => {
       const writes = await prefWrites(page)
+      await holdClock(page)
       await tap(page, phoneTab(page, /^nhl/i))
       if (!(await phoneListToEnd(page))) return fail('CAUGHT-UP', 'the NHL list never finished loading')
       const all = await groupIds(page, 'unseen')
@@ -3992,40 +4104,62 @@ module.exports = [
       if (!rowBox || rowBox.height < 43.5) fail('CAUGHT-UP', `the end row is ${rowBox && rowBox.height}px tall`)
       if (await page.locator(`${PHONE_LIST} [role="status"]`).count()) fail('CAUGHT-UP', 'a row in the list is role="status"')
 
+      // The end rule (PR3c): the cards on screen with the marker for the
+      // dwell are used up; every card flung past stays unseen. (The last
+      // batch went in below the scroll position: to the end again.)
+      await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, el.scrollHeight))
+      await observersSettled(page)
+      const last = (await listCards(page)).half
+      if (!last.length || last.length > 6) return fail('CAUGHT-UP', `at the end ${JSON.stringify(last)} are on screen`)
+      await dwell(page)
+      await page.clock.runFor(SEEN_BATCH_MS + 50)
+      const left = 40 - last.length
+      const flungRow = `${left} not seen · Mark as read`
+      if (!(await waitFor(async () => (await markerText(page)) === flungRow, 3000))) fail('CAUGHT-UP', `with ${JSON.stringify(last)} read at the end, the end row reads ${JSON.stringify(await markerText(page))}, expected ${JSON.stringify(flungRow)}`)
+      if (/caught up/.test(await markerText(page))) fail('CAUGHT-UP', "the cards flung past didn't keep \"You're all caught up\" away")
+      if ((await badge(page, /^nhl/i)) !== String(left)) fail('CAUGHT-UP', `the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}, expected "${left}"`)
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(all)) fail('CAUGHT-UP', 'the end rule moved the list')
+      await shot('flung')
+
       // Two opened: they stay where they are and the row counts them out.
       await openStory(page, all[0])
       await openStory(page, all[1])
-      if (!(await waitFor(async () => (await markerText(page)) === '38 not seen · Mark as read', 3000))) fail('CAUGHT-UP', `after two opens the end row reads ${JSON.stringify(await markerText(page))}`)
+      const afterOpens = `${left - 2} not seen · Mark as read`
+      if (!(await waitFor(async () => (await markerText(page)) === afterOpens, 3000))) fail('CAUGHT-UP', `after two opens the end row reads ${JSON.stringify(await markerText(page))}, expected ${JSON.stringify(afterOpens)}`)
       if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(all)) fail('CAUGHT-UP', 'opening stories moved the list')
       await shot('not-seen')
 
-      // One tap on the row marks the other 38, with Undo.
+      // One tap on the row marks the rest, with Undo.
+      const rest = all.slice(2).filter((id) => !last.includes(id))
       await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, el.scrollHeight))
       await tap(page, page.locator(PHONE_MARKER))
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('CAUGHT-UP', `after Mark as read ${(await groupIds(page, 'unseen')).length} stories are still above the marker`)
       if (!/^✓\s*You.re all caught up$/.test(await markerText(page))) fail('CAUGHT-UP', `after Mark as read the marker reads ${JSON.stringify(await markerText(page))}`)
-      if (!(await page.getByText('Marked 38 as read', { exact: true }).isVisible())) fail('CAUGHT-UP', 'no "Marked 38 as read" toast')
-      const rest = all.slice(2)
-      const sameSet = (a, b) => JSON.stringify([...a].sort((x, y) => x - y)) === JSON.stringify([...b].sort((x, y) => x - y))
+      if (!(await page.getByText(`Marked ${rest.length} as read`, { exact: true }).isVisible())) fail('CAUGHT-UP', `no "Marked ${rest.length} as read" toast`)
+      // No card above the marker now: the writes can go.
+      await page.clock.runFor(1100)
+      const sameSet = (a, b) => JSON.stringify(sortedIds(a)) === JSON.stringify(sortedIds(b))
       if (!(await waitFor(() => sameSet(seenAdded(writes, 'nhl'), all), 3000))) return fail('CAUGHT-UP', `seen:nhl got ${JSON.stringify(seenAdded(writes, 'nhl'))}, expected all 40`)
       // A tap is a finger's press, not the keyboard's or a screen
       // reader's: Chromium focused the row on the tap (an iPhone doesn't),
       // but the focus is not handed to the marker in its place.
       if ((await focusedNow(page)) === 'DIV[data-caught-up]') fail('CAUGHT-UP', 'after a tap on Mark as read the focus went to the marker')
       await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
-      // The tab starts over at its first 30: load the rest.
+      // The tab starts over at its first 30 (the clock moves only to send
+      // the Undo; the cards then on screen at the top are read).
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length > 0, 3000))) return fail('CAUGHT-UP', 'Undo brought nothing back above the marker')
+      await page.clock.runFor(1100)
+      if (!(await waitFor(() => sameSet(seenRemoved(writes, 'nhl'), rest), 3000))) fail('CAUGHT-UP', `Undo removed ${JSON.stringify(seenRemoved(writes, 'nhl'))}, expected exactly the ${rest.length} it added`)
       await phoneListToEnd(page)
-      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(rest), 3000))) fail('CAUGHT-UP', `after Undo the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the 38 marked`)
-      if (!(await waitFor(() => sameSet(seenRemoved(writes, 'nhl'), rest), 3000))) fail('CAUGHT-UP', `Undo removed ${JSON.stringify(seenRemoved(writes, 'nhl'))}, expected exactly the 38 it added`)
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(rest), 3000))) fail('CAUGHT-UP', `after Undo the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the ${rest.length} marked`)
       const earlierAfterUndo = await textNow(page, PHONE_EARLIER)
-      if (earlierAfterUndo !== 'Earlier (2)') fail('CAUGHT-UP', `after Undo Earlier reads ${JSON.stringify(earlierAfterUndo)}, expected the two opened`)
+      if (earlierAfterUndo !== `Earlier (${2 + last.length})`) fail('CAUGHT-UP', `after Undo Earlier reads ${JSON.stringify(earlierAfterUndo)}, expected the two opened and the ${last.length} read at the end`)
 
       // Earlier opened, then marked again from the keyboard: Earlier folds
       // with the new snapshot (the same Column, no tab switch), and the
       // focus goes to the marker, not to <body>.
       await tap(page, page.locator(PHONE_EARLIER))
-      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length === 2, 3000))) fail('CAUGHT-UP', `Earlier (2) opened shows ${(await groupIds(page, 'earlier')).length} cards`)
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length === 2 + last.length, 3000))) fail('CAUGHT-UP', `Earlier (${2 + last.length}) opened shows ${(await groupIds(page, 'earlier')).length} cards`)
       await phoneListToEnd(page)
       await page.locator(PHONE_MARKER).focus()
       await page.keyboard.press('Enter')
@@ -4176,9 +4310,12 @@ module.exports = [
   // (scroll anchoring off, as on Safari): another tab's first story
   // doesn't bring C8's row in, and this tab's arrival doesn't turn
   // "You're all caught up" into "1 not seen" or take C8's row away,
-  // until the marker is back on screen.
+  // until the marker is back on screen. The page's clock is held: the
+  // unseen cards sit on screen with the marker, and on the phone they
+  // would be used up a second later (PR3c's end rule).
   dashFlow('flow-new-arrival-appends', {
     before: async ({ page, context }) => {
+      await installClock(page)
       await withStories(page, moreNhl(37))
       await withArrivals(page)
       // Every NHL story but the two newest is seen: Earlier holds 38.
@@ -4193,6 +4330,7 @@ module.exports = [
         await landed
         await sleep(400)
       }
+      await holdClock(page)
       await tap(page, phoneTab(page, /^nhl/i))
       if (JSON.stringify(await groupIds(page, 'unseen')) !== '[601,602]') return fail('ARRIVAL', `the NHL tab opens with ${JSON.stringify(await groupIds(page, 'unseen'))} above the marker`)
       await poll(arrivalNhl(7901))
@@ -4293,15 +4431,19 @@ module.exports = [
   // (30 of 30): once every unseen card has been drawn the list grows with
   // the arrival at once, so the marker and an open Earlier never leave
   // the page for a frame while a batch waits for the "load more"
-  // sentinel (and the list never jumps when they come back).
+  // sentinel (and the list never jumps when they come back). The page's
+  // clock is held: the last cards sit on screen with the marker (PR3c's
+  // end rule would use them up a second later).
   dashFlow('flow-arrival-batch-edge', {
     before: async ({ page, context }) => {
+      await installClock(page)
       await withStories(page, moreNhl(30))
       await withArrivals(page)
       // 33 NHL stories, the three oldest seen: 30 unseen, Earlier (3).
       prefMock(context).seed({ 'seen:nhl': moreNhl(30).slice(-3).map((e) => e.id) })
     },
     run: async ({ page, fail, shot }) => {
+      await holdClock(page)
       await tap(page, phoneTab(page, /^nhl/i))
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 30 && (await markerText(page)) === '30 not seen · Mark as read', 3000))) {
         return fail('BATCH-EDGE', `the NHL tab draws ${(await groupIds(page, 'unseen')).length} unseen cards and ends with ${JSON.stringify(await markerText(page))}, expected 30 and the marker`)
@@ -4781,6 +4923,284 @@ module.exports = [
       const nhlDrawn = (await groupIds(page, 'unseen')).length
       const nhlSentinel = await nhlMore.count()
       if (nhlDrawn !== 30 || nhlSentinel !== 1) fail('REFRESH', `after a Refresh to 60 unseen with 60 drawn before it, the NHL tab draws ${nhlDrawn} unseen cards ${nhlSentinel ? 'with' : 'without'} a "load more" sentinel, expected its first 30 and the sentinel`)
+    },
+  }),
+
+  // --- PR3c: seen on scroll ----------------------------------------------------
+
+  // Seen on scroll (D3): on the phone, a card at least half on screen for
+  // SEEN_DWELL_MS and then scrolled off the top is used up. The tab is
+  // opened with a tap (a new list, so the observer rebinds to it) and the
+  // Menu opened and closed: while it is open the dwell doesn't count, and
+  // once closed it pauses nothing, though it stays mounted with
+  // aria-modal. The seen: PATCHes add exactly the qualified cards that
+  // left the top, the badge drops by as many, and no card moves. In a
+  // fling, the cards on screen when it starts are seen and the cards first
+  // shown during it stay unseen. A card seen on scroll just before ⋯ →
+  // Mark all stays seen after Mark all's Undo.
+  dashFlow('flow-scroll-marks-seen', {
+    before: async ({ page }) => {
+      await installClock(page)
+      await withStories(page, moreNhl(37))
+    },
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      await holdClock(page)
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!/^nhl/i.test(await selectedTab(page))) return fail('SCROLL-SEEN', 'could not select the NHL tab')
+      await observersSettled(page)
+      const order = await groupIds(page, 'unseen')
+      if (order.length !== 30) return fail('SCROLL-SEEN', `the NHL tab draws ${order.length} cards, expected its first 30`)
+      if ((await badge(page, /^nhl/i)) !== '40') fail('SCROLL-SEEN', `the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}, expected "40"`)
+      const added = () => seenAdded(writes, 'nhl')
+      const sameOrder = async () => {
+        const now = await groupIds(page, 'unseen')
+        return JSON.stringify(now.slice(0, order.length)) === JSON.stringify(order)
+      }
+
+      // The Menu open for longer than the dwell, closed, then the top card
+      // scrolled off at once: it never qualified, so it stays unseen.
+      await tap(page, page.locator('button[aria-label="open menu"]'))
+      await menuOpened(page)
+      await dwell(page)
+      await tap(page, page.locator('button[aria-label="close menu"]'))
+      await page.waitForFunction(() => document.querySelector('aside[aria-label="menu"]').hasAttribute('inert'), null, { timeout: 3000 })
+      await scrollCardToTop(page, order[1])
+      await writeSeen(page)
+      if (added().length) fail('SCROLL-SEEN', `a card scrolled off straight after the Menu, which was open through the dwell, was marked: ${JSON.stringify(added())}`)
+
+      // Read, then scrolled off the top: those cards, and only those.
+      await dwell(page)
+      const before = await listCards(page)
+      const firstQualified = before.half
+      const next = order.find((id) => !firstQualified.includes(id) && !before.above.includes(id))
+      await scrollCardToTop(page, next)
+      const leftTop = (await listCards(page)).above.filter((id) => firstQualified.includes(id))
+      if (leftTop.length !== firstQualified.length) return fail('SCROLL-SEEN', `the scroll took ${JSON.stringify(leftTop)} off the top, expected ${JSON.stringify(firstQualified)}`)
+      if (added().length) fail('SCROLL-SEEN', `a seen: PATCH went before its batches: ${JSON.stringify(added())}`)
+      await writeSeen(page)
+      if (!(await waitFor(() => added().length >= leftTop.length, 3000))) return fail('SCROLL-SEEN', `scrolling ${JSON.stringify(leftTop)} off the top sent ${JSON.stringify(added())}`)
+      if (JSON.stringify(sortedIds(added())) !== JSON.stringify(sortedIds(leftTop))) fail('SCROLL-SEEN', `seen:nhl got ${JSON.stringify(added())}, expected exactly ${JSON.stringify(leftTop)}`)
+      const nhlPatches = writes.filter((w) => w.method === 'PATCH' && w.key === 'seen:nhl').length
+      if (nhlPatches !== 1) fail('SCROLL-SEEN', `${nhlPatches} seen:nhl PATCHes for one batch, expected 1`)
+      const afterRead = String(40 - leftTop.length)
+      if (!(await waitFor(async () => (await badge(page, /^nhl/i)) === afterRead, 3000))) fail('SCROLL-SEEN', `the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}, expected "${afterRead}"`)
+      if (!(await sameOrder())) fail('SCROLL-SEEN', `the cards moved: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if (added().includes(order[0])) fail('SCROLL-SEEN', `story ${order[0]}, scrolled off before it qualified, was marked`)
+
+      // A fling: the cards on screen when it starts were read (a dwell
+      // with them there); the ones it shows on the way never are. It
+      // stops short of the end.
+      await dwell(page)
+      const atFling = (await listCards(page)).half
+      for (let i = 0; i < 5; i++) await scrollListBy(page, 350)
+      const flung = await listCards(page)
+      if (await page.locator(PHONE_MARKER).count()) {
+        const marker = await page.locator(PHONE_MARKER).boundingBox()
+        if (marker && marker.y < 844) return fail('SCROLL-SEEN', 'the fling reached the marker; the flow needs a longer tab')
+      }
+      const readBefore = atFling.filter((id) => flung.above.includes(id))
+      const passed = flung.above.filter((id) => !atFling.includes(id) && !firstQualified.includes(id) && id !== order[0])
+      if (!passed.length) return fail('SCROLL-SEEN', 'the fling passed no card it first showed')
+      await writeSeen(page)
+      const want = sortedIds([...leftTop, ...readBefore])
+      if (!(await waitFor(() => added().length >= want.length, 3000))) return fail('SCROLL-SEEN', `after the fling seen:nhl got ${JSON.stringify(added())}, expected ${JSON.stringify(want)}`)
+      if (JSON.stringify(sortedIds(added())) !== JSON.stringify(want)) fail('SCROLL-SEEN', `after the fling seen:nhl got ${JSON.stringify(sortedIds(added()))}, expected exactly ${JSON.stringify(want)} (cards first shown in the fling: ${JSON.stringify(passed)})`)
+      const afterFling = String(40 - want.length)
+      if (!(await waitFor(async () => (await badge(page, /^nhl/i)) === afterFling, 3000))) fail('SCROLL-SEEN', `after the fling the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}, expected "${afterFling}"`)
+      if (!(await sameOrder())) fail('SCROLL-SEEN', `the cards moved after the fling: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      await shot('after-fling')
+
+      // A card seen on scroll and still being collected when ⋯ → Mark all
+      // runs is written as seen first: Mark all counts and undoes only
+      // what it marked.
+      await dwell(page)
+      const now = await listCards(page)
+      const pending = now.half[0]
+      await scrollCardToTop(page, now.half[1])
+      const toMark = 40 - want.length - 1
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-mark-all]`))
+      if (!(await waitFor(() => page.getByText(`Marked ${toMark} as read`, { exact: true }).isVisible(), 3000))) fail('SCROLL-SEEN', `no "Marked ${toMark} as read" toast with story ${pending} seen on scroll just before`)
+      // Mark all's PATCH goes first (no card above the marker now), or the
+      // Undo would fold into it and send nothing.
+      await page.clock.runFor(1100)
+      await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
+      await page.clock.runFor(1100)
+      if (!(await waitFor(() => seenRemoved(writes, 'nhl').length > 0, 3000))) return fail('SCROLL-SEEN', 'Undo sent no removal')
+      if (seenRemoved(writes, 'nhl').includes(pending)) fail('SCROLL-SEEN', `Mark all's Undo took back story ${pending}, seen on scroll before it`)
+      if (seenRemoved(writes, 'nhl').length !== toMark) fail('SCROLL-SEEN', `Undo removed ${seenRemoved(writes, 'nhl').length}, expected the ${toMark} Mark all marked`)
+      if (!added().includes(pending)) fail('SCROLL-SEEN', `story ${pending}, seen on scroll, was never written`)
+    },
+  }),
+
+  // The ranking's `view` is sent when a card is seen on scroll, not when
+  // it is drawn: a tab opened and read for a while sends none, and the
+  // one card scrolled off the top sends one.
+  dashFlow('flow-view-on-seen', {
+    before: async ({ page }) => {
+      await installClock(page)
+      await withStories(page, moreNhl(37))
+    },
+    run: async ({ page, fail }) => {
+      await recordInteractions(page)
+      await holdClock(page)
+      await tap(page, phoneTab(page, /^nhl/i))
+      await observersSettled(page)
+      const views = () => page._events.filter((e) => e.type === 'view').map((e) => e.entry_id)
+      // Drawn and on screen through the dwell, then long enough for the
+      // interaction batch to go (its idle callback waits at most 1 s).
+      await dwell(page)
+      await page.clock.runFor(1500)
+      await requestsSettled(page)
+      if (views().length) fail('VIEW-ON-SEEN', `views sent for cards only drawn: ${JSON.stringify(views())}`)
+      const { half } = await listCards(page)
+      await scrollCardToTop(page, half[1])
+      await page.clock.runFor(1500)
+      if (!(await waitFor(() => views().length > 0, 3000))) return fail('VIEW-ON-SEEN', `story ${half[0]} was seen on scroll and no view was sent`)
+      if (JSON.stringify(views()) !== JSON.stringify([half[0]])) fail('VIEW-ON-SEEN', `views ${JSON.stringify(views())}, expected only [${half[0]}]`)
+    },
+  }),
+
+  // A card that leaves the top just before the page hides (within the
+  // 300 ms the seen batch waits) goes out in the hide's keepalive PATCH.
+  // A dwell the hide cuts in two starts over when the page is back.
+  dashFlow('flow-seen-flush-on-hide', {
+    before: async ({ page }) => {
+      await installClock(page)
+      await withStories(page, moreNhl(37))
+    },
+    run: async ({ page, fail }) => {
+      const writes = await prefWrites(page)
+      await holdClock(page)
+      await tap(page, phoneTab(page, /^nhl/i))
+      await observersSettled(page)
+      await dwell(page)
+      const { half } = await listCards(page)
+      const gone = half[0]
+      await scrollCardToTop(page, half[1])
+      if (seenAdded(writes, 'nhl').length) fail('SEEN-HIDE', `the mark went before the page hid: ${JSON.stringify(writes)}`)
+      // The clock is held: neither the 300 ms batch nor the 1 s PATCH batch
+      // can run, so only the hide's flush can send it.
+      await setHidden(page, true)
+      const keptAlive = () =>
+        harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PATCH' && decodeURIComponent(f.path) === '/api/preferences/seen:nhl' && f.keepalive))
+      if (!(await waitFor(keptAlive, 3000))) fail('SEEN-HIDE', 'hiding right after a card left the top sent no keepalive PATCH of seen:nhl')
+      if (!(await waitFor(() => (prefMock(page.context()).value('seen:nhl') || []).includes(gone), 3000))) fail('SEEN-HIDE', `story ${gone}, seen as the page hid, never reached the store`)
+      if (JSON.stringify(seenAdded(writes, 'nhl')) !== JSON.stringify([gone])) fail('SEEN-HIDE', `the hide sent ${JSON.stringify(seenAdded(writes, 'nhl'))}, expected [${gone}]`)
+      await setHidden(page, false)
+
+      // Hidden 60% into a dwell and back at once (iOS freezes a hidden
+      // page's timers and fires them late, just after it is back): the
+      // dwell starts over, so half a dwell after the return, past where
+      // the first timer was due, the cards haven't qualified. (600 ms and
+      // 500 ms at SEEN_DWELL_MS 1000; scaled, so a retune keeps the step.)
+      const intoDwell = Math.round(SEEN_DWELL_MS * 0.6)
+      const afterReturn = Math.round(SEEN_DWELL_MS * 0.5)
+      const ids = await groupIds(page, 'unseen')
+      const shown = (await listCards(page)).half
+      const fresh = ids[Math.max(...shown.map((id) => ids.indexOf(id))) + 2]
+      await scrollCardToTop(page, fresh)
+      const freshShown = (await listCards(page)).half
+      if (!freshShown.length || freshShown.some((id) => shown.includes(id))) return fail('SEEN-HIDE', `after the jump ${JSON.stringify(freshShown)} are on screen, expected new cards`)
+      await page.clock.runFor(intoDwell)
+      await setHidden(page, true)
+      await setHidden(page, false)
+      await page.clock.runFor(afterReturn)
+      const after = ids[Math.max(...freshShown.map((id) => ids.indexOf(id))) + 2]
+      await scrollCardToTop(page, after)
+      await writeSeen(page)
+      const early = seenAdded(writes, 'nhl').filter((id) => freshShown.includes(id))
+      if (early.length) fail('SEEN-HIDE', `${JSON.stringify(early)} counted on a dwell the hide cut in two`)
+      // Read for a full dwell after that, the next cards do count.
+      const next = (await listCards(page)).half
+      await dwell(page)
+      await scrollCardToTop(page, ids[Math.max(...next.map((id) => ids.indexOf(id))) + 1])
+      await writeSeen(page)
+      if (!(await waitFor(() => next.every((id) => seenAdded(writes, 'nhl').includes(id)), 3000))) fail('SEEN-HIDE', `after a full dwell ${JSON.stringify(next)} went off the top and seen:nhl got ${JSON.stringify(seenAdded(writes, 'nhl'))}`)
+    },
+  }),
+
+  // Saved is open only: its cards read on screen and scrolled off the top
+  // use nothing up (no seen: PATCH, no view). Neither do the cards on
+  // screen at its end (it has no marker).
+  dashFlow('flow-saved-open-only', {
+    before: async ({ page, context }) => {
+      await installClock(page)
+      await withStories(page, moreNhl(12))
+      prefMock(context).seed({ starred_entries: moreNhl(12).map((e) => e.id) })
+    },
+    run: async ({ page, fail }) => {
+      const writes = await prefWrites(page)
+      await recordInteractions(page)
+      await holdClock(page)
+      const saved = phoneTab(page, /^saved/i)
+      if (!(await waitFor(() => saved.isVisible(), 3000))) return fail('SAVED-OPEN-ONLY', 'no Saved tab')
+      await tap(page, saved)
+      if (!(await waitFor(async () => (await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()) === 12, 3000))) return fail('SAVED-OPEN-ONLY', `Saved shows ${await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()} cards, expected its 12 saves`)
+      await observersSettled(page)
+      for (let i = 0; i < 3; i++) {
+        await dwell(page)
+        await scrollListBy(page, 500)
+      }
+      await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, el.scrollHeight))
+      await observersSettled(page)
+      await dwell(page)
+      await writeSeen(page)
+      await page.clock.runFor(1500)
+      await requestsSettled(page)
+      const above = await page.locator(PHONE_LIST).evaluate((el) => [...el.querySelectorAll('article[data-card-id]')].filter((a) => a.getBoundingClientRect().bottom <= el.getBoundingClientRect().top).length)
+      if (above < 3) return fail('SAVED-OPEN-ONLY', `only ${above} saved cards went off the top`)
+      const marks = writes.filter((w) => w.method === 'PATCH' && w.key.startsWith('seen:'))
+      if (marks.length) fail('SAVED-OPEN-ONLY', `scrolling Saved marked stories: ${JSON.stringify(marks)}`)
+      const views = page._events.filter((e) => e.type === 'view')
+      if (views.length) fail('SAVED-OPEN-ONLY', `scrolling Saved sent views: ${JSON.stringify(views)}`)
+    },
+  }),
+
+  // The phone turned sideways (844 wide, past 768px): the phone layout is
+  // hidden and nothing is tracked, so no PATCH, however long. Back upright,
+  // the same cards (nothing remounted) are watched again: two read and
+  // scrolled off the top send exactly those two.
+  dashFlow('flow-landscape-no-marks', {
+    before: async ({ page }) => {
+      await installClock(page)
+      await withStories(page, moreNhl(37))
+    },
+    run: async ({ page, fail }) => {
+      const writes = await prefWrites(page)
+      await holdClock(page)
+      await tap(page, phoneTab(page, /^nhl/i))
+      await observersSettled(page)
+      await dwell(page)
+      const nhlCard = await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().elementHandle()
+      await page.setViewportSize({ width: 844, height: 390 })
+      if (!(await waitFor(() => page.locator('main.grid article[data-card-id]').first().isVisible(), 3000))) return fail('LANDSCAPE', 'at 844 wide the desktop grid did not show')
+      await observersSettled(page)
+      await page.evaluate(() => {
+        const w = document.querySelector('[data-scroller]')
+        if (w) w.scrollTop += 600
+      })
+      await observersSettled(page)
+      await dwell(page)
+      await writeSeen(page)
+      await page.clock.runFor(5000)
+      await requestsSettled(page)
+      if (writes.some((w) => w.method === 'PATCH' && w.key.startsWith('seen:'))) fail('LANDSCAPE', `sideways, a seen: PATCH went: ${JSON.stringify(writes)}`)
+
+      await page.setViewportSize({ width: 390, height: 844 })
+      if (!(await waitFor(() => page.locator(PHONE_LIST).isVisible(), 3000))) return fail('LANDSCAPE', 'back at 390 the phone list did not show')
+      const same = await page.evaluate((el) => el.isConnected, nhlCard)
+      if (!same) fail('LANDSCAPE', 'the NHL cards remounted across the turn')
+      await observersSettled(page)
+      await dwell(page)
+      const { half, above } = await listCards(page)
+      if (half.length < 3) return fail('LANDSCAPE', `back at 390 only ${JSON.stringify(half)} are on screen`)
+      await scrollCardToTop(page, half[2])
+      await writeSeen(page)
+      const want = sortedIds(half.slice(0, 2))
+      if (!(await waitFor(() => seenAdded(writes, 'nhl').length >= 2, 3000))) return fail('LANDSCAPE', `back at 390, two cards scrolled off the top sent ${JSON.stringify(writes)}`)
+      if (JSON.stringify(sortedIds(seenAdded(writes, 'nhl'))) !== JSON.stringify(want)) fail('LANDSCAPE', `seen:nhl got ${JSON.stringify(seenAdded(writes, 'nhl'))}, expected exactly ${JSON.stringify(want)} (above the top before: ${JSON.stringify(above)})`)
     },
   }),
 ]
