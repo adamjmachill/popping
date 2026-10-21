@@ -184,11 +184,17 @@ function harnessInit() {
   // is past React's root in the bubble phase); a link whose handler
   // already called the navigation off opened its tab through
   // window.open, which recorded it.
-  window.addEventListener('click', (e) => {
+  // A middle-click (auxclick, button 1) on any link opens a background
+  // tab by itself: recorded with `middle: true`, and kept on the page too.
+  const keep = (e, middle) => {
     const a = e.target && e.target.closest ? e.target.closest('a[target="_blank"][href]') : null
     if (!a || e.defaultPrevented) return
     e.preventDefault()
-    h.opened.push({ url: a.href, target: '_blank' })
+    h.opened.push(middle ? { url: a.href, target: '_blank', middle: true } : { url: a.href, target: '_blank' })
+  }
+  window.addEventListener('click', (e) => keep(e, false))
+  window.addEventListener('auxclick', (e) => {
+    if (e.button === 1) keep(e, true)
   })
   Object.defineProperty(navigator, 'share', {
     configurable: true,
@@ -653,6 +659,14 @@ const PHONE_MARKER = `${MOBILE_MAIN} [data-caught-up]`
 const markerText = (page) => textNow(page, PHONE_MARKER)
 const PHONE_EARLIER = `${MOBILE_MAIN} button[data-earlier]`
 const PHONE_LIST = `${MOBILE_MAIN} section [data-scroller]`
+// What has the focus now: 'BODY', or the element's tag and its data-*
+// attributes (e.g. 'DIV[data-caught-up]').
+const focusedNow = (page) =>
+  page.evaluate(() => {
+    const a = document.activeElement
+    if (!a || a === document.body) return 'BODY'
+    return a.tagName + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'aria-label').map((x) => (x.name === 'aria-label' ? `[aria-label="${x.value}"]` : `[${x.name}]`)).join('')
+  })
 // A phone tab's badge (the count of its stories not seen yet), or ''.
 const badge = (page, re) => phoneTab(page, re).evaluate((el) => ((el.querySelector('[data-badge]') || {}).textContent || '').trim())
 // The fixture's story ids of one category, in id order.
@@ -3692,11 +3706,12 @@ module.exports = [
   }),
   // --- PR3b: the read model ----------------------------------------------------
 
-  // Opening a story uses it up (D3): from a tab, from search and from the
-  // desktop For You row, each open sends one PATCH adding the story's id
-  // under its category's seen: key, and the tab's badge drops by one
-  // while the list doesn't move. A story opened just before the page
-  // hides still goes out, in the hide's keepalive PATCH.
+  // Opening a story uses it up (D3): from a tab (a tap, or a middle-click
+  // on the headline), from search and from the desktop For You row, each
+  // open sends one PATCH adding the story's id under its category's seen:
+  // key, and the tab's badge drops by one while the list doesn't move. A
+  // story opened just before the page hides still goes out, in the hide's
+  // keepalive PATCH.
   dashFlow('flow-open-marks-seen', {
     before: async ({ page }) => {
       await installClock(page)
@@ -3715,6 +3730,14 @@ module.exports = [
       if ((await markerText(page)) !== '11 not seen · Mark as read') fail('OPEN-SEEN', `the end row reads ${JSON.stringify(await markerText(page))}`)
       const log = await harnessLog(page)
       if (!log.opened.some((o) => o.target === '_blank')) fail('OPEN-SEEN', 'the headline opened nothing')
+
+      // A middle-click on a headline opens a background tab with no click
+      // event (an auxclick): it uses the story up just the same.
+      const third = before[2]
+      await page.locator(`${MOBILE_MAIN} article[data-card-id="${third}"] a[aria-label="open in new tab"]`).first().click({ button: 'middle' })
+      if (!(await waitFor(() => seenAdded(writes, 'news').includes(third), 3000))) fail('OPEN-SEEN', `a middle-click on story ${third}'s headline sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      if (!(await harnessLog(page)).opened.some((o) => o.middle)) fail('OPEN-SEEN', 'the middle-click opened nothing')
+      if ((await badge(page, /^news/i)) !== '10') fail('OPEN-SEEN', `after a middle-click the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "10"`)
 
       // From search: the story's own category, whatever the results show.
       await tap(page, page.locator('button[aria-label="open search"]'))
@@ -3752,10 +3775,13 @@ module.exports = [
 
   // A tab's badge: the unseen count, capped at 99+ on screen, the full
   // count in the tab's name for a screen reader ("<tab>, N new"), and
-  // none at 0 or on Saved.
+  // none at 0. Saved holds three saves no one has seen, and still has no
+  // badge, and no read model at all: no marker, no C8 row, no Earlier, no
+  // dimmed card and no Mark all.
   dashFlow('flow-badge-cap', {
-    before: async ({ page }) => {
+    before: async ({ page, context }) => {
       await withStories(page, moreNhl(100))
+      prefMock(context).seed({ starred_entries: [601, 602, 603] })
     },
     run: async ({ page, fail }) => {
       const nhl = phoneTab(page, /^nhl/i)
@@ -3763,8 +3789,28 @@ module.exports = [
       if ((await badge(page, /^nhl/i)) !== '99+') fail('BADGE', `the NHL tab's badge reads ${JSON.stringify(await badge(page, /^nhl/i))} with 103 unseen, expected "99+"`)
       if (!/^nhl, 103 new$/i.test((await name()) || '')) fail('BADGE', `the NHL tab is named ${JSON.stringify(await name())}, expected "NHL, 103 new"`)
       if (!/^news, 12 new$/i.test((await phoneTab(page, /^news/i).getAttribute('aria-label')) || '')) fail('BADGE', `the News tab is named ${JSON.stringify(await phoneTab(page, /^news/i).getAttribute('aria-label'))}`)
-      const saved = page.locator(`${STRIP} [role="tab"]`).filter({ hasText: /^saved/i })
-      if ((await saved.count()) && ((await saved.first().locator('[data-badge]').count()) || (await saved.first().getAttribute('aria-label')))) fail('BADGE', 'the Saved tab has a badge')
+
+      // Saved: three unseen saves, no badge, no read model.
+      const saved = phoneTab(page, /^saved/i)
+      if (!(await waitFor(() => saved.isVisible(), 3000))) return fail('BADGE', 'no Saved tab')
+      if ((await saved.locator('[data-badge]').count()) || (await saved.getAttribute('aria-label'))) {
+        fail('BADGE', `the Saved tab has a badge ${JSON.stringify(await badge(page, /^saved/i))}, named ${JSON.stringify(await saved.getAttribute('aria-label'))}`)
+      }
+      await tap(page, saved)
+      if (!(await waitFor(async () => (await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()) === 3, 3000))) return fail('BADGE', `Saved shows ${await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()} cards, expected its 3 saves`)
+      for (const [what, sel] of [['a marker', '[data-caught-up]'], ["C8's row", '[data-next-tab]'], ['Earlier', 'button[data-earlier]'], ['an Earlier group', '[data-group="earlier"]']]) {
+        if (await page.locator(`${MOBILE_MAIN} ${sel}`).count()) fail('BADGE', `Saved has ${what}`)
+      }
+      const opacities = await page.locator(`${MOBILE_MAIN} article[data-card-id]`).evaluateAll((els) => els.map((el) => getComputedStyle(el).opacity))
+      if (opacities.some((o) => Number(o) < 0.99)) fail('BADGE', `a card on Saved is dimmed: opacity ${JSON.stringify(opacities)}`)
+      const savedMore = page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`)
+      if (await savedMore.count()) {
+        await tap(page, savedMore)
+        await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+        if (await page.locator(`${MOBILE_MAIN} [data-column-popover] [data-mark-all]`).count()) fail('BADGE', "Saved's ⋯ offers Mark all as read")
+        await tap(page, savedMore)
+      }
+
       await tap(page, nhl)
       const first = (await groupIds(page, 'unseen'))[0]
       await openStory(page, first)
@@ -3779,9 +3825,12 @@ module.exports = [
 
   // The end of a tab (D4, D24): with stories still unseen it reads "N not
   // seen · Mark as read"; opening two leaves them in place and counts them
-  // out; one tap on the row marks the rest, with Undo. Undo puts them
-  // back above the marker. Marked, the tab opens on the marker, with
-  // Earlier (N) folded under it, also after leaving it and coming back.
+  // out; one tap on the row marks the rest, with Undo, and the focus the
+  // row held goes to the marker in its place. Undo puts them back above
+  // the marker. Marked again from the keyboard with Earlier open, Earlier
+  // folds (a new snapshot of the same Column) and the focus is on the
+  // marker. Marked, the tab opens on the marker, with Earlier (N) folded
+  // under it, also after leaving it and coming back.
   dashFlow('flow-caught-up', {
     before: async ({ page }) => {
       await withStories(page, moreNhl(37))
@@ -3812,6 +3861,8 @@ module.exports = [
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('CAUGHT-UP', `after Mark as read ${(await groupIds(page, 'unseen')).length} stories are still above the marker`)
       if (!/^✓\s*You.re all caught up$/.test(await markerText(page))) fail('CAUGHT-UP', `after Mark as read the marker reads ${JSON.stringify(await markerText(page))}`)
       if (!(await page.getByText('Marked 38 as read', { exact: true }).isVisible())) fail('CAUGHT-UP', 'no "Marked 38 as read" toast')
+      // The tapped row held the focus; it goes to the marker in its place.
+      if (!(await waitFor(async () => (await focusedNow(page)) === 'DIV[data-caught-up]', 1000))) fail('CAUGHT-UP', `after Mark as read the focus is on ${await focusedNow(page)}, expected the marker`)
       const rest = all.slice(2)
       const sameSet = (a, b) => JSON.stringify([...a].sort((x, y) => x - y)) === JSON.stringify([...b].sort((x, y) => x - y))
       if (!(await waitFor(() => sameSet(seenAdded(writes, 'nhl'), all), 3000))) return fail('CAUGHT-UP', `seen:nhl got ${JSON.stringify(seenAdded(writes, 'nhl'))}, expected all 40`)
@@ -3824,11 +3875,22 @@ module.exports = [
       const earlierAfterUndo = await textNow(page, PHONE_EARLIER)
       if (earlierAfterUndo !== 'Earlier (2)') fail('CAUGHT-UP', `after Undo Earlier reads ${JSON.stringify(earlierAfterUndo)}, expected the two opened`)
 
-      // Marked again, then away to News and back: the tab opens on the
-      // marker, Earlier (40) folded under it.
+      // Earlier opened, then marked again from the keyboard: Earlier folds
+      // with the new snapshot (the same Column, no tab switch), and the
+      // focus goes to the marker, not to <body>.
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length === 2, 3000))) fail('CAUGHT-UP', `Earlier (2) opened shows ${(await groupIds(page, 'earlier')).length} cards`)
       await phoneListToEnd(page)
-      await tap(page, page.locator(PHONE_MARKER))
+      await page.locator(PHONE_MARKER).focus()
+      await page.keyboard.press('Enter')
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('CAUGHT-UP', 'the second Mark as read left stories above the marker')
+      if (!(await waitFor(async () => (await focusedNow(page)) === 'DIV[data-caught-up]', 1000))) fail('CAUGHT-UP', `after Mark as read from the keyboard the focus is on ${await focusedNow(page)}, expected the marker`)
+      if ((await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) !== 'false' || (await groupIds(page, 'earlier')).length) {
+        fail('CAUGHT-UP', `after the second Mark as read Earlier is expanded ${await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')} with ${(await groupIds(page, 'earlier')).length} cards drawn, expected it folded`)
+      }
+
+      // Then away to News and back: the tab opens on the marker, Earlier
+      // (40) folded under it.
       await tap(page, phoneTab(page, /^news/i))
       await tap(page, phoneTab(page, /^nhl/i))
       await page.locator(PHONE_MARKER).waitFor({ state: 'visible' })
@@ -3901,9 +3963,10 @@ module.exports = [
 
   // ⋯ → Mark all as read (2 taps from the top of a tab): the tab's stories
   // go under the marker, folded, with one PATCH per seen: key and
-  // "Marked N as read" with Undo. Undo removes exactly those marks and
-  // puts the stories back above the marker, in their order. At 0 the row
-  // is disabled.
+  // "Marked N as read" with Undo, and the focus goes back to ⋯ (tapped,
+  // and from the keyboard). Undo removes exactly those marks and puts the
+  // stories back above the marker, in their order. At 0 the row is
+  // disabled.
   dashFlow('flow-mark-all-read', {
     run: async ({ page, fail, shot }) => {
       const writes = await prefWrites(page)
@@ -3920,6 +3983,10 @@ module.exports = [
       await tap(page, markAll)
       taps(page, 3, 'MARK-ALL')
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('MARK-ALL', 'Mark all left stories above the marker')
+      // The row held the focus and went with the popover: the focus is
+      // back on ⋯, not on <body>.
+      const onMore = 'BUTTON[data-column-action][aria-label="column preferences"]'
+      if ((await focusedNow(page)) !== onMore) fail('MARK-ALL', `after Mark all the focus is on ${await focusedNow(page)}, expected ⋯`)
       const earlier = page.locator(PHONE_EARLIER)
       if (((await earlier.textContent()) || '').trim() !== `Earlier (${before.length})` || (await earlier.getAttribute('aria-expanded')) !== 'false') {
         fail('MARK-ALL', `after Mark all Earlier reads ${JSON.stringify(await earlier.textContent())}, expanded ${await earlier.getAttribute('aria-expanded')}`)
@@ -3937,10 +4004,15 @@ module.exports = [
       if (!(await waitFor(() => sorted(seenRemoved(writes, 'news')) === sorted(before), 3000))) fail('MARK-ALL', `Undo removed ${JSON.stringify(seenRemoved(writes, 'news'))}, expected exactly what Mark all added`)
       if (await page.getByText('Column restored.').count()) fail('MARK-ALL', 'Undo showed a second toast')
 
-      // Marked again: at 0 the ⋯'s row is disabled.
-      await tap(page, more)
-      await tap(page, markAll)
+      // Marked again, from the keyboard (focus back on ⋯ again); at 0 the
+      // ⋯'s row is disabled.
+      await more.focus()
+      await page.keyboard.press('Enter')
+      await markAll.waitFor({ state: 'visible' })
+      await markAll.focus()
+      await page.keyboard.press('Enter')
       if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('MARK-ALL', 'the second Mark all left stories above the marker')
+      if ((await focusedNow(page)) !== onMore) fail('MARK-ALL', `after Mark all from the keyboard the focus is on ${await focusedNow(page)}, expected ⋯`)
       await tap(page, more)
       await markAll.waitFor({ state: 'visible' })
       if (!(await markAll.isDisabled())) fail('MARK-ALL', 'Mark all as read is enabled with nothing left to mark')
@@ -3951,7 +4023,11 @@ module.exports = [
   // (not the top), and counts at once. While the marker is above the
   // screen (Earlier open and read past it) the next one waits, counted,
   // so nothing is pushed down under the reader; back at the top, it goes
-  // in at the end.
+  // in at the end. Meanwhile the rows under the marker stay as drawn
+  // (scroll anchoring off, as on Safari): another tab's first story
+  // doesn't bring C8's row in, and this tab's arrival doesn't turn
+  // "You're all caught up" into "1 not seen" or take C8's row away,
+  // until the marker is back on screen.
   dashFlow('flow-new-arrival-appends', {
     before: async ({ page, context }) => {
       await withStories(page, moreNhl(37))
@@ -4000,6 +4076,149 @@ module.exports = [
 
       await list.evaluate((el) => el.scrollTo(0, 0))
       if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === '[601,602,7901,7902]', 3000))) fail('ARRIVAL', `back at the top the held arrival did not go in at the end: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+
+      // The rows between the marker and Earlier stay put too while the
+      // marker is above the screen, with scroll anchoring off as on
+      // Safari. NHL caught up, every other tab at 0: no C8 row.
+      const everything = { 'seen:nhl': [...idsOf('nhl'), ...moreNhl(37).map((e) => e.id)] }
+      for (const cat of ['news', 'deals', 'security', 'podcast', 'video']) everything[`seen:${cat}`] = idsOf(cat)
+      prefMock(page.context()).seed(everything)
+      await page.reload()
+      await page.locator(`${STRIP} [aria-selected="true"]`).waitFor({ state: 'visible' })
+      await waitFor(() => answered(page, 'GET', '/api/preferences'), 3000)
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(async () => /You.re all caught up/.test(await markerText(page)), 3000))) return fail('ARRIVAL', `the caught-up NHL tab's marker reads ${JSON.stringify(await markerText(page))}`)
+      const next = page.locator(`${MOBILE_MAIN} [data-next-tab]`)
+      if (await next.count()) return fail('ARRIVAL', `with every tab at 0 C8's row reads ${JSON.stringify(await next.textContent())}`)
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length >= 30, 3000))) return fail('ARRIVAL', 'Earlier did not open on the caught-up tab')
+      // The marker 300px above the screen; the first Earlier card on
+      // screen is the one being read.
+      const above = () =>
+        list.evaluate((el) => {
+          el.style.overflowAnchor = 'none'
+          const m = el.querySelector('[data-caught-up]')
+          el.scrollTop += m.getBoundingClientRect().bottom - el.getBoundingClientRect().top + 300
+        })
+      const reading = () =>
+        list.evaluate((el) => {
+          const top = el.getBoundingClientRect().top
+          const card = [...el.querySelectorAll('[data-group="earlier"] article[data-card-id]')].find((a) => a.getBoundingClientRect().top > top + 1)
+          return card ? { id: card.getAttribute('data-card-id'), top: card.getBoundingClientRect().top } : null
+        })
+      const stayed = async (was, what) => {
+        const now = await list.evaluate((el, id) => el.querySelector(`article[data-card-id="${id}"]`).getBoundingClientRect().top, was.id)
+        if (Math.abs(now - was.top) > 1) fail('ARRIVAL', `${what}: the Earlier card being read moved from ${was.top} to ${now}`)
+      }
+      await above()
+      await sleep(400)
+      let read = await reading()
+      if (!read) return fail('ARRIVAL', 'no Earlier card on screen')
+      // Another tab's first story: C8's row would come in above the reader.
+      await poll(arrival(7911, 103))
+      if (!(await waitFor(async () => (await badge(page, /^news/i)) === '1', 3000))) fail('ARRIVAL', `the News arrival isn't counted: the News badge reads ${JSON.stringify(await badge(page, /^news/i))}`)
+      await stayed(read, 'with the marker above the screen a News story arrived')
+      if (await next.count()) fail('ARRIVAL', "with the marker above the screen C8's row came in")
+      await shot('end-rows-held')
+      await list.evaluate((el) => el.scrollTo(0, 0))
+      if (!(await waitFor(async () => (await textNow(page, `${MOBILE_MAIN} [data-next-tab]`)) === 'News · 1', 3000))) return fail('ARRIVAL', `back at the top C8's row reads ${JSON.stringify(await textNow(page, `${MOBILE_MAIN} [data-next-tab]`))}, expected "News · 1"`)
+
+      // This tab's own arrival, held: the count goes from 0 to 1, which
+      // would turn the marker into "1 not seen" and take C8's row away.
+      await above()
+      await sleep(400)
+      read = await reading()
+      if (!read) return fail('ARRIVAL', 'no Earlier card on screen')
+      await poll(arrivalNhl(7912))
+      if (!(await waitFor(async () => (await badge(page, /^nhl/i)) === '1', 3000))) fail('ARRIVAL', `the held NHL arrival isn't counted: the badge reads ${JSON.stringify(await badge(page, /^nhl/i))}`)
+      if ((await groupIds(page, 'unseen')).length) fail('ARRIVAL', `with the marker above the screen the arrival went in: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      await stayed(read, 'with the marker above the screen an NHL story arrived')
+      if (!(await next.count())) fail('ARRIVAL', "with the marker above the screen C8's row went")
+      await list.evaluate((el) => el.scrollTo(0, 0))
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === '[7912]', 3000))) fail('ARRIVAL', `back at the top the held arrival did not go in: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if (!(await waitFor(async () => (await markerText(page)) === '1 not seen · Mark as read' && !(await next.count()), 3000))) fail('ARRIVAL', `back at the top the end reads ${JSON.stringify(await markerText(page))} with C8's row ${(await next.count()) ? 'still there' : 'gone'}`)
+    },
+  }),
+
+  // A story that arrives when the unseen cards drawn fill whole batches
+  // (30 of 30): once every unseen card has been drawn the list grows with
+  // the arrival at once, so the marker and an open Earlier never leave
+  // the page for a frame while a batch waits for the "load more"
+  // sentinel (and the list never jumps when they come back).
+  dashFlow('flow-arrival-batch-edge', {
+    before: async ({ page, context }) => {
+      await withStories(page, moreNhl(30))
+      await withArrivals(page)
+      // 33 NHL stories, the three oldest seen: 30 unseen, Earlier (3).
+      prefMock(context).seed({ 'seen:nhl': moreNhl(30).slice(-3).map((e) => e.id) })
+    },
+    run: async ({ page, fail, shot }) => {
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 30 && (await markerText(page)) === '30 not seen · Mark as read', 3000))) {
+        return fail('BATCH-EDGE', `the NHL tab draws ${(await groupIds(page, 'unseen')).length} unseen cards and ends with ${JSON.stringify(await markerText(page))}, expected 30 and the marker`)
+      }
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length === 3, 3000))) return fail('BATCH-EDGE', 'Earlier (3) did not open')
+      // The marker on screen, so the arrival isn't held.
+      await page.locator(PHONE_MARKER).evaluate((el) => el.scrollIntoView({ block: 'center' }))
+      await sleep(400)
+      await page.locator(PHONE_LIST).evaluate((list) => {
+        window.__lost = []
+        new MutationObserver(() => {
+          if (!list.querySelector('[data-caught-up]')) window.__lost.push('the marker')
+          if (!list.querySelector('[data-group="earlier"]')) window.__lost.push('Earlier')
+        }).observe(list, { childList: true, subtree: true })
+      })
+      await page.evaluate((st) => window.__arrivals.push(st), arrivalNhl(7921))
+      const landed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await landed
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 31, 3000))) return fail('BATCH-EDGE', `after an arrival the tab draws ${(await groupIds(page, 'unseen')).length} unseen cards, expected 31`)
+      await sleep(400)
+      const ids = await groupIds(page, 'unseen')
+      if (ids[ids.length - 1] !== 7921) fail('BATCH-EDGE', `the arrival is not drawn last: ${JSON.stringify(ids.slice(-3))}`)
+      const lost = await page.evaluate(() => [...new Set(window.__lost)])
+      if (lost.length) fail('BATCH-EDGE', `${lost.join(' and ')} left the page when the 31st story arrived`)
+      if ((await markerText(page)) !== '31 not seen · Mark as read') fail('BATCH-EDGE', `the end row reads ${JSON.stringify(await markerText(page))}`)
+      if (await page.locator(`${MOBILE_MAIN} [data-more]`).count()) fail('BATCH-EDGE', 'a "load more" sentinel came back for the arrival')
+      await shot('arrived')
+    },
+  }),
+
+  // Earlier opens when the keyboard selection moves into it, and its
+  // button still folds it with the selection inside (the selected card
+  // is then not drawn). The next card down opens it again.
+  dashFlow('flow-earlier-keys-fold', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ context }) => {
+      prefMock(context).seed({ 'seen:nhl': [602, 603] })
+    },
+    run: async ({ page, fail }) => {
+      const grid = await gridLabels(page)
+      const at = grid.findIndex((l) => /^nhl$/i.test(l))
+      if (at < 0) return fail('EARLIER-KEYS', `no NHL column in ${JSON.stringify(grid)}`)
+      const nhl = page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: /^nhl$/i }) })
+      const button = nhl.locator('button[data-earlier]')
+      const expanded = () => button.getAttribute('aria-expanded')
+      const drawn = () => nhl.locator('[data-group="earlier"] article[data-card-id]').count()
+      const selected = () => nhl.locator('article[data-card-id][tabindex="0"]').evaluateAll((els) => els.map((el) => ({ id: el.getAttribute('data-card-id'), earlier: !!el.closest('[data-group="earlier"]') })))
+      await button.waitFor({ state: 'visible' })
+      if ((await expanded()) !== 'false') fail('EARLIER-KEYS', 'Earlier (2) starts open')
+      for (let i = 0; i < at; i++) await page.keyboard.press('ArrowRight')
+      // The one unseen card, then Earlier's first.
+      await page.keyboard.press('ArrowDown')
+      await page.keyboard.press('ArrowDown')
+      if (!(await waitFor(async () => { const s = await selected(); return s.length === 1 && s[0].earlier }, 3000))) return fail('EARLIER-KEYS', `two ArrowDowns selected ${JSON.stringify(await selected())}, expected Earlier's first card`)
+      const first = (await selected())[0].id
+      if ((await expanded()) !== 'true') fail('EARLIER-KEYS', 'the selection moved into Earlier and it stayed folded')
+      await button.click()
+      if (!(await waitFor(async () => (await expanded()) === 'false' && (await drawn()) === 0, 3000))) {
+        fail('EARLIER-KEYS', `with the selection inside, the Earlier button left it expanded ${await expanded()} with ${await drawn()} cards drawn`)
+      }
+      await page.keyboard.press('ArrowDown')
+      if (!(await waitFor(async () => { const s = await selected(); return s.length === 1 && s[0].earlier && s[0].id !== first }, 3000))) return fail('EARLIER-KEYS', `ArrowDown selected ${JSON.stringify(await selected())}, expected Earlier's second card`)
+      if ((await expanded()) !== 'true' || (await drawn()) !== 2) fail('EARLIER-KEYS', `the selection moved on in Earlier and it is expanded ${await expanded()} with ${await drawn()} cards drawn`)
     },
   }),
 
@@ -4007,7 +4226,9 @@ module.exports = [
   // was opened goes under the marker, Earlier folded, and a story that
   // came in while away is sorted in first) and the list is at its top.
   // Under 10 minutes nothing moves, and nothing moves either when the
-  // page hid right after opening a story, however long it was away.
+  // page hid right after opening a story, however long it was away. When
+  // the return's refresh is slow, a story opened or a scroll before it
+  // lands keeps the list as it is: the late stories go at the end.
   dashFlow('flow-return-after-10-min', {
     before: async ({ page }) => {
       await installClock(page)
@@ -4061,12 +4282,82 @@ module.exports = [
       await sleep(1000)
       if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(now)) fail('RETURN', `back 11 min after opening a story the list moved: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
       if (Math.abs((await scrollTop()) - at) > 2) fail('RETURN', `back 11 min after opening a story the list is at ${await scrollTop()}, expected ${at}`)
+
+      // Back after 11 min, the tab starts over at its top, and the return's
+      // refresh is slow (a resumed iPhone). Whatever the user does before
+      // it lands calls off its second reset: what it brings goes at the
+      // end, as a poll's would, and nothing moves under them.
+      // The entries request after `gate()` waits until `open()`.
+      let held = null
+      let waiting = false
+      const gate = () => {
+        waiting = false
+        held = new Promise((resolve) => {
+          gate.open = resolve
+        })
+      }
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries',
+        async (route) => {
+          const wait = held
+          held = null
+          if (wait) {
+            waiting = true
+            await wait
+          }
+          return route.fallback()
+        },
+      )
+      const slowReturn = async (story) => {
+        await page.clock.runFor(3000)
+        await page.evaluate((st) => window.__arrivals.push(st), story)
+        gate()
+        await away(page, 11)
+        if (!(await waitFor(() => waiting, 3000))) return false
+        const reset = await groupIds(page, 'unseen')
+        return reset[0] !== story.id && (await scrollTop()) === 0 ? reset : false
+      }
+      const land = async () => {
+        const landed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+        gate.open()
+        await landed
+        await sleep(600)
+      }
+
+      // The top story opened (Safari takes over, the page hides) before
+      // the refresh lands, then back within a minute: it is still first,
+      // not under Earlier.
+      const shown = await slowReturn(arrival(7952, 103))
+      if (!shown) return fail('RETURN', 'back after 11 min with a slow refresh, the tab did not start over at its top')
+      const earlierWas = await textNow(page, PHONE_EARLIER)
+      await openStory(page, shown[0])
+      await setHidden(page, true)
+      await land()
+      await setHidden(page, false)
+      await sleep(600)
+      const afterOpen = await groupIds(page, 'unseen')
+      if (afterOpen[0] !== shown[0]) fail('RETURN', `story ${shown[0]}, opened before the return's refresh landed, moved: the list starts ${JSON.stringify(afterOpen.slice(0, 3))}`)
+      if ((await textNow(page, PHONE_EARLIER)) !== earlierWas) fail('RETURN', `the opened story went under Earlier: ${JSON.stringify(await textNow(page, PHONE_EARLIER))}, was ${JSON.stringify(earlierWas)}`)
+      if (afterOpen[afterOpen.length - 1] !== 7952) fail('RETURN', `the story the late refresh brought is not at the end: ${JSON.stringify(afterOpen.slice(-3))}`)
+
+      // The list scrolled (a finger, or VoiceOver's scroll, which sends no
+      // touch) before the refresh lands: it stays as it is.
+      const before2 = await slowReturn(arrival(7953, 103))
+      if (!before2) return fail('RETURN', 'the second slow return did not start the tab over at its top')
+      await list.evaluate((el) => el.scrollTo(0, 300))
+      // Its scroll event comes with the next frame.
+      await sleep(300)
+      await land()
+      const afterScroll = await groupIds(page, 'unseen')
+      if (JSON.stringify(afterScroll) !== JSON.stringify([...before2, 7953])) fail('RETURN', `scrolled before the return's refresh landed, the list became ${JSON.stringify(afterScroll)}, expected ${JSON.stringify([...before2, 7953])}`)
+      if (Math.abs((await scrollTop()) - 300) > 2) fail('RETURN', `scrolled to 300 before the refresh landed, the list is at ${await scrollTop()}`)
     },
   }),
   // Refresh (the header button; `r` on a keyboard) starts every tab over
   // once its stories land: an opened story goes under the marker, a story
-  // that came in is sorted in first, and the toast counts what came in
-  // ("1 new"), or says "Nothing new". A poll never does any of this.
+  // that came in is sorted in first, Earlier folds again, and the toast
+  // counts what came in ("1 new"), or says "Nothing new". A poll never
+  // does any of this.
   dashFlow('flow-refresh-resets', {
     before: async ({ page }) => {
       await withArrivals(page)
@@ -4090,9 +4381,15 @@ module.exports = [
       if ((await textNow(page, PHONE_EARLIER)) !== 'Earlier (1)') fail('REFRESH', `after Refresh Earlier reads ${JSON.stringify(await textNow(page, PHONE_EARLIER))}, expected the opened story`)
       if (!(await waitFor(() => page.locator('[role="status"]').getByText('1 new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "1 new" toast')
       await shot('refreshed')
-      // Again with nothing new.
+      // Earlier opened, then Refresh again with nothing new: the same
+      // Column (no tab switch) starts over, so Earlier folds again.
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) === 'true' && (await groupIds(page, 'earlier')).length === 1, 3000))) fail('REFRESH', 'Earlier (1) did not open')
       await tap(page, page.locator('header[data-app-header] button[aria-label="refresh"]'))
       if (!(await waitFor(() => page.locator('[role="status"]').getByText('Nothing new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "Nothing new" toast')
+      if (!(await waitFor(async () => (await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) === 'false', 3000)) || (await groupIds(page, 'earlier')).length) {
+        fail('REFRESH', `after the second Refresh Earlier is expanded ${await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')} with ${(await groupIds(page, 'earlier')).length} cards drawn, expected it folded`)
+      }
     },
   }),
 ]

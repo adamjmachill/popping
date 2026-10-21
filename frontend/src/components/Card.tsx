@@ -776,6 +776,22 @@ export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActi
   const ringClass = selected ? 'ring-2 ring-accent/70' : ''
   const dimClass = dimmed && !selected ? 'opacity-60 saturate-50' : ''
 
+  // The story was opened from one of the card's links: record the
+  // ``click`` and tell the card's owner (App marks it seen). The links'
+  // own ``onClick`` and their middle-click both run it.
+  const noteOpen = () => {
+    // Fire-and-forget: the click POST doesn't gate the navigation.
+    recordImmediate({ entry_id: entry.id, type: 'click' })
+    onActivate?.()
+  }
+  // A middle-click opens the link in a background tab by itself (an
+  // ``auxclick``, not a click), so it has to note the open too. The
+  // browser's own open goes ahead (the hrefs are already
+  // ``safeExternalUrl``'s).
+  const onMiddleClick = (e: MouseEvent<HTMLAnchorElement>) => {
+    if (e.button === 1) noteOpen()
+  }
+
   return (
     <div className="relative">
       {/* Swipe-reveal background. Sits behind the card (z-order is
@@ -842,14 +858,10 @@ export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActi
           rel="noopener noreferrer"
           aria-label="open in new tab"
           title="opens in a new tab"
-          onClick={() => {
-            // Fire-and-forget: the click POST doesn't gate the
-            // navigation. We don't await because the browser opens
-            // the new tab synchronously and we don't want a slow
-            // network to delay it.
-            recordImmediate({ entry_id: entry.id, type: 'click' })
-            onActivate?.()
-          }}
+          // The browser opens the new tab itself, at once; noteOpen
+          // doesn't hold it up.
+          onClick={noteOpen}
+          onAuxClick={onMiddleClick}
           // On a phone the headline is how a story opens, so the link
           // fills its row and is at least 44px tall even for a
           // one-line title.
@@ -936,11 +948,11 @@ export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActi
             rel="noopener noreferrer"
             data-card-interactive
             data-one-line
+            onAuxClick={onMiddleClick}
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
-              recordImmediate({ entry_id: entry.id, type: 'click' })
-              onActivate?.()
+              noteOpen()
               // ``safeExternalUrl`` rewrites reddit.com -> old.reddit.com
               // so the popped-out tab doesn't show the "Get the App"
               // overlay (see api.ts). The href above is also rewritten
@@ -1012,11 +1024,11 @@ export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActi
             rel="noopener noreferrer"
             data-card-interactive
             data-one-line
+            onAuxClick={onMiddleClick}
             onClick={(e) => {
               e.preventDefault()
               e.stopPropagation()
-              recordImmediate({ entry_id: entry.id, type: 'click' })
-              onActivate?.()
+              noteOpen()
               window.open(safeExternalUrl(entry.audio_url!), '_blank', 'noopener,noreferrer')
             }}
             className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"

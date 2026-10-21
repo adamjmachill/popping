@@ -56,6 +56,8 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · Open a story, read it in Safari for 10 minutes or more, then come back to Popping. Pass: the list is where you left it, with that story still in place.
 - [ ] #<pr> · On the phone, note the badges of For You and of a category tab, then open a story of that category from For You and come back. Pass: both badges are one lower (a story opened anywhere counts as seen everywhere).
 - [ ] #<pr> · (If you have a desktop) On the laptop, open a story from the For You row at the top, then look at its category's column. Pass: the column's "N new" is one lower and the column didn't move.
+- [ ] #<pr> · On a tab that says "You're all caught up", open "Earlier (N)", scroll down until that line is off the top of the screen, and stay there while new stories come in (a busy tab, a few minutes). Pass: the story you are reading never jumps; back at the top, the new stories are above the line.
+- [ ] #<pr> · With VoiceOver on, go to the end of a tab and double-tap "N not seen · Mark as read". Pass: VoiceOver lands on "You're all caught up" in its place, not at the top of the page, and can reach the toast's Undo.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

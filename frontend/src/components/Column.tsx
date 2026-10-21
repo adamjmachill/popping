@@ -88,7 +88,8 @@ type Props = {
   // C8's row: open that tab.
   onOpenTab?: (key: ColKey) => void
   // Whether the marker is above the scroller's visible top. While it
-  // is, App holds new arrivals back (Safari has no scroll anchoring).
+  // is, App holds new arrivals back (Safari has no scroll anchoring),
+  // and the rows under the marker stay as they were drawn.
   onHoldChange?: (hold: boolean) => void
   // Prefs + setter for the ⋯ popover (Mark all, Newest | Best, and the
   // age filter). Without a setter there is no ⋯.
@@ -161,6 +162,11 @@ const MORE_MARGIN = '0px 0px 600px 0px'
 // The limit that draws the first ``n`` cards, in whole batches.
 const batchesFor = (n: number) => Math.ceil(n / BATCH) * BATCH
 
+// What the rows between the marker and Earlier show, for one snapshot:
+// the count the marker reads (0: "You're all caught up") and C8's tab
+// (null: no row).
+type EndRows = { generation: number | undefined; count: number; next: TabCount | null }
+
 // Slice 21: renamed ``Column`` to ``ColumnInner`` and added a
 // ``React.memo`` wrap with a custom comparator (``_columnPropsEqual``,
 // below) so App's per-render closures don't defeat memoization. The
@@ -229,16 +235,40 @@ export function ColumnInner({
   const [limit, setLimit] = useState(BATCH)
   const [earlierOpen, setEarlierOpen] = useState(false)
   const [earlierLimit, setEarlierLimit] = useState(BATCH)
+  // Every unseen card has been drawn in this snapshot. From then on a
+  // story that arrives is drawn at once (the limit grows with it): the
+  // marker, C8's row and an open Earlier never go away for a frame while
+  // a batch waits for the sentinel. Only a snapshot's first load goes
+  // through the sentinel.
+  const [drewAllUnseen, setDrewAllUnseen] = useState(false)
+  // The keyboard selection that opened Earlier. Earlier opens when the
+  // selection moves into it, once per card, so the Earlier button can
+  // still fold it with the selection inside.
+  const [openedFor, setOpenedFor] = useState<number | undefined>(undefined)
   const [shownGeneration, setShownGeneration] = useState(generation)
-  if (shownGeneration !== generation) {
-    // A new snapshot (React's "adjust state when a prop changes").
+  // A new snapshot (React's "adjust state when a prop changes"). React
+  // renders again with these before it draws anything, so the
+  // adjustments below wait for that render instead of acting on the old
+  // snapshot's limits.
+  const newSnapshot = shownGeneration !== generation
+  if (newSnapshot) {
     setShownGeneration(generation)
     setLimit(BATCH)
     setEarlierOpen(false)
     setEarlierLimit(BATCH)
+    setDrewAllUnseen(false)
+    setOpenedFor(undefined)
   }
   const [sentinel, setSentinel] = useState<HTMLElement | null>(null)
   const [marker, setMarker] = useState<HTMLElement | null>(null)
+  // The marker is above the scroller's visible top (its observer, below).
+  // App holds arrivals back meanwhile; the rows between the marker and
+  // Earlier stay as they were drawn (``end``, below).
+  const [held, setHeld] = useState(false)
+  // Set when the end row's "Mark as read" held keyboard or VoiceOver
+  // focus: the snapshot it was pressed in. The row turns into "You're
+  // all caught up" and the focus goes there, not to <body>.
+  const refocusRef = useRef<{ generation: number | undefined } | null>(null)
   const sortLabelId = useId()
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const prefsButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -311,32 +341,58 @@ export function ColumnInner({
 
   // The keyboard-selected card always renders, so App can scroll to it
   // (ArrowDown walks past a batch, and from the unseen cards into
-  // Earlier): the limits grow, by whole batches, to reach it, and
-  // Earlier opens when the selection is in it.
+  // Earlier): the limits grow, by whole batches, to reach it. Earlier
+  // opens when the selection moves into it; folded again with the
+  // selection inside, it leaves the selected card undrawn (App's scroll
+  // skips a card that isn't there) until the selection moves on.
   let selectedUnseen = -1
   let selectedEarlier = -1
   if (selectedId != null) {
     selectedUnseen = sections.unseen.findIndex((e) => e.id === selectedId)
     if (selectedUnseen < 0 && !isSaved) selectedEarlier = sections.earlier.findIndex((e) => e.id === selectedId)
   }
-  if (selectedEarlier >= 0 && !earlierOpen) setEarlierOpen(true)
-  const needUnseen = selectedEarlier >= 0 ? unseenTotal : selectedUnseen + 1
-  if (needUnseen > limit) setLimit(batchesFor(needUnseen))
-  if (selectedEarlier >= earlierLimit) setEarlierLimit(batchesFor(selectedEarlier + 1))
+  if (!newSnapshot) {
+    if (selectedEarlier >= 0 && selectedId !== openedFor) {
+      setOpenedFor(selectedId)
+      setEarlierOpen(true)
+    } else if (selectedEarlier < 0 && openedFor !== undefined) {
+      setOpenedFor(undefined)
+    }
+  }
+  const reachEarlier = earlierOpen && selectedEarlier >= 0
+  const needUnseen = Math.max(reachEarlier ? unseenTotal : selectedUnseen + 1, drewAllUnseen ? unseenTotal : 0)
+  if (!newSnapshot && needUnseen > limit) setLimit(batchesFor(needUnseen))
+  if (!newSnapshot && reachEarlier && selectedEarlier >= earlierLimit) setEarlierLimit(batchesFor(selectedEarlier + 1))
   const shown = Math.max(limit, needUnseen)
   const unseenShown = sections.unseen.slice(0, shown)
   // The marker, C8's row and Earlier come only once every unseen card
   // is drawn, so nothing under them moves while the batches load.
   const unseenDone = shown >= unseenTotal
-  const earlierIsOpen = earlierOpen || selectedEarlier >= 0
-  const earlierShownCount = Math.max(earlierLimit, selectedEarlier + 1)
-  const earlierShown = unseenDone && earlierIsOpen ? sections.earlier.slice(0, earlierShownCount) : []
+  if (!newSnapshot && unseenDone && !drewAllUnseen) setDrewAllUnseen(true)
+  const earlierShownCount = Math.max(earlierLimit, reachEarlier ? selectedEarlier + 1 : 0)
+  const earlierShown = unseenDone && earlierOpen ? sections.earlier.slice(0, earlierShownCount) : []
   // Which list the "load more" sentinel grows.
   const more: 'unseen' | 'earlier' | null = !unseenDone
     ? 'unseen'
-    : earlierIsOpen && earlierShownCount < earlierTotal
+    : earlierOpen && earlierShownCount < earlierTotal
       ? 'earlier'
       : null
+
+  // The rows between the marker and Earlier: the marker's form ("You're
+  // all caught up" or "N not seen · Mark as read") and C8's row. While
+  // the marker is above the screen they stay as last drawn, so a row
+  // that comes or goes up there (a held arrival turning the count from 0
+  // to 1, another tab's first story bringing C8's row) can't move what
+  // is being read below them: Safari has no scroll anchoring. They catch
+  // up when the marker is back on screen, the moment App lets the held
+  // arrivals in, and with every new snapshot.
+  const liveEnd: EndRows = { generation, count, next: count === 0 ? (nextTab ?? null) : null }
+  const [drawnEnd, setDrawnEnd] = useState<EndRows>(liveEnd)
+  const keepEnd = held && drawnEnd.generation === generation
+  const end = keepEnd ? drawnEnd : liveEnd
+  if (!keepEnd && (drawnEnd.generation !== generation || drawnEnd.count !== count || drawnEnd.next !== liveEnd.next)) {
+    setDrawnEnd(liveEnd)
+  }
 
   // Load more: the sentinel near the bottom of ``sentinelRoot`` adds 30
   // cards to the list it ends. A fresh observer per limit (hence the
@@ -372,15 +428,34 @@ export function ColumnInner({
     const io = new IntersectionObserver((entries) => {
       const e = entries[entries.length - 1]
       const top = e.rootBounds ? e.rootBounds.top : sentinelRoot.getBoundingClientRect().top
-      holdRef.current?.(!e.isIntersecting && e.boundingClientRect.bottom <= top)
+      const hold = !e.isIntersecting && e.boundingClientRect.bottom <= top
+      setHeld(hold)
+      holdRef.current?.(hold)
     }, { root: sentinelRoot })
     io.observe(marker)
     return () => io.disconnect()
   }, [marker, sentinelRoot])
   useEffect(() => {
-    if (!marker) holdRef.current?.(false)
+    if (marker) return
+    setHeld(false)
+    holdRef.current?.(false)
   }, [marker])
   useEffect(() => () => holdRef.current?.(false), [])
+
+  // The end row's "Mark as read" was pressed with the keyboard or
+  // VoiceOver: once the tab has started over, caught up, the focus that
+  // fell to <body> with the button goes to "You're all caught up" in its
+  // place, so the reader keeps their place in the page. The first run
+  // after the press can still see the button that went (the new row's
+  // element reaches ``marker`` a render later), so it waits for a marker
+  // in the page.
+  useEffect(() => {
+    const from = refocusRef.current
+    if (!from || from.generation === generation || !marker?.isConnected) return
+    refocusRef.current = null
+    const active = document.activeElement
+    if (count === 0 && (!active || active === document.body)) marker.focus({ preventScroll: true })
+  }, [generation, count, marker])
 
   const empty = unseenTotal === 0 && earlierTotal === 0
   const cardProps = {
@@ -461,8 +536,14 @@ export function ColumnInner({
                 type="button"
                 data-mark-all
                 disabled={count === 0}
-                onClick={() => {
+                onClick={(e) => {
+                  // The row goes with the popover. Pressed with the
+                  // keyboard or VoiceOver (focus on it, or a click with
+                  // ``detail`` 0), focus goes back to ⋯, not to <body>, so
+                  // it keeps its place and can reach the toast's Undo.
+                  const focused = e.detail === 0 || e.currentTarget === document.activeElement
                   setPopoverOpen(false)
+                  if (focused) prefsButtonRef.current?.focus({ preventScroll: true })
                   onMarkAll()
                 }}
                 className="w-full min-h-[44px] -my-1 rounded-ios px-1 text-left text-ios-body text-accent active:bg-bg-surface disabled:text-label-tertiary"
@@ -569,12 +650,15 @@ export function ColumnInner({
             {more === 'unseen' && <div ref={setSentinel} data-more aria-hidden="true" className="h-px" />}
             {unseenDone && !isSaved && (
               <>
-                {/* The marker (D4). Not role="status": smoke waits for no
-                    status region before every state, and it isn't news. */}
-                {count === 0 ? (
+                {/* The marker (D4), in the form ``end`` holds. Not
+                    role="status": smoke waits for no status region before
+                    every state, and it isn't news. Focusable from code
+                    only, for the end row's focus hand-over. */}
+                {end.count === 0 ? (
                   <div
                     ref={setMarker}
                     data-caught-up
+                    tabIndex={-1}
                     className="flex min-h-[44px] items-center justify-center gap-2 px-1 text-ios-body text-label-secondary"
                   >
                     <span aria-hidden="true" className="text-accent">✓</span>
@@ -588,25 +672,32 @@ export function ColumnInner({
                     ref={setMarker}
                     type="button"
                     data-caught-up
-                    onClick={() => onMarkAll?.()}
+                    onClick={(e) => {
+                      // Pressed with the keyboard or VoiceOver (focus on
+                      // it, or a click with ``detail`` 0): the focus goes
+                      // on to the row that replaces it (the effect above).
+                      if (e.detail === 0 || e.currentTarget === document.activeElement) refocusRef.current = { generation }
+                      onMarkAll?.()
+                    }}
                     className="w-full min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated"
                   >
-                    {count} not seen · Mark as read
+                    {end.count} not seen · Mark as read
                   </button>
                 )}
-                {/* C8: the next shown tab with stories not seen yet. Its
-                    name reads like the tab's own in the strip ("News, 12
-                    new"), not "News dot 12". */}
-                {count === 0 && nextTab && (
+                {/* C8: the next shown tab with stories not seen yet, under
+                    "You're all caught up" only. Its name reads like the
+                    tab's own in the strip ("News, 12 new"), not "News dot
+                    12". */}
+                {end.next && (
                   <button
                     type="button"
                     data-next-tab
-                    aria-label={`${nextTab.label}, ${nextTab.count} new`}
-                    onClick={() => onOpenTab?.(nextTab.key as ColKey)}
+                    aria-label={`${end.next.label}, ${end.next.count} new`}
+                    onClick={() => end.next && onOpenTab?.(end.next.key as ColKey)}
                     className="w-full min-h-[44px] flex items-center justify-between gap-2 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated"
                   >
                     <span className="min-w-0 truncate">
-                      {nextTab.label} · {nextTab.count}
+                      {end.next.label} · {end.next.count}
                     </span>
                     <ChevronIcon className="w-4 h-4 shrink-0" collapsed />
                   </button>
@@ -615,14 +706,14 @@ export function ColumnInner({
                   <button
                     type="button"
                     data-earlier
-                    aria-expanded={earlierIsOpen}
+                    aria-expanded={earlierOpen}
                     onClick={() => setEarlierOpen((o) => !o)}
                     className="w-full flex items-center gap-1.5 px-1 min-h-[44px]
                                text-ios-caption uppercase tracking-wide text-label-tertiary
                                hover:text-label-secondary active:text-label-primary
                                transition-colors select-none"
                   >
-                    <ChevronIcon className="w-3 h-3" collapsed={!earlierIsOpen} />
+                    <ChevronIcon className="w-3 h-3" collapsed={!earlierOpen} />
                     <span>Earlier ({earlierTotal})</span>
                   </button>
                 )}

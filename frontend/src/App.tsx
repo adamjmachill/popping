@@ -39,7 +39,7 @@ import { Wallpaper } from './components/Wallpaper'
 import { SkeletonGrid } from './components/Skeleton'
 import { Settings } from './components/Settings'
 import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
-import { noteStoryOpened, recordImmediate } from './lib/interactions'
+import { lastStoryOpenAt, noteStoryOpened, recordImmediate } from './lib/interactions'
 import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
 import { fullOrder, moveKey, orderColumns, type Move } from './lib/categories'
 import { isBuiltIn } from './lib/feedRules'
@@ -97,6 +97,9 @@ const HEALTH_INTERVAL_MS = 5 * 60_000
 // measured with Date.now (useUpdateCheck), because timers stop while
 // iOS suspends the page.
 const RETURN_RESET_MS = 10 * 60 * 1000
+// What calls off C1's second reset (``armReturnReset``): the user is
+// already using the page.
+const RETURN_INPUTS = ['pointerdown', 'touchstart', 'keydown', 'wheel'] as const
 
 // Structural equality for the plain JSON objects the API returns
 // (Entry, Source — flat scalars plus at most one nested plain
@@ -596,8 +599,41 @@ export function App() {
   const refreshSeqRef = useRef(0)
   // C1: the refresh a long return starts resets the tabs again when it
   // lands (the stories that came in while away are sorted in, not
-  // appended): every refresh numbered above this one does.
+  // appended): every refresh numbered above this one does, unless the
+  // user has done anything since the return (below).
   const resetAfterSeqRef = useRef<number | null>(null)
+  // When that return was (``Date.now``), and what takes its listeners off.
+  const returnAtRef = useRef(0)
+  const disarmRef = useRef<(() => void) | null>(null)
+  // The second reset is called off: the refresh's stories then append or
+  // wait like a poll's, and nothing moves under someone already reading.
+  const disarmReturnReset = useCallback(() => {
+    resetAfterSeqRef.current = null
+    disarmRef.current?.()
+    disarmRef.current = null
+  }, [])
+  // Armed by a long return, until its refresh lands. A touch, a click, a
+  // key or the wheel calls it off (a story opened from a card starts with
+  // one of these), and so does a list moved off its top (VoiceOver
+  // scrolls without them). The return's own scroll to the top leaves the
+  // list at 0, so it doesn't count.
+  const armReturnReset = useCallback(() => {
+    disarmRef.current?.()
+    resetAfterSeqRef.current = refreshSeqRef.current
+    returnAtRef.current = Date.now()
+    const onInput = () => disarmReturnReset()
+    const onScroll = (e: Event) => {
+      const t = e.target
+      if (t instanceof Element && t.hasAttribute('data-scroller') && t.scrollTop > 0) disarmReturnReset()
+    }
+    for (const t of RETURN_INPUTS) window.addEventListener(t, onInput, { capture: true, passive: true })
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+    disarmRef.current = () => {
+      for (const t of RETURN_INPUTS) window.removeEventListener(t, onInput, { capture: true })
+      document.removeEventListener('scroll', onScroll, { capture: true })
+    }
+  }, [disarmReturnReset])
+  useEffect(() => () => disarmRef.current?.(), [])
   const scrollersRef = useRef({ phone: phoneScroller, desktop: desktopScroller })
   scrollersRef.current = { phone: phoneScroller, desktop: desktopScroller }
   // C1, coming back. PR1r's update check has already started (it may
@@ -605,17 +641,18 @@ export function App() {
   // the page hid within 2 s of opening a story (that story stays put for
   // ▲ or Save), every tab starts over and the lists go back to their
   // tops; App's own visibility listener then starts the silent refresh,
-  // which resets the tabs once more when it lands.
+  // which resets the tabs once more when it lands if the user hasn't
+  // done anything meanwhile.
   const onReturn = useCallback(
     ({ away, openedBefore }: Return) => {
       if (away < RETURN_RESET_MS || openedBefore) return
       resetSnapshot()
-      resetAfterSeqRef.current = refreshSeqRef.current
+      armReturnReset()
       const { phone, desktop } = scrollersRef.current
       phone?.scrollTo({ top: 0 })
       desktop?.scrollTo({ top: 0 })
     },
-    [resetSnapshot],
+    [resetSnapshot, armReturnReset],
   )
   // A newer build on the server: the phone reloads onto it when the user
   // comes back after 10 min away; the desktop shows a Reload button.
@@ -1204,9 +1241,13 @@ export function App() {
       setForYouLoaded(forYouOk)
       setError(null)
       // C1: the refresh a long return started lands: start the tabs
-      // over again, so what came in while away is sorted in.
-      const afterReturn = resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current
-      if (afterReturn) resetAfterSeqRef.current = null
+      // over again, so what came in while away is sorted in. Not when the
+      // user did anything first (``disarmReturnReset``), nor when a story
+      // was opened since the return, by any path: that story stays in its
+      // place for ▲ or Save, as the open guard keeps it.
+      const armed = resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current
+      const afterReturn = armed && lastStoryOpenAt() < returnAtRef.current
+      if (armed) disarmReturnReset()
       if (!opts?.silent || afterReturn) resetSnapshot()
       // Surface a brief success toast so the user knows the pull
       // actually happened: how many stories it brought that weren't
@@ -1223,12 +1264,12 @@ export function App() {
       setFirstRefreshDone(true)
       // A long return's refresh that failed: the reset on the return
       // stands; a later poll must not reset again.
-      if (resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current) resetAfterSeqRef.current = null
+      if (resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current) disarmReturnReset()
       if (!opts?.silent) toast(message, 'error')
     } finally {
       setRefreshing(false)
     }
-  }, [activeSources, resyncPrefs, resetSnapshot])
+  }, [activeSources, resyncPrefs, resetSnapshot, disarmReturnReset])
   // The latest ``refresh`` for callers that must stay stable: Column's
   // memo ignores callbacks, so it would keep calling an old one with
   // an old filter.
@@ -1717,9 +1758,11 @@ export function App() {
   const openEntry = useCallback(
     (entry: Entry) => {
       noteStoryOpened()
+      // An open calls off C1's second reset (the story stays in place).
+      disarmReturnReset()
       addSeenMarks([entry])
     },
-    [addSeenMarks],
+    [addSeenMarks, disarmReturnReset],
   )
 
   // Edit tabs: the order and the Show switches (``lib/categories``).
