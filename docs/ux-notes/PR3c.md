@@ -532,7 +532,185 @@ none was skipped.
    on). The `sleep(400)` inside `poll()` waits for something else and
    stays. PR3b's re-check (76f31bd) doesn't touch this flow's lines, so
    the change carries over unchanged when PR3c is rebased onto it
-   (checked with `git merge-tree`, below).
+   (checked with `git merge-tree`, below). PR3b's round 2 later made the
+   same waits `markerAbove(list)`, which the rebase onto the final PR3b
+   keeps (below).
+
+## Rebased onto the final PR3b (third commit)
+
+PR3b moved on under this unit: its re-check rounds 2 and 3, a rebase
+onto main 0ff72b1 and a progress commit (`stack-pr3b` at 7d06cbf). The
+two PR3c commits were rebased onto it (`git rebase --onto stack-pr3b
+76f31bd`), each keeping its own message; the conflict resolutions are in
+them. A third commit makes PR3b's newer flows hold up under seen on
+scroll.
+
+### What conflicted
+
+- First commit (four files):
+  - `docs/DEVICE_CHECKS.md`: PR3b's two new desktop end-row checks and
+    PR3c's five `#<pr>` lines in the same place. Both kept, PR3b's first.
+  - `frontend/scripts/iphone-audit/README.md`: the flow table, merged row
+    by row against the old base. PR3b's newest text for the rows only it
+    changed (`flow-desktop-layout`, `flow-earlier-keys-fold`,
+    `flow-return-after-10-min`, `flow-return-from-earlier`,
+    `flow-refresh-resets`, `flow-h1-pref-store`, `markerAbove`,
+    `scrolledTo`); PR3c's for its own rows and helpers. Two rows changed
+    on both sides were merged by hand: `flow-caught-up` (PR3c's end-rule
+    text, with round 3's "a tap is a finger's press: the focus doesn't go
+    to it") and `flow-new-arrival-appends` (round 2's `markerAbove` text,
+    with PR3c's held clock).
+  - `frontend/scripts/iphone-audit/flows.cjs`, `flow-caught-up`: PR3c's
+    comment, counts (`rest.length`, `38 − k`) and the clock moved for the
+    writes; round 3's focus rule. PR3c's "the focus goes to the marker
+    after the tap" check is gone and round 3's "a tap doesn't hand the
+    focus to the marker" check stays.
+  - `frontend/src/components/Column.tsx`: PR3c's end-rule marker effect
+    and round 3's rewritten refocus effect (pointer type, the scroll into
+    `sentinelRoot`'s box) sit next to each other; both kept as they were.
+  - `App.tsx` merged by itself (round 2's `click` in `RETURN_INPUTS` and
+    the `dropSelection` comment beside the collector, `startTabsOver` and
+    the before-flush). The commit's size is unchanged (14 files, +1986
+    −67).
+- Second commit (two files):
+  - README: `flow-view-on-seen`'s new text and the `flow-seen-tab-switch`
+    row beside round 2's rows.
+  - `flows.cjs`, `flow-new-arrival-appends`: review fix 5 had replaced
+    the three `sleep(400)` with `observersSettled(page)`; round 2 replaced
+    them with `markerAbove(list)`. PR3b's is kept: like
+    `observersSettled` it resolves once the app's marker observer has
+    reported (an observer made then, on the list, reports in the same
+    notification task or a later one), and it also fails when the marker
+    never went above the screen. The clock stays held across this flow's
+    reload (checked: `Date.now()` didn't move over 2.5 s of real time
+    after it), so its second half still runs held.
+
+### PR3b's flows since 45aac1e
+
+Every flow `git log -p 45aac1e..stack-pr3b -- flows.cjs` adds or
+changes was read for a way seen on scroll can use cards up (a card on
+screen for the dwell and then scrolled off the top, or cards on screen
+with the marker), and the set was run on a build with `SEEN_DWELL_MS =
+50`. That run failed `flow-open-marks-seen`, `flow-return-from-earlier`
+and `flow-refresh-resets` (the three the earlier full smoke had named).
+
+Changed:
+
+- **`flow-open-marks-seen`**: the clock is held from the tap on News. In
+  real time the middle-click on 104's Reddit link scrolled the list
+  (Playwright brings the link into view) and took 101 and 102, read for
+  over a second, off the top: the badge read 8, not 9. Held, each open
+  drops the badge at once and prefSync's batch (`runFor`) then adds
+  exactly the three opened, checked as a set. An `observersSettled`
+  after that middle-click lets the app's observer see the cards leave
+  (unread) before the clock moves: without it the dwell timers fired
+  for cards already off screen and the late report then counted them
+  (102 was marked that way in 4 runs of 4). The search's 300 ms wait and
+  its open's PATCH run on `runFor`. The story opened as the page hides
+  is checked unmarked before its open. On Podcast (two unseen episodes
+  with the marker on screen) the badge drops by one at the middle-click
+  and the PATCH follows on `runFor`, so the end rule can't stand in for
+  the open.
+- **`flow-refresh-resets`**: `installClock`, and the clock held from the
+  tap on News. In real time the tap on Earlier (at the end of the list)
+  waited out the "1 new" toast for 3 s, then scrolled the read cards off
+  the top and left the last ones on screen with the marker: 9 unseen
+  before the third Refresh, not 13, and so 29 drawn, not 30 and the
+  sentinel. The NHL part scrolls read cards off the top too, and its
+  Refresh must start over with 60 unseen (the old limit). Held, the
+  toast stays up over the middle of Earlier, so that tap goes to its left
+  end (`tap` passes options to `locator.tap`).
+- **`flow-return-from-earlier`**: the clock held from the tap on NHL. The
+  six unseen cards sit on screen with the marker at first, and the last
+  ones with it again when the end row is scrolled to: in real time the
+  end rule read "5 not seen" there, not 6.
+- **`flow-return-after-10-min`**: the clock stays as it was (the C1
+  steps move it with `runFor` and `away`). Its first scroll, to 400,
+  comes after `runFor(3000)`, so every card it takes off the top was read
+  and is used up; the first 11-minute return now expects those under
+  Earlier with the opened story (`listCards(...).above` after
+  `observersSettled`; none at 390×844, so the numbers are the old ones).
+  The later steps compare with the list each reset drew, so a card read
+  off before a slow return changes nothing they check.
+
+Unchanged, and why:
+
+- `flow-desktop-layout`, `flow-earlier-keys-fold`: 1280 only; the
+  desktop is open only (no observer).
+- `flow-caught-up`, `flow-new-arrival-appends`: held since PR3c's first
+  commit; round 2 and 3's edits (the focus rule, `markerAbove`) run held.
+- `flow-mark-all-read`: News never scrolls in it and its marker stays
+  below the screen while unseen cards are drawn, so nothing can be used
+  up; round 3 only moved a screenshot.
+- `flow-h1-pref-store` (PR2c, via main): no read model.
+
+### The keepalive failure: test timing, not the flush order
+
+"hiding right after an open sent no keepalive PATCH of seen:news" came
+from the flow, not from the app:
+
+- In the real-time flow, `seen:news` held `[101,103,104,102]` before 102
+  was opened: 102 had been read and scrolled off the top (the Reddit
+  middle-click's scroll), and the seen batch had written it. Opening it
+  then had nothing to add (`addSeenMarks` skips a story already marked),
+  so nothing was queued and the hide had nothing to send. The step's
+  other check (102 in the store) passed for the same reason. Held, 102 is
+  unmarked when it is opened (now checked first) and the hide's
+  keepalive PATCH carries it.
+- The flush order holds: the before-flush runs the observer's
+  `takeRecords`, then drains the collector, and only then does prefSync
+  read its queue, where an open's mark already is (opens go straight to
+  `addSeenMarks`). A probe (not kept) read cards and scrolled them off
+  the top into the collector (105, 106, 107), opened another story (108)
+  and hid the page at once, clock held: one keepalive PATCH of
+  `seen:news` carried `[108,105,106,107]`. With the collector's flush
+  taken out of the before-flush it carried `[108]`, so the probe tells
+  the two apart. No app change.
+- The race the flow showed (a dwell timer firing while the report of the
+  card leaving is still on its way) is the flow's `runFor` jumping a
+  second at once; on a device the report comes within a frame.
+
+### Verification
+
+The local loop on `stack-pr3c` at the third commit, on `stack-pr3b` at
+7d06cbf, the frontend's `node_modules` linked in, Postgres database
+`popping_test_f2`, `vite preview` on 127.0.0.1:4174.
+
+- `npm run lint`: 0 errors (the 4 react-refresh warnings main has).
+  `npm run build`: clean. `package.json` and the lockfile: unchanged.
+- Unit tests: 221 of 221.
+- Backend pytest, the eight files that read frontend source
+  (`test_slice21_column_memo.py`, `test_frontend_feed_editor_rules.py`,
+  `test_frontend_slice15_add_generic_scrape.py`,
+  `test_frontend_slice19_empty_column_source_status.py`,
+  `test_preferences_category_layout.py`, `test_preferences_delta.py`,
+  `test_slice30_safe_external_url.py`,
+  `test_source_create_sitemap_link_pattern.py`): 172 passed.
+- Strict smoke (`--csp --strict`), every state and flow: 0 failures, 0
+  warnings (178 runs, 670 s, load average 5 to 7 on 4 CPUs while other
+  sessions' smokes ran).
+- The four flows this commit changes, the two the rebase merged
+  (`flow-caught-up`, `flow-new-arrival-appends`), the other read-model
+  flows (`flow-badge-cap`, `flow-next-tab`, `flow-mark-all-read`,
+  `flow-arrival-batch-edge`, `flow-earlier-keys-fold`,
+  `flow-desktop-layout`, `flow-sort-best`, `flow-scroller-rotate`,
+  `flow-auto-append`, `flow-h1-keepalive`), the six PR3c flows and the
+  states `caught-up`, `not-seen-row`, `earlier-open` at 390 and 320 (28
+  runs): looped 3 times, 0 failures each time (143 to 156 s a loop). No
+  flake.
+- The same 28 runs on a build with `SEEN_DWELL_MS = 50`: 0 failures. The
+  four changed flows at 700 and 1500: 0 failures.
+- Mutation checks, each a scratch edit, a rebuild, an `--only` run and a
+  restore compared byte for byte; all five fail where expected, so the
+  held flows still catch what they were written for:
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `flow-open-marks-seen` | Card's middle-click notes no open | "after a middle-click the News badge reads "11", expected "10"" (and the Reddit, PATCH set and Podcast checks) |
+| `flow-open-marks-seen` | `openEntry` marks from a `setTimeout(0)` | "after an open the News badge reads "12", expected "11""; "hiding right after an open sent no keepalive PATCH of seen:news"; "story 102, opened as the page hid, never reached the store" |
+| `flow-return-from-earlier` | the hold observer ignores a new snapshot (`generation` out of its deps) | "with the marker below the screen the arrival waits"; "the end row, scrolled to at 555, moved to 741" |
+| `flow-refresh-resets` | a new snapshot keeps the drawn limit (no `setLimit(BATCH)`) | "after a Refresh to 60 unseen with 60 drawn before it, the NHL tab draws 60 unseen cards without a "load more" sentinel" |
+| `flow-refresh-resets` | a new snapshot keeps `drewAllUnseen` | "after a Refresh that brought 20 to 13 unseen the tab draws 33 unseen cards without a "load more" sentinel" |
 
 ## Open items for later units
 

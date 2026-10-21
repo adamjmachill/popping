@@ -240,8 +240,8 @@ async function installClock(page, time = F.NOW) {
   await page.clock.install({ time })
 }
 
-async function tap(page, locator) {
-  await locator.tap()
+async function tap(page, locator, opts) {
+  await locator.tap(opts)
   page._taps = (page._taps || 0) + 1
 }
 
@@ -3947,21 +3947,25 @@ module.exports = [
   // open sends one PATCH adding the story's id under its category's seen:
   // key, and the tab's badge drops by one while the list doesn't move. A
   // story opened just before the page hides still goes out, in the hide's
-  // keepalive PATCH.
+  // keepalive PATCH. The page's clock is held from the tap on News
+  // (PR3c): a middle-click scrolls its link into view, and a card read on
+  // screen and scrolled off the top on the way would be used up, so the
+  // badge would count more than the opens. Each open drops the badge at
+  // once; their PATCH goes when the clock moves.
   dashFlow('flow-open-marks-seen', {
     before: async ({ page }) => {
       await installClock(page)
     },
     run: async ({ page, fail, shot }) => {
       const writes = await prefWrites(page)
+      await holdClock(page)
       await tap(page, phoneTab(page, /^news/i))
       const before = await groupIds(page, 'unseen')
       if (before.length !== 12) return fail('OPEN-SEEN', `News shows ${before.length} stories above the marker, expected 12`)
       if ((await badge(page, /^news/i)) !== '12') fail('OPEN-SEEN', `the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "12"`)
       const first = before[0]
       await openStory(page, first)
-      if (!(await waitFor(() => seenAdded(writes, 'news').includes(first), 3000))) return fail('OPEN-SEEN', `opening story ${first} sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
-      if ((await badge(page, /^news/i)) !== '11') fail('OPEN-SEEN', `after an open the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "11"`)
+      if (!(await waitFor(async () => (await badge(page, /^news/i)) === '11', 3000))) fail('OPEN-SEEN', `after an open the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "11"`)
       if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(before)) fail('OPEN-SEEN', `the list moved: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
       if ((await markerText(page)) !== '11 not seen · Mark as read') fail('OPEN-SEEN', `the end row reads ${JSON.stringify(await markerText(page))}`)
       const log = await harnessLog(page)
@@ -3971,31 +3975,44 @@ module.exports = [
       // event (an auxclick): it uses the story up just the same.
       const third = before[2]
       await page.locator(`${MOBILE_MAIN} article[data-card-id="${third}"] a[aria-label="open in new tab"]`).first().click({ button: 'middle' })
-      if (!(await waitFor(() => seenAdded(writes, 'news').includes(third), 3000))) fail('OPEN-SEEN', `a middle-click on story ${third}'s headline sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
       if (!(await harnessLog(page)).opened.some((o) => o.middle)) fail('OPEN-SEEN', 'the middle-click opened nothing')
-      if ((await badge(page, /^news/i)) !== '10') fail('OPEN-SEEN', `after a middle-click the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "10"`)
+      if (!(await waitFor(async () => (await badge(page, /^news/i)) === '10', 3000))) fail('OPEN-SEEN', `after a middle-click the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "10"`)
       // So does a middle-click on a story's Reddit thread (104 has one).
       if (before.slice(0, 3).includes(104)) return fail('OPEN-SEEN', `story 104 is among the first three: ${JSON.stringify(before)}`)
       await page.locator(`${MOBILE_MAIN} article[data-card-id="104"] a[href*="reddit.com"]`).first().click({ button: 'middle' })
-      if (!(await waitFor(() => seenAdded(writes, 'news').includes(104), 3000))) fail('OPEN-SEEN', `a middle-click on story 104's Reddit thread sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      // The click scrolled 104 into view: the app's observer has seen the
+      // cards above it leave the top (unread) before the clock moves.
+      await observersSettled(page)
       if (!(await harnessLog(page)).opened.some((o) => o.middle && o.url.includes('reddit.com'))) fail('OPEN-SEEN', 'the middle-click on the Reddit thread opened nothing')
-      if ((await badge(page, /^news/i)) !== '9') fail('OPEN-SEEN', `after a middle-click on the Reddit thread the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "9"`)
+      if (!(await waitFor(async () => (await badge(page, /^news/i)) === '9', 3000))) fail('OPEN-SEEN', `after a middle-click on the Reddit thread the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "9"`)
+      // prefSync's 1 s batch sends the three marks, and only those: the
+      // scroll to 104 took cards off the top that hadn't been read.
+      await page.clock.runFor(1100)
+      await requestsSettled(page)
+      if (!(await waitFor(() => seenAdded(writes, 'news').includes(first), 3000))) return fail('OPEN-SEEN', `opening story ${first} sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      if (!seenAdded(writes, 'news').includes(third)) fail('OPEN-SEEN', `a middle-click on story ${third}'s headline sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      if (!seenAdded(writes, 'news').includes(104)) fail('OPEN-SEEN', `a middle-click on story 104's Reddit thread sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      const opened = sortedIds([first, third, 104])
+      if (JSON.stringify(sortedIds(seenAdded(writes, 'news'))) !== JSON.stringify(opened)) fail('OPEN-SEEN', `seen:news got ${JSON.stringify(seenAdded(writes, 'news'))}, expected exactly the opened ${JSON.stringify(opened)}`)
 
       // From search: the story's own category, whatever the results show.
+      // (The search waits 300 ms after the last key, and its open's PATCH
+      // goes with the next 1 s batch.)
       await tap(page, page.locator('button[aria-label="open search"]'))
       await page.locator('#app-search').fill('Pettersson')
+      await page.clock.runFor(350)
       const result = page.locator('main article[data-card-id="601"]').first()
       await result.waitFor({ state: 'visible' })
       await tap(page, result.locator('a[aria-label="open in new tab"]').first())
+      await page.clock.runFor(1100)
       if (!(await waitFor(() => seenAdded(writes, 'nhl').includes(601), 3000))) fail('OPEN-SEEN', `opening a search result sent no PATCH adding 601 to seen:nhl: ${JSON.stringify(writes)}`)
       await tap(page, page.locator('button[aria-label="clear search"]'))
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
 
       // Opened, then the page hides at once: the 1 s batch can't run (the
-      // clock is held), so only the hide's keepalive PATCH carries it.
+      // clock is still held), so only the hide's keepalive PATCH carries it.
       const second = before[1]
-      const now = await page.evaluate(() => Date.now())
-      await page.clock.pauseAt(now + 1000)
+      if (seenAdded(writes, 'news').includes(second)) return fail('OPEN-SEEN', `story ${second} was marked before it was opened: ${JSON.stringify(writes)}`)
       await openStory(page, second)
       await setHidden(page, true)
       const keptAlive = () =>
@@ -4003,15 +4020,22 @@ module.exports = [
       if (!(await waitFor(keptAlive, 3000))) fail('OPEN-SEEN', 'hiding right after an open sent no keepalive PATCH of seen:news')
       if (!(await waitFor(() => (prefMock(page.context()).value('seen:news') || []).includes(second), 3000))) fail('OPEN-SEEN', `story ${second}, opened as the page hid, never reached the store`)
       await setHidden(page, false)
-      await page.clock.resume()
 
-      // A middle-click on a podcast's Listen uses the episode up too.
+      // A middle-click on a podcast's Listen uses the episode up too. The
+      // clock is still held: Podcast's few cards sit on screen with the
+      // marker, and the end rule would use them up a second later, the
+      // episode with them. The badge drops by one at the middle-click.
       await tap(page, phoneTab(page, /^podcast/i))
       const episode = await page.locator(`${MOBILE_MAIN} [data-group="unseen"] article[data-card-id]`).filter({ has: page.locator('a[href$=".mp3"]') }).first().getAttribute('data-card-id')
       if (!episode) return fail('OPEN-SEEN', 'no unseen podcast episode with a Listen link')
+      const podcastWas = Number(await badge(page, /^podcast/i))
+      const podcastNow = podcastWas > 1 ? String(podcastWas - 1) : ''
       await page.locator(`${MOBILE_MAIN} article[data-card-id="${episode}"] a[href$=".mp3"]`).first().click({ button: 'middle' })
+      if (!(await waitFor(async () => (await badge(page, /^podcast/i)) === podcastNow, 3000))) fail('OPEN-SEEN', `after a middle-click on episode ${episode}'s Listen the Podcast badge reads ${JSON.stringify(await badge(page, /^podcast/i))}, expected ${JSON.stringify(podcastNow)}`)
+      await page.clock.runFor(1100)
       if (!(await waitFor(() => seenAdded(writes, 'podcast').includes(Number(episode)), 3000))) fail('OPEN-SEEN', `a middle-click on episode ${episode}'s Listen sent no PATCH adding it to seen:podcast: ${JSON.stringify(writes)}`)
       if (!(await harnessLog(page)).opened.some((o) => o.middle && o.url.endsWith('.mp3'))) fail('OPEN-SEEN', 'the middle-click on Listen opened nothing')
+      await page.clock.resume()
 
       // The desktop For You row (no marker, no dimming there: C2).
       await page.setViewportSize({ width: 1280, height: 800 })
@@ -4622,6 +4646,11 @@ module.exports = [
       await page.clock.runFor(3000)
       if (!(await waitFor(() => (prefMock(page.context()).value('seen:news') || []).includes(first), 3000))) return fail('RETURN', 'the open never reached the store')
       await list.evaluate((el) => el.scrollTo(0, 400))
+      // Every card on screen was read for those 3 s, so the ones this
+      // takes off the top are used up (PR3c): the reset below puts them
+      // under Earlier with the opened one.
+      await observersSettled(page)
+      const readOff = (await listCards(page)).above.filter((id) => id !== first)
 
       await away(page, 9)
       await sleep(800)
@@ -4646,10 +4675,11 @@ module.exports = [
       if (!(await waitFor(() => waiting, 3000))) return fail('RETURN', "back after 11 min the return's refresh never started")
       if (!(await waitFor(() => page.evaluate(() => window.__atTop), 3000))) fail('RETURN', "back after 11 min the return's scroll to the top sent no scroll event")
       await land()
-      const rest = [7951, ...before.filter((id) => id !== first)]
-      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(rest), 3000))) fail('RETURN', `back after 11 min the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the arrival first, then all but the opened one`)
+      const rest = [7951, ...before.filter((id) => id !== first && !readOff.includes(id))]
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(rest), 3000))) fail('RETURN', `back after 11 min the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the arrival first, then all but the opened one${readOff.length ? ` and the ${JSON.stringify(readOff)} read off the top` : ''}`)
       const earlier = page.locator(PHONE_EARLIER)
-      if ((await textNow(page, PHONE_EARLIER)) !== 'Earlier (1)' || (await earlier.getAttribute('aria-expanded')) !== 'false') fail('RETURN', 'back after 11 min the opened story is not folded under Earlier (1)')
+      const earlierWant = `Earlier (${1 + readOff.length})`
+      if ((await textNow(page, PHONE_EARLIER)) !== earlierWant || (await earlier.getAttribute('aria-expanded')) !== 'false') fail('RETURN', `back after 11 min Earlier reads ${JSON.stringify(await textNow(page, PHONE_EARLIER))}, expanded ${await earlier.getAttribute('aria-expanded')}: expected the opened story${readOff.length ? ' and the ones read off the top' : ''} folded under ${JSON.stringify(earlierWant)}`)
       if (!(await waitFor(async () => (await scrollTop()) === 0, 3000))) fail('RETURN', `back after 11 min the list is at ${await scrollTop()}, expected its top`)
       await shot('reset')
 
@@ -4782,7 +4812,10 @@ module.exports = [
   // the screen, and the hold must be let go although the marker never
   // crossed the screen's edge: the end row follows the opens, an arrival
   // goes in at once, and the row doesn't jump off the screen when it is
-  // scrolled to.
+  // scrolled to. The page's clock is held from the tap on the tab
+  // (PR3c): the six unseen cards sit on screen with the marker at first,
+  // and the last of them with it again at the end, where the end rule
+  // would use them up a second later.
   dashFlow('flow-return-from-earlier', {
     before: async ({ page, context }) => {
       await installClock(page)
@@ -4797,6 +4830,7 @@ module.exports = [
       const list = page.locator(PHONE_LIST)
       const markerTop = () => page.locator(PHONE_MARKER).evaluate((m) => m.getBoundingClientRect().top - m.closest('[data-scroller]').getBoundingClientRect().top)
       const listHeight = () => list.evaluate((el) => el.clientHeight)
+      await holdClock(page)
       await tap(page, phoneTab(page, /^nhl/i))
       const first = await groupIds(page, 'unseen')
       if (JSON.stringify(first) !== '[601,602,7001,7002,7003,7004]') return fail('RETURN-EARLIER', `the NHL tab opens with ${JSON.stringify(first)} above the marker`)
@@ -4853,14 +4887,20 @@ module.exports = [
   // once its stories land: an opened story goes under the marker, a story
   // that came in is sorted in first, Earlier folds again, and the toast
   // counts what came in ("1 new"), or says "Nothing new". A poll never
-  // does any of this.
+  // does any of this. The page's clock is held from the tap on News
+  // (PR3c): opening Earlier scrolls the list to its end, where the last
+  // cards sit on screen with the marker, and the NHL part scrolls read
+  // cards off the top; either would use stories up, and the Refreshes
+  // count what is unseen.
   dashFlow('flow-refresh-resets', {
     before: async ({ page }) => {
+      await installClock(page)
       // 61 NHL stories, every one unseen, for the last part.
       await withStories(page, moreNhl(58))
       await withArrivals(page)
     },
     run: async ({ page, fail, shot }) => {
+      await holdClock(page)
       await tap(page, phoneTab(page, /^news/i))
       const before = await groupIds(page, 'unseen')
       await openStory(page, before[0])
@@ -4880,8 +4920,10 @@ module.exports = [
       if (!(await waitFor(() => page.locator('[role="status"]').getByText('1 new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "1 new" toast')
       await shot('refreshed')
       // Earlier opened, then Refresh again with nothing new: the same
-      // Column (no tab switch) starts over, so Earlier folds again.
-      await tap(page, page.locator(PHONE_EARLIER))
+      // Column (no tab switch) starts over, so Earlier folds again. The
+      // "1 new" toast stays up while the clock is held, over the middle
+      // of Earlier at the end of the list: the tap goes to its left end.
+      await tap(page, page.locator(PHONE_EARLIER), { position: { x: 16, y: 22 } })
       if (!(await waitFor(async () => (await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) === 'true' && (await groupIds(page, 'earlier')).length === 1, 3000))) fail('REFRESH', 'Earlier (1) did not open')
       await tap(page, page.locator('header[data-app-header] button[aria-label="refresh"]'))
       if (!(await waitFor(() => page.locator('[role="status"]').getByText('Nothing new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "Nothing new" toast')
