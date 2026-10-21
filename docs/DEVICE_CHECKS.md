@@ -70,9 +70,10 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · Open Menu → Settings → Saved and note the stories it lists, then close Settings and open the Saved tab. Pass: the tab lists the same stories, except any you also hid, each with its picture where it has one, including ones older than anything in the other tabs.
 - [ ] #<pr> · Save one story, then another, then open Saved. Pass: the second one is at the top, the first right under it.
 - [ ] #<pr> · In Saved, tap the bookmark on a story to remove it, then force-quit and reopen the app. Pass: it is gone from Saved and stays gone.
-- [ ] #<pr> · On For You, hide a story and tap Undo on the toast, then open that story's category tab. Pass: the story is back in For You and in its tab.
-- [ ] #<pr> · On For You, hide a story, then wait a minute with Popping open. Open Menu → Settings → Hidden, tap Restore all, close Settings and open that story's category tab. Pass: the story is there straight away, and back in For You.
+- [ ] #<pr> · On For You, hide a story and tap Undo on the toast, then open that story's category tab and go back to For You. Pass: the story is in its tab, and back in For You where it was.
+- [ ] #<pr> · On For You, note the top three stories. Hide the first, wait a minute with Popping open, hide the third, and wait another minute. Open Menu → Settings → Hidden, tap Restore all, close Settings and open the first story's category tab. Pass: the story is there straight away; back on For You, the three are in the order you noted (a new story may sit between them).
 - [ ] #<pr> · (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
+- [ ] #<pr> · (If you have more than 30 saves) Open the Saved tab, force-quit Popping and reopen it. Pass: Saved fills in without the app freezing, and more stories load as you scroll to the end.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

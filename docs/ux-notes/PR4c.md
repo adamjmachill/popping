@@ -24,8 +24,11 @@ it.
     wins over saved".
   - `savedToFetch(starred, skip)`: the ids to fetch, newest save first,
     so the first chunk of 200 is the top of Saved.
-  - `reinsert(list, item, at)`: a hidden story back at its place, or the
-    same list when a poll already brought it back.
+  - `placeOf(list, i, isHidden)` and `putBack(list, items, kept)` (re-check
+    round 3; they replace `reinsert` and `reinsertAll`): a hidden story's
+    place (the stories next to it, up to the first one not hidden, and
+    its index), and the list with stories put back at their places, or
+    the same list when a poll already brought them back.
 - `frontend/src/lib/feedOrder.ts`: `keepSet(...groups)`, the keep set a
   `seen:` key is pruned against, built from stories or bare ids; and
   (re-check round 1) `keepIdsFor(held)`, App's keep set from what it
@@ -60,16 +63,19 @@ it.
     so a poll that changed nothing in Saved doesn't redraw it.
   - **Hide Undo:** every hide (`hideEntries`; `hideEntry` and
     `toggleHideEntry` for one story, Settings › Voted's "Hide all
-    downvoted" for many) keeps each story and its index in `entries`
+    downvoted" for many) keeps each story and its place in `entries`
     and in `forYou` (`keepHiddenStories`, `hiddenStoriesRef`: the latest
     `KEPT_HIDDEN` = 100, and never fewer than the hide's own, so a bulk
     hide keeps all of its stories and pushes out none of the 100 before
     it). Every unhide (`restoreHiddenEntries`; `restoreHiddenEntry`,
     `toggleHideEntry`'s unhide, Settings' Hidden list, both Restore and,
     since re-check round 2, Restore all, and the bulk hide's Undo) puts
-    them back there with `reinsertAll` (each at its own index, lowest
-    first), except a story whose feed is gone since the hide (re-check
-    round 2).
+    them back there with `putBack` (re-check round 3: next to the
+    stories that were next to it, its index only when none of them is
+    there), except a story whose feed is gone since the hide (re-check
+    round 2). While For You's last request failed, the Undo leaves For
+    You's empty list alone and the story is laid over its next answer
+    (re-check round 3).
     For two minutes (`SOURCE_CHANGE_TTL_MS`, the same window
     `sourceChangesRef` uses for feeds) `refresh` lays a put-back story
     over a poll that doesn't return it yet (the server answered before
@@ -85,6 +91,11 @@ it.
   - `byNewest` is no longer imported (Saved isn't sorted by date).
 - `frontend/src/lib/sorting.ts`: the header comment says Saved lists
   saves newest save first.
+- `frontend/src/components/Column.tsx` (re-check round 3): Saved's
+  stories go through the 30-card batches however they arrive. A tab
+  draws an arrival at once once every card is drawn, to keep its marker
+  and Earlier in place; Saved has nothing under its cards, and its saves
+  can land by id by the hundred.
 - `frontend/scripts/iphone-audit/capture.cjs`:
   - `GET /api/entries/by-ids` mirrors the real route: at most 200 valid
     ids, in the order asked, ids with no row or whose feed is gone
@@ -118,7 +129,12 @@ it.
   Undo puts it back into those lists. Beyond the spec, a put-back story
   is also laid over polls for two minutes, as feeds are: a poll sent
   between the Undo and its PATCH (a 1 s batch) would otherwise drop the
-  story again until the next poll.
+  story again until the next poll. Since re-check round 3 its place is
+  kept as the ids of the stories next to it, not an index (below).
+- **Column.tsx** (re-check round 3). PR3a's batching draws a tab's
+  arrivals at once once every card is drawn. Saved is now left out of
+  that rule, since this unit's by-id fetch can bring hundreds of saves
+  in one update; the tabs are unchanged.
 - **Keep set.** `starredEntries` has been in the keep set since PR3b.
   Since the review fixes the by-id cache also holds recently unsaved
   stories (bounded at 1000), so the cache in the keep set now also keeps
@@ -148,7 +164,8 @@ it.
     out; hide wins; an id stored twice drawn once; `savedToFetch` order
     and skip; `reinsert` at its place, clamped (a negative index since
     re-check round 1), the input unchanged, and the same list when the
-    story is already there.
+    story is already there. Re-check round 3 replaced the `reinsert`
+    cases with `placeOf` and `putBack` cases (below).
 - **Flows:**
   - `flow-saved-by-id`: 503 and 402 never reach a tab (the page's fetch
     drops them). Saved lists 105, 503, 103 with 503's thumbnail loaded,
@@ -622,6 +639,183 @@ For You rules only change what is laid over a poll, nothing stored).
 Device checks: one added, for Restore all (below and in
 `docs/DEVICE_CHECKS.md`).
 
+## Review fixes (re-check round 3, "PR4c: re-check fixes, round 3")
+
+Five findings; all applied, none skipped. Three change what the app
+does (1 to 3), two are about the tests (4, 5). Each was reproduced
+first: the new flows fail on the round 2 build (`85ada9f`'s App.tsx,
+Column.tsx and lib/saved.ts) with the findings' symptoms, and the three
+reworked flows pass there (the app was right; the flows were weak).
+
+1. **A put-back story went back a place off in For You when other
+   hidden stories were above it** (single Undo, per-row Restore and
+   Restore all; moderate in effect: one place, until the first poll
+   after the Undo's batch). `keepHiddenStories` kept a raw index into
+   `entries` and `forYou`, and those lists either still held stories
+   hidden earlier (they are left out only where drawn) or had already
+   lost one to a poll, so `reinsertAll` applied indexes taken against
+   different lists. Now:
+   - A hide keeps each story's place as ids (`placeOf`, `lib/saved.ts`):
+     the stories right after it and right before it, nearest first,
+     each run up to and including the first one that wasn't hidden
+     then, and its index as the last resort.
+   - The place is taken against the list with the stories already kept
+     put back in their places. So a story hidden earlier that a poll
+     has dropped still counts as a neighbour, and two hides next to
+     each other come back in the right order whichever is restored
+     first. This goes beyond the finding's fix (the nearest story not
+     hidden, the one before as a fallback): with only that, hiding 102
+     and then 301 just above it, with a poll after each, and restoring
+     102 first put 301 under 102 (`flow-two-hides-restore-rows-adjacent`).
+   - `putBack` (it replaces `reinsert` and `reinsertAll`) puts each story
+     just before the nearest story of its "after" run that the list
+     holds, else just after the nearest of its "before" run, else at
+     its index. A neighbour put back in the same call is waited for. A
+     run the list holds none of goes on along the run of its last story
+     when that one is a hidden story still kept. Two stories that wait
+     for each other (For You reordered between their hides) still both
+     go back: the first by its other side, else its index.
+   - The Undo (`putBackHiddenStories`) and `refresh`'s lay-over use the
+     same places and the same `putBack`.
+   New flows `flow-hide-two-undo-the-second` (the finding's (a)),
+   `flow-two-hides-restore-all` and `flow-two-hides-restore-rows` (its
+   (b)), and `flow-two-hides-restore-rows-adjacent`; eight `placeOf` and
+   `putBack` unit cases.
+2. **Undo or Restore while For You's last request had failed made For
+   You show only the restored story.** `forYouOkRef` is set next to
+   `setForYouLoaded(forYouOk)`. While it is false, `putBackHiddenStories`
+   leaves For You's empty list alone and keeps the story in
+   `restoredRef`, so the next good For You answer gets it laid over, at
+   its place (inside the two minutes; after them the server returns
+   it). Every unhide goes through it: the Undo, the eye's unhide, Restore
+   and Restore all. New flow `flow-hide-foryou-fails-then-undo`.
+3. **Saves fetched by id after Saved was drawn were all drawn at once,
+   past the 30-card batches.** Once every card of a list is drawn,
+   Column grows its limit with every arrival (`drewAllUnseen`), so a
+   tab's marker, C8's row and an open Earlier don't go away for a frame.
+   Saved has none of those under its cards, and its saves can land by
+   id up to 1000 in one update (the phone reopening on its stored Saved
+   tab, a tap on Saved right after launch, Clear all's Undo). Column no
+   longer grows the limit that way for Saved, so its stories go through
+   the batches however they arrive. This is in Column rather than a
+   Saved generation in App: a generation that changed with each by-id
+   answer would also start Saved over at 30 cards under a reader
+   scrolled further down whenever one save landed. New flow
+   `flow-saved-batches-late-saves`.
+4. **`flow-saved-drops-hidden-and-deleted` said a hidden save leaves
+   Saved "at once" but allowed 3 s of real time.** The flow installs the
+   clock and holds it before the hide: Saved must leave 105 out within
+   1 s while the hide's batch is still held (the store must not have it
+   yet), and only then does `runFor(1000)` send it. Its comment and the
+   README row say so.
+5. **No flow checked where an Undo puts the story back.** Every put-back
+   check only asked whether the story was drawn, and 101, the story
+   they used, is For You's first. `flow-hide-undo-after-poll` now hides
+   102 (in the middle of For You, so a put-back at the top or at the end
+   both fail) and checks that For You, opened afresh after the Undo and
+   again after the lay-over poll, reads exactly as before the hide.
+   `flow-hide-all-downvoted-undo` downvotes 102 and 103 (it was 101 and
+   103) and checks For You's order the same way after its Undo. The new
+   flows for findings 1 and 2 check For You's exact order too.
+
+### Tests added or changed (re-check round 3)
+
+- New flows: `flow-hide-two-undo-the-second`,
+  `flow-two-hides-restore-all`, `flow-two-hides-restore-rows`,
+  `flow-two-hides-restore-rows-adjacent`,
+  `flow-hide-foryou-fails-then-undo`, `flow-saved-batches-late-saves`
+  (its by-ids rows are made in the flow: 248 synthetic saves).
+- Reworked: `flow-hide-undo-after-poll` (102, For You's exact order),
+  `flow-hide-all-downvoted-undo` (102 and 103, For You's exact order),
+  `flow-saved-drops-hidden-and-deleted` (the clock).
+- `saved.test.ts`: the three `reinsert` / `reinsertAll` cases are
+  replaced by eight: `placeOf`'s runs; `putBack`'s three rules and its
+  clamp; the unchanged list; the finding's (a) and (b), each restore
+  order; two hides next to each other; stories that wait for each
+  other; a run that goes on along a kept story's. 13 cases in the file,
+  209 unit tests in all.
+- `README.md` (iphone-audit): the new flows and the reworked rows.
+
+### Mutation checks (re-check round 3)
+
+Each was a scratch copy of the final frontend with one edit (the
+worktree was never edited for a mutant), `npm run build`, and `--only`
+on the flows (`--csp --strict`, CI fonts, a scratch preview); unit
+cases ran under strip-types the same way.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| the six new flows | all three app fixes reverted (`85ada9f`'s App.tsx, Column.tsx and lib/saved.ts, with the new flows) | HIDE-TWO-UNDO: "after the Undo of 102, For You opened afresh reads 301,201,102,401,104,303,502, expected 301,102,201,401,104,303,502", and the same after the lay-over poll; TWO-HIDES-RESTORE: "after Restore all of 101 and 102, For You opened afresh reads 101,102,301,201,…, expected 101,301,102,201,…", the same for `-rows`, and for `-rows-adjacent` "…reads 101,301,201,102,…"; FY-FAILS-UNDO: "after an Undo while For You's last request had failed, For You opened afresh shows 102, expected no stories until it answers"; SAVED-BATCHES: "once 248 saves landed by id, Saved draws 250 cards, expected its first 30" and "at the end of its first 30 cards Saved draws 250, expected 60". The three reworked flows pass there |
+| `flow-hide-two-undo-the-second`, `flow-two-hides-restore-rows-adjacent`; `saved.test.ts` | `putBack` ignores the neighbours (every story at its index) | HIDE-TWO-UNDO (both checks) and TWO-HIDES-RESTORE (`-rows-adjacent`) as above; 6 of the 7 `putBack` cases |
+| `flow-hide-two-undo-the-second` | `refresh`'s lay-over without the neighbours (index only) | "after the Undo of 102 and a poll that left it out, For You opened afresh reads 301,201,102,…" |
+| `flow-two-hides-restore-rows-adjacent` | a hide's place taken against the list as it is, without the kept stories put back in it | "after Restore on each row of 102 and 301, For You opened afresh reads 101,102,301,201,…" |
+| `flow-hide-foryou-fails-then-undo` | `&& forYouOkRef.current` dropped from the For You put-back | "…For You opened afresh shows 102, expected no stories until it answers" |
+| `flow-saved-batches-late-saves` | Column's `&& !isSaved` dropped | "once 248 saves landed by id, Saved draws 250 cards, expected its first 30"; "…Saved draws 250, expected 60" |
+| `flow-saved-drops-hidden-and-deleted` | M33: Saved reads a copy of `hiddenSet` that a 1.5 s `setTimeout` updates | "after hiding 105 Saved shows 503,105,103, with the hide's batch not sent yet", and two follow-on failures. The round 2 flow passes it |
+| `flow-hide-undo-after-poll`, `flow-hide-all-downvoted-undo` | M34: `putBack` always puts a story at the end; and always at the top | HIDE-UNDO: "right after the Undo, For You opened again reads 101,301,201,401,104,303,502,102, expected 101,301,102,…" and the same after the lay-over poll (at the top: "102,101,301,…"); HIDE-ALL-UNDO: the same. The round 2 flows pass both |
+
+Each mutant failed every run shown; the reverted-fixes build and the
+anchor and M33/M34 mutants were also run once on the build before a
+last clean-up (a hide-order sort that no test could tell apart, then
+removed), with the same failures.
+
+Guarded by unit cases only. Each was broken and run against the 12
+hide and restore flows (`flow-hide-*`, `flow-two-hides-*` and
+`flow-hidden-restore-all-after-poll`), with 0 failures, so only
+`saved.test.ts` catches it:
+
+- `putBack`'s wait for a neighbour put back in the same call (the wait
+  dropped): "stories put back together wait for each other" fails, on
+  an assertion added for it (both stories' other neighbour gone).
+- A run that goes on along a kept story's run (the walk dropped): "a run
+  the list holds none of goes on along the run of a kept story" fails.
+  App's `keptPlaces` giving nothing passes every flow too.
+- The way out when two stories wait for each other (dropped): the unit
+  file never finishes (the loop doesn't end), and is cancelled at a
+  test timeout.
+
+The flows' restores don't need these: with the places taken among the
+kept stories, a story's own runs already hold a neighbour the list has.
+
+Still unguarded, as before: Saved's array reuse, the lay-over's
+re-hide check, `toggleHideEntry`'s unhide, the negative cache's
+clean-up, the feed check reading `liveSources`, and the `+ added` in
+the keep cap.
+
+### Verification (re-check round 3)
+
+- `npm run lint`: 0 errors (the base's 4 warnings). `npm run build`
+  passes. Unit tests: 209 of 209 (204, less the three `reinsert` /
+  `reinsertAll` cases, plus eight).
+- `git diff --exit-code package.json package-lock.json`: clean.
+- Backend pytest on `popping_test`, the 12 files that read frontend
+  source plus `test_entries_by_ids_projection.py`: 227 passed and 2
+  failed, both in the DNS-only baseline list
+  (`test_reserved_category_names.py`). No backend file changed.
+- The 22 Saved and hide flows (round 2's 15, the six new ones and
+  `flow-unsave-last-saved`): 0 failures on the final build.
+- Full strict smoke (`--csp --strict`, CI fonts, port 4175) on the final
+  build: 189 states and flows (183 plus the six new flows), 187 ok, 0
+  warnings (1528 s, with another lane's smoke on the same container).
+  Two PR3b flows failed:
+  - `flow-mark-all-read`: "SETUP: state could not be reached:
+    locator.tap: Timeout 30000ms exceeded". Run again on its own it
+    passed (12.7 s): load.
+  - `flow-new-arrival-appends`: "with the marker above the screen the
+    arrival went in: [7912]", "…the Earlier card being read moved from
+    207 to 341" and "…C8's row went". It fails the same way, with the
+    same three messages, on its own, on the round 2 build (`85ada9f`'s
+    app code) and on the PR3b base `45aac1e` built with its own flows
+    and mock (the round 3 review saw the same). So it is not from this
+    unit. It passed in round 2's full run earlier the same day, so it
+    looks tied to the time of day or the container; it is PR3b's flow
+    and left for that unit.
+
+Deviations: one added (Column.tsx, above); the Hide Undo one says how
+the place is kept. Risks: two added (below). Device checks: the Undo
+and Restore all checks now look at the story's place in For You, and
+one is added for Saved's batches (below and in `docs/DEVICE_CHECKS.md`).
+
 ## Risks and data-compatibility notes
 
 - Revert is safe: Saved falls back to the stories the tabs loaded, by
@@ -636,6 +830,15 @@ Device checks: one added, for Restore all (below and in
 - Saved stories fetched by id keep the copy fetched (score, comment
   count, cached summary) until the next load, unless a tab brings the
   story again.
+- A put-back story goes back next to the stories that were next to it
+  when it was hidden (re-check round 3). For You's order comes from the
+  ranker and can change between polls, so until the first poll after
+  the Undo's batch returns it, the story sits by its old neighbours
+  wherever they are now.
+- Saved draws its stories 30 at a time however they arrive (re-check
+  round 3). A save that lands at the top of a list already drawn to the
+  end of a batch pushes that batch's last card past it until the list
+  nears its end, where the next batch loads.
 
 ## Open items for later units
 
@@ -657,6 +860,7 @@ a number):
 - Open Menu → Settings → Saved and note the stories it lists, then close Settings and open the Saved tab. Pass: the tab lists the same stories, except any you also hid, each with its picture where it has one, including ones older than anything in the other tabs.
 - Save one story, then another, then open Saved. Pass: the second one is at the top, the first right under it.
 - In Saved, tap the bookmark on a story to remove it, then force-quit and reopen the app. Pass: it is gone from Saved and stays gone.
-- On For You, hide a story and tap Undo on the toast, then open that story's category tab. Pass: the story is back in For You and in its tab.
-- On For You, hide a story, then wait a minute with Popping open. Open Menu → Settings → Hidden, tap Restore all, close Settings and open that story's category tab. Pass: the story is there straight away, and back in For You.
+- On For You, hide a story and tap Undo on the toast, then open that story's category tab and go back to For You. Pass: the story is in its tab, and back in For You where it was.
+- On For You, note the top three stories. Hide the first, wait a minute with Popping open, hide the third, and wait another minute. Open Menu → Settings → Hidden, tap Restore all, close Settings and open the first story's category tab. Pass: the story is there straight away; back on For You, the three are in the order you noted (a new story may sit between them).
 - (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
+- (If you have more than 30 saves) Open the Saved tab, force-quit Popping and reopen it. Pass: Saved fills in without the app freezing, and more stories load as you scroll to the end.

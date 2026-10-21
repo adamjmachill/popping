@@ -260,7 +260,10 @@ export function ColumnInner({
   // story that arrives is drawn at once (the limit grows with it): the
   // marker, C8's row and an open Earlier never go away for a frame while
   // a batch waits for the sentinel. Only a snapshot's first load goes
-  // through the sentinel.
+  // through the sentinel. Not in Saved: nothing is drawn under its cards,
+  // and its stories can arrive by the hundred (PR4c: saves no tab holds
+  // come by id, 200 to a request, often after Saved is drawn), so they
+  // go through the batches too.
   const [drewAllUnseen, setDrewAllUnseen] = useState(false)
   // The keyboard selection that opened Earlier. Earlier opens when the
   // selection moves into it, once per card, so the Earlier button can
@@ -461,7 +464,7 @@ export function ColumnInner({
     }
   }
   const reachEarlier = earlierOpen && selectedEarlier >= 0
-  const needUnseen = Math.max(reachEarlier ? unseenTotal : selectedUnseen + 1, drewAllUnseen ? unseenTotal : 0)
+  const needUnseen = Math.max(reachEarlier ? unseenTotal : selectedUnseen + 1, drewAllUnseen && !isSaved ? unseenTotal : 0)
   if (!newSnapshot && needUnseen > limit) setLimit(batchesFor(needUnseen))
   if (!newSnapshot && reachEarlier && selectedEarlier >= earlierLimit) setEarlierLimit(batchesFor(selectedEarlier + 1))
   const shown = Math.max(limit, needUnseen)

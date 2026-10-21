@@ -51,7 +51,7 @@ import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSav
 import { useUpdateCheck, type Return } from './lib/useUpdateCheck'
 import { countUnseen, keepIdsFor, nextTab as findNextTab, seenKey, seenTest, type TabCount } from './lib/feedOrder'
 import { MAX_STARRED } from './lib/prefSync'
-import { reinsertAll, savedStories, savedToFetch } from './lib/saved'
+import { placeOf, putBack, savedStories, savedToFetch, type Place } from './lib/saved'
 import { useFeedOrder, type FeedTab } from './lib/useFeedOrder'
 import { createSeenBatch } from './lib/seen'
 import { useSeenObserver } from './lib/useSeenObserver'
@@ -210,10 +210,31 @@ const NO_ENTRIES: Entry[] = []
 const NO_SECTIONS = { unseen: NO_ENTRIES, earlier: NO_ENTRIES }
 
 // A hidden story, kept for its Undo (``keepHiddenStories``): the story
-// and its place in ``entries`` and in ``forYou`` (-1: not there). The
-// latest ``KEPT_HIDDEN`` hidden stories are kept (more for a bulk hide).
-type KeptStory = { entry: Entry; entriesAt: number; forYouAt: number }
+// and its place in ``entries`` and in ``forYou`` (``lib/saved``'s
+// ``Place``: its neighbours and index; null: not there). The latest
+// ``KEPT_HIDDEN`` hidden stories are kept (more for a bulk hide).
+type KeptStory = { entry: Entry; inEntries: Place | null; inForYou: Place | null }
 const KEPT_HIDDEN = 100
+type KeptSide = 'inEntries' | 'inForYou'
+// What ``putBack`` takes for one list: the stories kept there with their
+// places, and the places of the hidden stories still kept, which lend
+// their neighbours when the list no longer holds a story's own.
+function putBackItems(stories: Iterable<KeptStory>, side: KeptSide) {
+  const out: { item: Entry; place: Place }[] = []
+  for (const k of stories) {
+    const place = k[side]
+    if (place) out.push({ item: k.entry, place })
+  }
+  return out
+}
+function keptPlaces(kept: ReadonlyMap<number, KeptStory>, side: KeptSide): (id: number) => Place | undefined {
+  const places = new Map<number, Place>()
+  for (const [id, k] of kept) {
+    const place = k[side]
+    if (place) places.set(id, place)
+  }
+  return (id) => places.get(id)
+}
 
 // One tab's column: ``key`` names it, ``label`` is what it shows,
 // ``name`` is the id its stored rows are kept under (see
@@ -1281,6 +1302,10 @@ export function App() {
   // result, as ``sourceChangesRef`` does for feeds.
   const hiddenStoriesRef = useRef(new Map<number, KeptStory>())
   const restoredRef = useRef(new Map<number, KeptStory & { at: number }>())
+  // The last applied refresh got For You (``forYouLoaded``, for the
+  // handlers): while it didn't, For You is [] until it answers, and an
+  // Undo leaves the story to be laid over that answer.
+  const forYouOkRef = useRef(false)
 
   // ``silent`` skips the toasts (errors still set the banner): Settings
   // refreshes after adding a feed, and its own "Added …" toast should
@@ -1342,21 +1367,23 @@ export function App() {
       // a story whose feed is gone, here or on another device: it would
       // fall into an "Other" tab. Not over a failed For You either: that
       // isn't an answer, and the story waits for the next one.
+      // Each goes back at its place, as the Undo put it (``putBack``).
       const hiddenNow = new Set(latestPrefs().hiddenEntries)
       const feedIds = new Set(liveSources.map((row) => row.id))
       const gotIds = new Set([...e, ...fy].map((x) => x.id))
-      const layE: { item: Entry; at: number }[] = []
-      const layFy: { item: Entry; at: number }[] = []
+      const lay: KeptStory[] = []
       for (const [id, r] of restoredRef.current) {
         if (gotIds.has(id) || now - r.at > SOURCE_CHANGE_TTL_MS || hiddenNow.has(id) || !feedIds.has(r.entry.source_id)) {
           restoredRef.current.delete(id)
           continue
         }
-        if (r.entriesAt >= 0) layE.push({ item: r.entry, at: r.entriesAt })
-        if (forYouOk && r.forYouAt >= 0) layFy.push({ item: r.entry, at: r.forYouAt })
+        lay.push(r)
       }
-      e = reinsertAll(e, layE)
-      fy = reinsertAll(fy, layFy)
+      if (lay.length > 0) {
+        const kept = hiddenStoriesRef.current
+        e = putBack(e, putBackItems(lay, 'inEntries'), keptPlaces(kept, 'inEntries'))
+        if (forYouOk) fy = putBack(fy, putBackItems(lay, 'inForYou'), keptPlaces(kept, 'inForYou'))
+      }
       setEntries((prev) => reconcileById(prev, e))
       setSources((prev) => {
         const local = new Map(prev.map((row) => [row.id, row]))
@@ -1375,6 +1402,7 @@ export function App() {
       setFirstRefreshDone(true)
       setTabsLoadedFor(filterScope(activeSources))
       setForYouLoaded(forYouOk)
+      forYouOkRef.current = forYouOk
       setError(null)
       // C1: the refresh a long return started lands: start the tabs
       // over again, so what came in while away is sorted in. Not when the
@@ -2118,36 +2146,54 @@ export function App() {
   )
 
   // A hide keeps each story and its places in ``entries`` and ``forYou``
-  // for its Undo (see ``hiddenStoriesRef``). A story only Saved holds
-  // needs nothing kept: the by-id cache still has it. The latest
-  // ``KEPT_HIDDEN`` are kept, and never fewer than this hide's own, so a
-  // bulk hide ("Hide all downvoted") keeps all of its stories and pushes
-  // out none of the ``KEPT_HIDDEN`` before it.
+  // for its Undo (see ``hiddenStoriesRef``): its neighbours and index
+  // (``placeOf``), taken with the stories already kept back in their
+  // places, so one hidden earlier that a poll has dropped still counts as
+  // a neighbour and the two can come back in either order. A story only
+  // Saved holds needs nothing kept: the by-id cache still has it. The
+  // latest ``KEPT_HIDDEN`` are kept, and never fewer than this hide's
+  // own, so a bulk hide ("Hide all downvoted") keeps all of its stories
+  // and pushes out none of the ``KEPT_HIDDEN`` before it. Called before
+  // the hide's ``addIds``, so ``latestPrefs`` holds the earlier hides.
   const keepHiddenStories = useCallback((ids: readonly number[]) => {
     const { entries: es, forYou: fy } = storiesRef.current
-    const entriesAt = new Map(es.map((e, i) => [e.id, i]))
-    const forYouAt = new Map(fy.map((e, i) => [e.id, i]))
+    const hiddenBefore = new Set(latestPrefs().hiddenEntries)
+    const isHidden = (id: number) => hiddenBefore.has(id)
     const kept = hiddenStoriesRef.current
-    let added = 0
     for (const id of ids) {
       kept.delete(id)
       restoredRef.current.delete(id)
-      const ei = entriesAt.get(id) ?? -1
-      const fi = forYouAt.get(id) ?? -1
-      const entry = ei >= 0 ? es[ei] : fi >= 0 ? fy[fi] : null
+    }
+    const withKept = (list: Entry[], side: KeptSide) => putBack(list, putBackItems(kept.values(), side), keptPlaces(kept, side))
+    const allEntries = withKept(es, 'inEntries')
+    const allForYou = withKept(fy, 'inForYou')
+    const entriesAt = new Map(allEntries.map((e, i) => [e.id, i]))
+    const forYouAt = new Map(allForYou.map((e, i) => [e.id, i]))
+    const copies = new Map([...fy, ...es].map((e) => [e.id, e]))
+    let added = 0
+    for (const id of ids) {
+      const entry = copies.get(id)
       if (!entry) continue
-      kept.set(id, { entry, entriesAt: ei, forYouAt: fi })
+      const ei = entriesAt.get(id)
+      const fi = forYouAt.get(id)
+      kept.set(id, {
+        entry,
+        inEntries: ei === undefined ? null : placeOf(allEntries, ei, isHidden),
+        inForYou: fi === undefined ? null : placeOf(allForYou, fi, isHidden),
+      })
       added++
     }
     for (const id of kept.keys()) {
       if (kept.size <= KEPT_HIDDEN + added) break
       kept.delete(id)
     }
-  }, [])
+  }, [latestPrefs])
   // An unhide puts the kept stories back in their places, unless a poll
-  // already brought them back (``reinsertAll``). A story whose feed is
-  // gone since the hide (deleted here or on another device) stays out:
-  // it would fall into an "Other" tab.
+  // already brought them back (``putBack``). A story whose feed is gone
+  // since the hide (deleted here or on another device) stays out: it
+  // would fall into an "Other" tab. While For You's last request failed,
+  // For You is [] until it answers: the story isn't put in there alone,
+  // but laid over that answer (``restoredRef``).
   const putBackHiddenStories = useCallback((ids: readonly number[]) => {
     const back: KeptStory[] = []
     const at = Date.now()
@@ -2160,10 +2206,14 @@ export function App() {
       restoredRef.current.set(id, { ...kept, at })
       back.push(kept)
     }
-    const inEntries = back.filter((k) => k.entriesAt >= 0).map((k) => ({ item: k.entry, at: k.entriesAt }))
-    const inForYou = back.filter((k) => k.forYouAt >= 0).map((k) => ({ item: k.entry, at: k.forYouAt }))
-    if (inEntries.length) setEntries((prev) => reinsertAll(prev, inEntries))
-    if (inForYou.length) setForYou((prev) => reinsertAll(prev, inForYou))
+    if (back.length === 0) return
+    const kept = hiddenStoriesRef.current
+    const inEntries = putBackItems(back, 'inEntries')
+    const entriesKept = keptPlaces(kept, 'inEntries')
+    if (inEntries.length) setEntries((prev) => putBack(prev, inEntries, entriesKept))
+    const inForYou = putBackItems(back, 'inForYou')
+    const forYouKept = keptPlaces(kept, 'inForYou')
+    if (inForYou.length && forYouOkRef.current) setForYou((prev) => putBack(prev, inForYou, forYouKept))
   }, [])
 
   // Reverse of ``hideEntries``: remove the ids from ``hiddenEntries`` so
