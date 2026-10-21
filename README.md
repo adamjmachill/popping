@@ -464,21 +464,28 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   whole site instead.
 - **Keeps only articles.** Of a site's sitemaps only news, post and
   unknown ones are read (a page sitemap only when there is no post
-  sitemap; never tag, author, product or attachment sitemaps; a video or
-  image sitemap lists pages and is read). A sitemap's name of several
-  words counts by its last one, so a `media_release` or `product_update`
-  post type's sitemap is read. URLs that are not article-shaped (tag,
-  author, cart and archive pages, About, Contact, files) are dropped; a
-  sitemap's entry is a page whatever its ending (`.jhtml`, `.nsf`)
-  unless that ending is a file type's. Each new page is scored as an article
+  sitemap; never tag, author, product or attachment sitemaps; a video,
+  image or media sitemap lists pages and is read). A sitemap's name of
+  several words counts by its last one, so a `media_release`,
+  `media-release` or `product_update` post type's sitemap is read. URLs
+  that are not article-shaped (tag, author, cart and archive pages,
+  About, Contact, files) are dropped; a sitemap's entry is a page
+  whatever its ending (`.jhtml`, `.nsf`) unless that ending is a file
+  type's, and a folder's index page (`/news/<slug>/index.html`) is judged
+  as the folder. Each new page is scored as an article
   before it is kept (`backend/app/article_detect.py`). A date the
   site's own list gives a page (a listing card's `<time>`, a news
-  sitemap's publication date) counts as the page's date. A feed with a
+  sitemap's publication date) counts as the page's date, and so does a
+  date printed next to a page's only title (a `<time>` beside the
+  `<h1>`, or a line right after it that starts with a date, as Webflow
+  and WordPress block themes print them). A feed with a
   `link_pattern` takes the pattern as the article signal, and so does a
-  `sitemap_url` for the pages it lists. A news section under a static one
-  (`/about/news/<slug>`) is news, and the section a feed reads (its
-  address's section or its `link_pattern`) is never dropped for its own
-  name: a feed pointed at `/about/media-centre` reads its pages. On a
+  `sitemap_url` for the pages it lists. Only a page directly under a
+  static section (`/about/history`, `/pages/our-story`) is dropped as
+  static, so news filed deeper (`/about/news/<slug>`,
+  `/about-us/news-and-media/<slug>`) is read, and the section a feed
+  reads (its address's section or its `link_pattern`) is never dropped
+  for its own name. On a
   listing page the section's name is lifted only when nothing else there
   is a list, so a category page's links to its subcategories never
   outvote its posts.
@@ -488,7 +495,8 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   listing page, or in a sitemap that gives the page no `<lastmod>`, one
   listed below a stored story (in the sitemap's own order; on a listing
   page, stored stories pinned at its top above newer ones, such as a
-  sticky post, don't count); in a sitemap, one last modified before the
+  sticky post, don't count when a stored story or a page the feed has
+  read comes further down); in a sitemap, one last modified before the
   check's backlog line. A page a check left for later while it was new
   (refused, failed, or read while the usual read gave nothing or had a
   sitemap fail) is still new when it is read. A page
@@ -500,7 +508,9 @@ sitemaps, its listing page or every article page asked for is
 `[blocked]` (a 429 is `[http error]`); the feed's own listing page or
 `sitemap_url` missing is `[not found]`; a host that doesn't answer or
 doesn't resolve is `[network]`; and `[no list]` only when nothing lists
-articles at all. A missing robots.txt or guessed sitemap path is
+articles at all. A feed's own sitemap that loads empty (a news sitemap
+between stories) is a check with nothing new, unless its listing page
+fails. A missing robots.txt or guessed sitemap path is
 routine, a refused robots.txt counts only when every sitemap is refused
 too, and a sitemap index that loads counts neither way (an index whose
 post sitemaps are all refused is `[blocked]`). A page that refuses

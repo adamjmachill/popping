@@ -334,14 +334,16 @@ def _site_sitemap_with_a_post(site: _Site) -> None:
 
 
 async def test_an_empty_sitemap_url_is_not_replaced_by_the_sites_other_sitemaps(site):
-    """The owner's news sitemap is an empty urlset for a poll (it is being
-    rebuilt). Its address looks like a sitemap, so it is the owner's
-    sitemap, not a page: the site's other sitemaps are not read in its
-    place as the owner's choice. The poll reads ``[no list]``."""
+    """The owner's news sitemap is an empty urlset for a poll (it lists
+    only the last two days). Its address looks like a sitemap, so it is
+    the owner's sitemap, not a page: the site's other sitemaps are not
+    read in its place as the owner's choice. The home page lists nothing
+    and answers, so the poll is a quiet one with nothing new, as on main
+    (round 7; it read ``[no list]`` before)."""
     _site_sitemap_with_a_post(site)
     site.routes[f"{SITE}/news-sitemap.xml"] = _xml(_urlset())
     plugin = _plugin(f"{SITE}/", sitemap_url=f"{SITE}/news-sitemap.xml")
-    assert await _kind_of(plugin.fetch()) == "no list"
+    assert await plugin.fetch() == []
     assert site.asked("/robots.txt") == 0
     assert site.asked("/post-sitemap.xml") == 0
 
@@ -1422,6 +1424,11 @@ async def test_a_category_pages_subcategory_links_do_not_outvote_its_posts(site,
         ("wp-sitemap-posts-media_release-1.xml", "section"),
         ("video-sitemap.xml", "section"),
         ("video-sitemap.xml", "root"),
+        # A post type's name may hold a "-" (round 7).
+        ("wp-sitemap-posts-media-release-1.xml", "root"),
+        ("wp-sitemap-posts-media-release-1.xml", "section"),
+        ("wp-sitemap-posts-product-update-1.xml", "root"),
+        ("sitemap-media-releases.xml", "root"),
     ],
 )
 async def test_a_custom_post_types_sitemap_is_read(site, name, feed):
@@ -1578,11 +1585,14 @@ def _news_under_about(site: _Site, section: str) -> list[str]:
         ("/about/news/", "root and sitemap_url"),
         ("/about/news/", "root"),
         ("/about-us/news/", "root"),
-        # A section named like no news section: the owner's choice of
-        # section (its address or its link pattern) brings it in.
+        # A section named like no news section: a page below it is
+        # judged like any other (round 7), so a root feed reads it too.
         ("/about/media-centre/", "section"),
         ("/about/media-centre/", "section and link pattern"),
         ("/about/media-centre/", "link pattern"),
+        ("/about/media-centre/", "root"),
+        ("/about-us/news-and-media/", "root"),
+        ("/about-us/news-and-media/", "section"),
     ],
 )
 async def test_articles_under_an_about_section_are_articles(site, section, feed):
@@ -1756,3 +1766,229 @@ async def test_candidates_carry_news_sitemap_titles_and_dates(site):
     plan = await plan_candidates(f"{SITE}/", sitemap_url=f"{SITE}/news-sitemap.xml", raise_errors=True)
     assert plan.candidates and all(isinstance(c, Candidate) for c in plan.candidates)
     assert all(c.title and c.published for c in plan.candidates)
+
+
+# --- round 7 ------------------------------------------------------------------
+
+
+def _story_page(title: str) -> tuple[int, str, str]:
+    page = _fixture("yoast-post.html")
+    return _html(page.replace("Council approves the river trail extension", title))
+
+
+@pytest.mark.parametrize(
+    "folder", ["council-approves-river-trail-plan-{n}", "2026101{n}"], ids=["slug", "date"]
+)
+@pytest.mark.parametrize("page", ["index.html", "default.aspx"])
+@pytest.mark.parametrize("feed", ["root", "section", "sitemap_url"])
+async def test_stories_published_as_folder_index_pages_are_articles(site, folder, page, feed):
+    """A static or exported site publishes each story as a folder with its
+    own index page (``/news/<slug>/index.html``), listed by its sitemap
+    and its news page. ``url_ok`` read such a page as a home page, so the
+    feed read ``[no list]`` where main stored the stories (round 7)."""
+    stories = [f"{SITE}/news/{folder.format(n=n)}/{page}" for n in range(3)]
+    entries = "".join(
+        f"<url><loc>{u}</loc><lastmod>2026-10-1{8 - n}</lastmod></url>" for n, u in enumerate(stories)
+    )
+    sitemap = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>'
+    )
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(sitemap)
+    site.routes[f"{SITE}/news"] = _list_of(*stories)
+    site.routes[f"{SITE}/"] = _html(_NO_LIST_PAGE)
+    for n, story in enumerate(stories):
+        site.routes[story] = _story_page(f"Council story number {n} about the trail")
+    url = f"{SITE}/news" if feed == "section" else f"{SITE}/"
+    sitemap_url = f"{SITE}/sitemap.xml" if feed == "sitemap_url" else None
+    items = await _plugin(url, sitemap_url=sitemap_url).fetch()
+    assert sorted(i["url"] for i in items) == sorted(stories)
+
+
+@pytest.mark.parametrize(
+    "section", ["/about-us/news-and-media/", "/about/media-centre/", "/about/press-room/"]
+)
+@pytest.mark.parametrize("quick_links", [3, 4])
+async def test_a_newsroom_under_a_static_section_reads_its_posts_beside_quick_links(
+    site, section, quick_links
+):
+    """A council's newsroom filed under About, whose page also has a block
+    of quick links ("Popular services") in its body, outside nav and
+    aside. Its releases were read as static pages, so the quick links
+    were the only list of 3 or more: their pages were fetched and
+    rejected, and the feed stored nothing and said nothing, where main
+    stored every release from the sitemap (round 7)."""
+    releases = [f"{SITE}{section}council-media-release-number-{n}/" for n in range(10)]
+    services = [
+        f"{SITE}/services/{name}/"
+        for name in ("garbage-and-recycling", "property-taxes", "building-permits", "parks")
+    ][:quick_links]
+    cards = "".join(
+        f'<div class="views-row"><h3><a href="{u}">Council media release number {n}</a></h3></div>'
+        for n, u in enumerate(releases)
+    )
+    quick = "".join(f'<li><a href="{u}">Service</a></li>' for u in services)
+    site.routes[f"{SITE}{section.rstrip('/')}"] = _html(
+        "<html><body><header><nav><a href='/'>Home</a></nav></header>"
+        f"<main><h1>News and media</h1><div class='view-content'>{cards}</div>"
+        f"<div class='popular-services'><h2>Popular services</h2><ul>{quick}</ul></div></main>"
+        "</body></html>"
+    )
+    for n, release in enumerate(releases):
+        site.routes[release] = _story_page(f"Council media release number {n}")
+    items = await _plugin(f"{SITE}{section.rstrip('/')}").fetch()
+    assert [i["url"] for i in items] == releases
+    assert not any(site.asked(u.removeprefix(SITE)) for u in services)
+
+
+def _builder_post(title: str, meta: str, og_type: str | None) -> tuple[int, str, str]:
+    """A site builder's post: no ``<article>``, no JSON-LD and no date
+    metadata, the date (``meta``) right after its ``<h1>``."""
+    og = f'<meta property="og:type" content="{og_type}">' if og_type else ""
+    return _html(
+        f"<html><head><title>{title} | Example</title>{og}</head><body>"
+        "<div class='navbar'><a href='/'>Example</a></div><div class='section'><div class='container'>"
+        f"<h1 class='heading'>{title}</h1>{meta}<div class='rich-text'>{_BODY}{_BODY}</div>"
+        "</div></div></body></html>"
+    )
+
+
+_WEBFLOW_DATE = "<div class='blog-date'>October {day}, 2026</div>"
+_BLOCK_THEME_DATE = (
+    "<div class='wp-block-post-date'><time datetime='2026-10-{day}T09:00:00+00:00'>"
+    "October {day}, 2026</time></div>"
+)
+
+
+@pytest.mark.parametrize(
+    ("meta", "og_type"),
+    [(_WEBFLOW_DATE, "website"), (_BLOCK_THEME_DATE, None)],
+    ids=["webflow", "block theme"],
+)
+@pytest.mark.parametrize("feed", ["root", "section"])
+async def test_a_site_builders_posts_dated_by_their_title_are_articles(site, meta, og_type, feed):
+    """Webflow tags every page og:type=website and prints a post's date as
+    text under its title; a WordPress block theme prints it in a plain
+    ``<time>`` beside the title, with no ``<article>``. Their posts read
+    as undated (-3), so the feed stored nothing and said nothing, where
+    main stored every post (round 7). The About page, with no date by its
+    title, is still left out."""
+    posts = [f"{SITE}/blog/council-story-number-{n}" for n in range(3)]
+    for n, post in enumerate(posts):
+        site.routes[post] = _builder_post(
+            f"Council story number {n} about the trail", meta.format(day=18 - n), og_type
+        )
+    site.routes[f"{SITE}/about"] = _builder_post("About us", "<p>Who we are.</p>", og_type)
+    entries = "".join(
+        f"<url><loc>{u}</loc><lastmod>2026-10-{d}</lastmod></url>"
+        for u, d in [
+            (f"{SITE}/", 19), (f"{SITE}/about", 19), *((p, 18 - n) for n, p in enumerate(posts))
+        ]
+    )
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{entries}</urlset>'
+    )
+    cards = "".join(
+        f'<div role="listitem" class="w-dyn-item"><a href="{p}" class="blog-card">Story {n}</a></div>'
+        for n, p in enumerate(posts)
+    )
+    site.routes[f"{SITE}/blog"] = _html(
+        "<html><body><main><h1>Blog</h1>"
+        f'<div role="list" class="w-dyn-items">{cards}</div></main></body></html>'
+    )
+    url = f"{SITE}/blog" if feed == "section" else f"{SITE}/"
+    items = await _plugin(url).fetch()
+    assert [i["url"] for i in items] == posts
+
+
+@pytest.mark.parametrize("sticky", [2, 3])
+async def test_sticky_posts_stored_by_a_first_fetch_do_not_make_new_posts_backlog(site, sticky):
+    """A new section feed whose listing pins two or three sticky posts
+    above the newest ones, all undated. The first fetch keeps two undated
+    pages (the cap): the sticky ones at the top. The posts below them
+    were read and passed over, so on later polls they show the sticky
+    posts are pinned, and each new post comes in on its poll, once. They
+    were the line before, so every new post was dropped for good, where
+    main stored each one (round 7)."""
+    pinned = [f"{SITE}/blog/welcome-to-the-blog-part-{n}/" for n in range(sticky)]
+    olds = [f"{SITE}/blog/old-post-on-the-rivers-{n}/" for n in range(10)]
+    news = [f"{SITE}/blog/new-post-on-the-markets-{n}/" for n in range(3)]
+    for n, post in enumerate(pinned + olds + news):
+        site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
+    stored = _Stored()
+    plugin = _plugin(f"{SITE}/blog")
+    site.routes[f"{SITE}/blog"] = _list_of(*pinned, *olds)
+    assert await stored.poll(plugin) == pinned[:2]
+    for k in range(3):
+        site.routes[f"{SITE}/blog"] = _list_of(*pinned, *reversed(news[: k + 1]), *olds)
+        assert await stored.poll(plugin) == [news[k]]
+    assert all(site.requests.count(post) == 1 for post in news)
+
+
+@pytest.mark.parametrize(
+    "feed",
+    ["the sitemap itself", "sitemap_url beside a rendered section", "sitemap_url beside the home page"],
+)
+async def test_an_empty_news_sitemap_between_stories_is_a_quiet_poll(site, feed):
+    """A news sitemap lists only the last two days, so between stories it
+    is an empty urlset. A feed that reads it (its address, or its
+    ``sitemap_url`` beside a page that lists nothing in its HTML) had a
+    poll with nothing new then, on main; it read ``[no list]`` (Pick a
+    section, the wrong fix) until round 7."""
+    sitemap = f"{SITE}/news-sitemap.xml"
+    first, second = f"{SITE}/news/council-approves-river-trail/", f"{SITE}/news/harvest-market-returns/"
+    for story in (first, second):
+        site.routes[story] = _html(_fixture("yoast-post.html"))
+    rendered = _html("<html><body><main><h1>News</h1><div id='app'></div></main></body></html>")
+    site.routes[f"{SITE}/news"] = rendered
+    site.routes[f"{SITE}/"] = rendered
+    if feed == "the sitemap itself":
+        plugin = _plugin(sitemap)
+    else:
+        url = f"{SITE}/news" if "section" in feed else f"{SITE}/"
+        plugin = _plugin(url, sitemap_url=sitemap)
+    stored = _Stored()
+    site.routes[sitemap] = _news_sitemap((first, "2026-10-18T09:30:00+00:00"))
+    assert await stored.poll(plugin) == [first]
+    site.routes[sitemap] = _xml(_urlset())
+    assert await stored.poll(plugin) == []
+    assert await stored.poll(plugin) == []
+    site.routes[sitemap] = _news_sitemap((second, "2026-10-20T09:30:00+00:00"))
+    assert await stored.poll(plugin) == [second]
+
+
+@pytest.mark.parametrize(
+    ("listing", "kind"),
+    [(403, "blocked"), (404, "not found"), (503, "upstream error"), (httpx.ConnectError, "network")],
+)
+async def test_an_empty_sitemap_url_still_reports_its_listing_pages_failure(site, listing, kind):
+    """The empty sitemap is quiet only when the other read failed in no
+    way: a refused, missing, failing or unreachable listing page still
+    says what it is."""
+    site.routes[f"{SITE}/news-sitemap.xml"] = _xml(_urlset())
+    site.routes[f"{SITE}/news"] = listing
+    plugin = _plugin(f"{SITE}/news", sitemap_url=f"{SITE}/news-sitemap.xml")
+    assert await _kind_of(plugin.fetch()) == kind
+
+
+@pytest.mark.parametrize(
+    ("answer", "kind"),
+    [
+        (403, "blocked"),
+        (404, "not found"),
+        (httpx.ReadTimeout, "network"),
+        (_html(_NO_LIST_PAGE), "no list"),
+        (_xml(_urlset(f"{SITE}/about/", f"{SITE}/contact-us")), "no list"),
+    ],
+    ids=["refused", "gone", "timeout", "a page", "only static pages"],
+)
+async def test_a_sitemap_url_that_is_not_an_empty_sitemap_still_reads_as_before(site, answer, kind):
+    """Only a sitemap that loads and names nothing is quiet. One that is
+    refused, gone or times out says so, and one that is a web page or
+    lists only pages that aren't articles has no list."""
+    site.routes[f"{SITE}/news-sitemap.xml"] = answer
+    site.routes[f"{SITE}/news"] = _html(_NO_LIST_PAGE)
+    plugin = _plugin(f"{SITE}/news", sitemap_url=f"{SITE}/news-sitemap.xml")
+    assert await _kind_of(plugin.fetch()) == kind
