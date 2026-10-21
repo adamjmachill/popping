@@ -296,6 +296,13 @@ D33. **First deploy of the read model.** Each device treats stories fetched more
    before its first load as already seen, locally, writing nothing to the server. PR3b and PR3c
    deploy together.
 
+D34. **Preview text under every headline (owner, 2026-10-21).** Cards show a short blurb under the
+   title, the way Reddit and Facebook do, and tapping the title, the blurb or the picture opens
+   the article itself. The blurb is the AI summary when one is already cached, otherwise the
+   feed's own description, cleaned and cut to about 300 characters. The Summary arrow stays: it
+   expands the full 3-4 sentence AI summary in place, for more without leaving the app. PR5a
+   builds it, including the small backend change that sends the blurb with each story.
+
 
 ## The units (from the revised spec in the appendix)
 
@@ -1856,6 +1863,21 @@ As a git revert, PR5a stands alone only until PR5b merges (PR5b builds on its sh
 - Wire `onHide` into both Columns, the desktop For You row and `SearchResults`.
 
 **`ShortcutsSheet.tsx`:** rows for `b`, `h`, `a` and `z`.
+
+**Preview text (D34, owner decision 2026-10-21):**
+- **Backend.** The shared list projection (`list_entries`, For You, search and `/entries/by-ids`) gains `preview: str | None`.
+  - It is the non-empty `cached_summary` when there is one, else the feed's own blurb (`meta.summary`), cleaned with `_clean_summary` (HTML stripped, whitespace collapsed) and cut on a word boundary to 300 characters with "…".
+  - It is `None` when the result is empty or only repeats the title (case- and punctuation-insensitive), and for Reddit link posts whose blurb is only the "submitted by … [link] [comments]" boilerplate.
+  - It is computed in the projection, so there is no new column and no migration. `EntryListOut` gains the field, and old bundles ignore it.
+- **Card.** Under the title row, the preview renders as body text in `text-label-secondary`, clamped to 2 lines on phones and 3 from md up (`line-clamp`).
+  - The title, the preview and the thumbnail are one open target. They share the headline's link and `onActivate`, so opening from the blurb also marks the story seen (PR3b) and records `click`.
+  - The preview hides while the Summary panel is open, so the text is never shown twice.
+  - A card with no preview looks as it does today.
+- **Tests:**
+  - pytest for the projection: cached summary over feed blurb, cleaning, the 300-character cut, title repeats and Reddit boilerplate dropped, `None` when empty, and `/entries/by-ids` carrying it.
+  - Flow `flow-card-preview`: the blurb shows clamped, and a tap on it opens the story and sends the `seen:` PATCH.
+  - Smoke `card-preview-long` and `card-no-preview` at 390, 320 and 312, so C11 and C14 hold with a long blurb.
+
 
 #### Tests
 - **pytest:**
