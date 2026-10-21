@@ -30,7 +30,7 @@
 
 /** On screen at least this long, at least half visible, to qualify. The
  *  owner tunes it at Gate 1 (too eager: 1500; too slow: 700). */
-export const SEEN_DWELL_MS = 1000
+export const SEEN_DWELL_MS = 50
 /** How long scroll-seen stories are collected before they are written:
  *  one ``addIds`` per ``seen:<category>`` key, one render per batch. */
 export const SEEN_BATCH_MS = 300
