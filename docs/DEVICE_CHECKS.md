@@ -71,6 +71,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · Save one story, then another, then open Saved. Pass: the second one is at the top, the first right under it.
 - [ ] #<pr> · In Saved, tap the bookmark on a story to remove it, then force-quit and reopen the app. Pass: it is gone from Saved and stays gone.
 - [ ] #<pr> · On For You, hide a story and tap Undo on the toast, then open that story's category tab. Pass: the story is back in For You and in its tab.
+- [ ] #<pr> · On For You, hide a story, then wait a minute with Popping open. Open Menu → Settings → Hidden, tap Restore all, close Settings and open that story's category tab. Pass: the story is there straight away, and back in For You.
 - [ ] #<pr> · (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)

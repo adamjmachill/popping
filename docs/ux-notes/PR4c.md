@@ -64,17 +64,21 @@ it.
     and in `forYou` (`keepHiddenStories`, `hiddenStoriesRef`: the latest
     `KEPT_HIDDEN` = 100, and never fewer than the hide's own, so a bulk
     hide keeps all of its stories and pushes out none of the 100 before
-    it). Every Undo (`restoreHiddenEntries`; `restoreHiddenEntry`,
-    `toggleHideEntry`'s unhide, Settings' Hidden list, and the bulk
-    hide's Undo) puts them back there with `reinsertAll` (each at its
-    own index, lowest first).
+    it). Every unhide (`restoreHiddenEntries`; `restoreHiddenEntry`,
+    `toggleHideEntry`'s unhide, Settings' Hidden list, both Restore and,
+    since re-check round 2, Restore all, and the bulk hide's Undo) puts
+    them back there with `reinsertAll` (each at its own index, lowest
+    first), except a story whose feed is gone since the hide (re-check
+    round 2).
     For two minutes (`SOURCE_CHANGE_TTL_MS`, the same window
     `sourceChangesRef` uses for feeds) `refresh` lays a put-back story
     over a poll that doesn't return it yet (the server answered before
     the Undo's change, sent in a 1 s batch, reached it), until a poll
-    returns it, it is hidden again or its feed is deleted
-    (`restoredRef`). A story only Saved holds needs nothing kept: the
-    by-id cache still has it.
+    returns it, it is hidden again or its feed is gone, here or on
+    another device (`restoredRef`). A failed For You request gets no
+    lay-over: For You stays empty until it answers, and the story is
+    laid over that answer (re-check round 2). A story only Saved holds
+    needs nothing kept: the by-id cache still has it.
   - **Keep set:** `keepIds` is `keepIdsFor({ entries, forYou, starred:
     starredEntries, savedById })` (re-check round 1; it was
     `keepSet(entries, forYou, starredEntries, savedById.keys())`).
@@ -201,8 +205,12 @@ unit file), a restore from a backup copy and a byte compare (`cmp`).
 The keep-set wiring in App (`savedById.keys()` passed to `keepSet`) had
 no failing test when removed: no flow fills a `seen:` key past its cap
 of 1000 marks, and the unit case didn't model App's keep set. Since
-re-check round 1, App calls `keepIdsFor`, which requires the cache (tsc
-fails without it), and `feedOrder.test.ts` pins each of its groups.
+re-check round 1, App calls `keepIdsFor`, whose type requires each
+field (tsc fails if one is left out), and `feedOrder.test.ts` pins each
+of its groups. What App passes was still unchecked: an empty Map or `[]`
+compiled and passed every test. Since re-check round 2,
+`flow-seen-prune-keeps-saved` fills `seen:news` to its cap and checks
+that App's keep set holds a save and a story only the cache holds.
 
 ## Review fixes (second commit, "PR4c: review fixes")
 
@@ -245,7 +253,8 @@ reported the same bulk-hide gap); all fixed, none skipped.
   Saved must show 503 again with no new by-ids request; then 503 is
   unsaved again and the old poll checks run. The Undo's place is
   either the top or 503's old place (whether the unsave was sent before
-  the Undo; Risks), so the flow accepts both.
+  the Undo; Risks), so the flow accepts both. (Re-check round 2 holds
+  the clock and checks each case on its own.)
 - `flow-saved-drops-hidden-and-deleted` (new): saves 103, 105 and 503
   (503 kept out of the tabs by the page's fetch, as in
   `flow-saved-by-id`; the helper is now `keepOutOfTabs`). Hiding 105
@@ -313,8 +322,10 @@ set's call, which builds the same ids.
 2. **The keep-set unit case tested a keep set App never builds**
    (minor). App's keep-set inputs moved into the pure
    `keepIdsFor(held)` (`lib/feedOrder.ts`). Its `Held` type requires
-   all four groups, so App can't leave the cache out without tsc
-   failing. `feedOrder.test.ts` replaces the case with two:
+   all four groups, so App can't leave the cache field out without tsc
+   failing. (Re-check round 2 corrects this: tsc checks only that each
+   field is passed, not what; `flow-seen-prune-keeps-saved` now checks
+   what App passes.) `feedOrder.test.ts` replaces the case with two:
    - each group holds one id no other does, and all of them are kept;
    - a story unsaved but still in the cache (its Undo can draw it
      again) keeps its mark when `seen:news` is pruned, and without the
@@ -412,7 +423,7 @@ every run.
 | `flow-saved-keeps-a-dropped-save` | M11: no last-copy fallback | SAVED-DROPPED: "while 103's by-ids answer was out Saved showed 105, expected 105,103" (2 of 2) |
 | `flow-saved-keeps-a-dropped-save` | M10: the "gone" exception ignored | "after by-ids found no row for 103 and a poll, Saved shows 105,103, expected 105" (2 of 2) |
 | the rewritten Saved flows | the earlier mutants: the effect never fetches; the negative cache never filled; the cache not counted as held; Saved's hidden filter; the deleted-feed clause; the old eviction | each still fails its flow (and `flow-saved-keeps-a-dropped-save` where it applies) |
-| `feedOrder.test.ts` | `keepIdsFor` without any one of its four groups | "the keep set App builds is …" (and, without the cache, the prune case) |
+| `feedOrder.test.ts` | `keepIdsFor` without any one of its four groups | "the keep set App builds is …" (renamed in round 2: "the keep set is …"; and, without the cache, the prune case) |
 | tsc (`npm run build`) | App's `keepIdsFor` call without `savedById` | TS2345: "Property 'savedById' is missing" |
 | `saved.test.ts` | `reinsert` with no clamp (`at`), or no lower bound (`Math.min(at, list.length)`) | "reinsert: the story goes back at its place, clamped to the list" |
 
@@ -455,6 +466,162 @@ and had 0 failures:
 Deviations, risks and device checks: unchanged. This round changed
 tests, the keep set's call and these notes, not what the app does.
 
+## Review fixes (re-check round 2, "PR4c: re-check fixes, round 2")
+
+Seven findings; all applied, none skipped. Three change what the app
+does (1 to 3), four are about the tests (4 to 7). Each new flow was
+first run against the unfixed build (`0ee33df`'s App.tsx): the flows for
+1, 2 and 3 failed there with the findings' symptoms, and the others
+passed. Findings 4 to 7 are gaps the review showed with mutants that
+passed every test; each of those mutants now fails a flow (below).
+
+1. **Settings › Hidden › Restore all didn't put the stories back**
+   (major, moderate in effect). It only removed the ids, so a story a
+   poll had dropped since the hide stayed out of every tab until the
+   first poll after the restore's PATCH, up to 60 s; the per-row
+   Restore in the same list put it back at once. `onRestoreAllHidden`
+   now calls `restoreHiddenEntries(ids)`, the path every other unhide
+   takes. `restoreHiddenEntries`' comment lists every caller. New flow
+   `flow-hidden-restore-all-after-poll`, and a device check.
+2. **A put-back story of a feed deleted on another device made an
+   "Other" tab** (and a For You badge one too high) for up to two
+   minutes. Only feeds deleted on this device stopped the lay-over, and
+   the Undo didn't check feeds at all. Now:
+   - `refresh` keeps laying a story over only while its feed is in the
+     poll's feeds less those deleted here (`liveSources`, which
+     `setSources` now uses too). This one clause replaces the old
+     `isDeleted(r.entry.source_id)`: a feed deleted here is left out of
+     `liveSources` as before.
+   - `putBackHiddenStories` skips a kept story whose feed is no longer
+     in `sources` (deleted here or found gone by a poll), and forgets it.
+   New flows `flow-hide-undo-feed-gone-after` (the feed goes after the
+   Undo reached the server: the lay-over) and
+   `flow-hide-undo-feed-gone-before` (it goes between the hide and the
+   Undo: the put-back).
+3. **A failed For You request inside the two minutes left For You
+   showing only the put-back story.** `refresh` laid the story over the
+   failed request's empty list as if it were the server's For You. The
+   lay-over now goes over `fy` only when `forYouOk`, and the story stays
+   in `restoredRef`, so the next good answer still gets it. `gotIds` is
+   unchanged: a failed For You is `[]` before the lay-over, so it
+   already holds only what answered (the comment says so). New flow
+   `flow-hide-undo-foryou-fails`; it also checks the next good answer
+   (a fix that dropped the story on a failure fails it).
+4. **No test covered retrying a failed by-ids request** (minor). New
+   flow `flow-saved-retries-a-failed-fetch`: the first by-ids request
+   fails (`'offline'`), the next poll asks for 503 exactly once more,
+   and Saved shows it. It declares `expectedFailedLoads:
+   ['/api/entries/by-ids']` for smoke rule C8.
+5. **The lay-over's "a poll returned it" clause and the feed clause
+   were unguarded, and the notes left them out** (minor). New flow
+   `flow-hide-undo-until-returned`: after the Undo's batch a poll
+   returns 101, then the page's fetch drops it: the next poll takes it
+   out of News and For You, inside the two minutes. The feed clause (the
+   old `isDeleted` one, now the feed check of finding 2) is guarded by
+   `flow-hide-undo-feed-gone-after`. `flow-hide-undo-after-poll`'s
+   expiry step is unchanged. The list of lines still unguarded is below.
+6. **`flow-saved-by-id`'s unsave Undo ran on real time and accepted
+   either place** (minor). The flow now installs the clock and holds it
+   from the unsave on. Undo tapped before the unsave's batch must put
+   503 back in its old place (402, 105, 503, 103); after `runFor(1000)`
+   sent the unsave (the store loses 503), Undo must put it at the top
+   (503, 402, 105, 103). Both with by-ids offline and no request. The
+   comment says what it asserts.
+7. **The keepIdsFor unit test claimed to check the keep set App builds**
+   (minor). It is renamed "keepIdsFor (PR4c): the keep set is the tabs,
+   For You, the saves and the Saved-by-id cache", with a comment naming
+   the flow that checks App's call. The notes' claim is corrected
+   (round 1's finding 2 and the paragraph under the first mutation
+   table). Beyond the minimum, new flow `flow-seen-prune-keeps-saved`
+   checks what App passes: `seen:news` seeded at its cap with 402 (a
+   hidden save, never fetched, so only the saves hold it) and 503
+   (fetched by id, then unsaved, so only the cache holds it) as its
+   oldest marks; opening 101 must prune the oldest mark nothing holds
+   instead. It costs one flow of about 6 s.
+
+### Tests added or changed (re-check round 2)
+
+- `flows.cjs` helpers: `pollDone` also gives `forYouOk` (a failed For
+  You gives `forYou: []`); `openedIds(page, re)` taps a phone tab and
+  returns the ids it draws once it is selected and drawn (cards or "No
+  stories yet"); `hideAndPoll(page, context, id, n)` holds the clock,
+  hides `n` on For You, sends the batch, waits for the store and polls
+  without it; `tapUndo(page)`.
+- New flows: `flow-hidden-restore-all-after-poll`,
+  `flow-hide-undo-until-returned`, `flow-hide-undo-feed-gone-after`,
+  `flow-hide-undo-feed-gone-before`, `flow-hide-undo-foryou-fails`,
+  `flow-saved-retries-a-failed-fetch`, `flow-seen-prune-keeps-saved`.
+- `flow-saved-by-id`: the clock (finding 6).
+- `feedOrder.test.ts`: the rename (finding 7). Still 204 unit tests.
+- `README.md` (iphone-audit): the new flows and helpers, and
+  `flow-saved-by-id`'s two Undo cases.
+
+### Mutation checks (re-check round 2)
+
+Each was a scratch edit in a copy of the fixed frontend, then `npm run
+build` and `--only` on the flows (`--csp --strict`, CI fonts, port
+4175), two runs each; every mutant failed both runs as shown. The
+worktree was never edited for a mutant.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `flow-hidden-restore-all-after-poll` | Restore all back to `removeIds(PREFERENCE_KEYS.hiddenEntries, ids)` (the fix reverted) | RESTORE-ALL: "after Restore all, News shows 102,…,112, without 101", and the same for For You |
+| `flow-hide-undo-feed-gone-after` | the lay-over's feed check (`!feedIds.has(r.entry.source_id)` → `false`) | UNDO-FEED-GONE: "feed 3 is gone (after the Undo), and the strip reads […,\"Other1\",…]", right away and after the next poll |
+| `flow-hide-undo-feed-gone-before` | `putBackHiddenStories`' feed check dropped | UNDO-FEED-GONE: "feed 3 is gone (before the Undo), and the strip reads […,\"Other1\",…]" |
+| `flow-hide-undo-foryou-fails` | `forYouOk &&` dropped from the For You lay-over (the fix reverted) | UNDO-FY-FAILS: "after For You failed, For You started over with 101, expected no stories" |
+| `flow-hide-undo-foryou-fails` | the story dropped from `restoredRef` on a failed For You (`\|\| !forYouOk` in the drop clause) | "when For You answered again (before the Undo's batch), For You shows 301,…,502, without 101" |
+| `flow-saved-retries-a-failed-fetch` | the in-flight clear-out in the by-id effect's `.finally` dropped | SAVED-RETRY: "after a failed by-ids and a poll Saved shows 103; by-ids was asked for [\"503\"]" |
+| `flow-hide-undo-until-returned` | `gotIds.has(id)` → `(gotIds.has(id) && false)` | UNDO-RETURNED: "a poll returned 101 and the next one left it out, but News still shows it", and the same for For You |
+| `flow-saved-by-id` | `setStarred`'s unsave sent at once (`void prefs.flushPending()` after `removeIds`) | SAVED-BY-ID: "offline, Undo before the batch: Saved shows 503,402,105,103, expected 402,105,503,103" |
+| `flow-seen-prune-keeps-saved` | App's call with `savedById: new Map()` | SEEN-PRUNE: "pruning seen:news dropped the mark of 503, held only by the by-id cache" |
+| `flow-seen-prune-keeps-saved` | App's call with `starred: []` | SEEN-PRUNE: "pruning seen:news dropped the mark of 402, a save no tab or cache holds" |
+
+On the unfixed build (`0ee33df`'s App.tsx with the new flows), the
+flows for findings 1, 2 and 3 failed with the same messages, and the
+other new flows and the reworked `flow-saved-by-id` passed.
+
+Still unguarded after this round. Each line below was broken and run
+once against all 15 Saved and hide flows (round 1's seven, the seven
+new ones and `flow-foryou-fails-keeps-tab`), with 0 failures:
+
+- **Saved's array reuse** (round 1): it only saves Saved a redraw.
+- **The lay-over's re-hide check** (`hiddenNow.has(id)`, round 1): a
+  hide made here already drops the story from `restoredRef`, and every
+  tab leaves hidden stories out.
+- **`toggleHideEntry`'s unhide** (round 1): reached only with the
+  desktop keyboard.
+- **The negative cache's clean-up** (`savedGoneRef` loses an id once it
+  is unsaved). A story by-ids found gone can't be drawn anywhere, so it
+  can't be saved again; the clean-up only keeps the set from growing.
+- **The feed check reading `liveSources`, not `rawSources`**. They
+  differ only for a poll answered before a feed was deleted here, which
+  no flow holds; `removeSource` already drops the feed's stories, and
+  the poll it starts lands after.
+- As before, the `+ added` in the keep cap; `reinsert`'s upper bound is
+  equivalent.
+
+### Verification (re-check round 2)
+
+- `npm run lint`: 0 errors (the base's 4 warnings). `npm run build`
+  passes. Unit tests: 204 of 204.
+- `git diff --exit-code package.json package-lock.json`: clean.
+- Backend pytest on `popping_test`, the 12 files that read frontend
+  source plus `test_entries_by_ids_projection.py`: 227 passed and 2
+  failed, both in the DNS-only baseline list
+  (`test_reserved_category_names.py`). No backend file changed.
+- The 15 Saved and hide flows above: 5 loops, 0 failures.
+- Full strict smoke (`--csp --strict`, CI fonts, port 4175) on the final
+  build: 183 states and flows (176 plus the seven new flows), 0
+  failures, 0 warnings (594 s). It ran on `127.0.0.175:4175`:
+  `127.0.0.1:4175` was taken by a review agent's leftover `vite preview`
+  of a mutated scratch copy, which this session didn't start and left
+  running.
+
+Deviations: unchanged. Risks: unchanged (Restore all and the feed and
+For You rules only change what is laid over a poll, nothing stored).
+Device checks: one added, for Restore all (below and in
+`docs/DEVICE_CHECKS.md`).
+
 ## Risks and data-compatibility notes
 
 - Revert is safe: Saved falls back to the stories the tabs loaded, by
@@ -491,4 +658,5 @@ a number):
 - Save one story, then another, then open Saved. Pass: the second one is at the top, the first right under it.
 - In Saved, tap the bookmark on a story to remove it, then force-quit and reopen the app. Pass: it is gone from Saved and stays gone.
 - On For You, hide a story and tap Undo on the toast, then open that story's category tab. Pass: the story is back in For You and in its tab.
+- On For You, hide a story, then wait a minute with Popping open. Open Menu → Settings → Hidden, tap Restore all, close Settings and open that story's category tab. Pass: the story is there straight away, and back in For You.
 - (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.

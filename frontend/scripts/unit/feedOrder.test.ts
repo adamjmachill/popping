@@ -293,7 +293,9 @@ test('keepSet: every id App holds, from stories and bare ids, each once', () => 
   assert.equal(keepSet().size, 0)
 })
 
-test('keepIdsFor (PR4c): the keep set App builds is the tabs, For You, the saves and the Saved-by-id cache', () => {
+test('keepIdsFor (PR4c): the keep set is the tabs, For You, the saves and the Saved-by-id cache', () => {
+  // App's call passes what it holds; flow-seen-prune-keeps-saved checks
+  // what App passes (a save and a cached story keep their marks).
   // Each group holds one id no other does: 10 only a tab, 12 only For
   // You, 30 only the saves (its by-id fetch is still out), 3 only the
   // cache (unsaved since it was fetched).

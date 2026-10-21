@@ -1334,20 +1334,26 @@ export function App() {
         for (const [id, at] of m) if (now - at > SOURCE_CHANGE_TTL_MS) m.delete(id)
       }
       const isDeleted = (id: number) => changes.deleted.has(id)
+      const liveSources = rawSources.filter((row) => !isDeleted(row.id))
       let e = rawEntries.filter((x) => !isDeleted(x.source_id))
       let fy = rawForYou.filter((x) => !isDeleted(x.source_id))
-      // Stories a hide's Undo put back, until the server returns them.
+      // Stories a hide's Undo put back, until the server returns them
+      // (a failed For You is [], so only lists that answered count). Not
+      // a story whose feed is gone, here or on another device: it would
+      // fall into an "Other" tab. Not over a failed For You either: that
+      // isn't an answer, and the story waits for the next one.
       const hiddenNow = new Set(latestPrefs().hiddenEntries)
+      const feedIds = new Set(liveSources.map((row) => row.id))
       const gotIds = new Set([...e, ...fy].map((x) => x.id))
       const layE: { item: Entry; at: number }[] = []
       const layFy: { item: Entry; at: number }[] = []
       for (const [id, r] of restoredRef.current) {
-        if (gotIds.has(id) || now - r.at > SOURCE_CHANGE_TTL_MS || hiddenNow.has(id) || isDeleted(r.entry.source_id)) {
+        if (gotIds.has(id) || now - r.at > SOURCE_CHANGE_TTL_MS || hiddenNow.has(id) || !feedIds.has(r.entry.source_id)) {
           restoredRef.current.delete(id)
           continue
         }
         if (r.entriesAt >= 0) layE.push({ item: r.entry, at: r.entriesAt })
-        if (r.forYouAt >= 0) layFy.push({ item: r.entry, at: r.forYouAt })
+        if (forYouOk && r.forYouAt >= 0) layFy.push({ item: r.entry, at: r.forYouAt })
       }
       e = reinsertAll(e, layE)
       fy = reinsertAll(fy, layFy)
@@ -1356,9 +1362,7 @@ export function App() {
         const local = new Map(prev.map((row) => [row.id, row]))
         const since = (m: Map<number, number>, id: number) => (m.get(id) ?? 0) >= startedAt
         // Saved here after this poll started: the local row is newer.
-        let next = rawSources
-          .filter((row) => !isDeleted(row.id))
-          .map((row) => (since(changes.written, row.id) && local.has(row.id) ? local.get(row.id)! : row))
+        let next = liveSources.map((row) => (since(changes.written, row.id) && local.has(row.id) ? local.get(row.id)! : row))
         // Added here after this poll started and missing from it.
         const got = new Set(next.map((row) => row.id))
         for (const row of prev) {
@@ -2141,14 +2145,18 @@ export function App() {
     }
   }, [])
   // An unhide puts the kept stories back in their places, unless a poll
-  // already brought them back (``reinsertAll``).
+  // already brought them back (``reinsertAll``). A story whose feed is
+  // gone since the hide (deleted here or on another device) stays out:
+  // it would fall into an "Other" tab.
   const putBackHiddenStories = useCallback((ids: readonly number[]) => {
     const back: KeptStory[] = []
     const at = Date.now()
+    const feedIds = new Set(sourcesRef.current.map((s) => s.id))
     for (const id of ids) {
       const kept = hiddenStoriesRef.current.get(id)
       if (!kept) continue
       hiddenStoriesRef.current.delete(id)
+      if (!feedIds.has(kept.entry.source_id)) continue
       restoredRef.current.set(id, { ...kept, at })
       back.push(kept)
     }
@@ -2162,8 +2170,9 @@ export function App() {
   // the stories surface in the dashboard again, in their places (a tab's
   // snapshot kept its place; ``putBackHiddenStories`` the stories
   // themselves, which a poll may have dropped meanwhile). Used by every
-  // hide's Undo: the per-card eye button, the context-menu "Hide this
-  // entry" item, Settings' Hidden list and "Hide all downvoted".
+  // unhide: the Undo of the per-card eye button, of the context-menu
+  // "Hide this entry" item and of "Hide all downvoted", the eye's
+  // unhide, and Settings' Hidden list (Restore and Restore all).
   const restoreHiddenEntries = useCallback((ids: readonly number[]) => {
     removeIds(PREFERENCE_KEYS.hiddenEntries, [...ids])
     putBackHiddenStories(ids)
@@ -3534,10 +3543,11 @@ export function App() {
         onRestoreHidden={(entryId) => restoreHiddenEntry(entryId)}
         onRestoreAllHidden={() => {
           // The ids hidden now; one hidden on another device since
-          // this page last read them stays hidden.
+          // this page last read them stays hidden. Restored as any
+          // hide's Undo is, so the ones a poll dropped come back at once.
           const ids = latestPrefs().hiddenEntries
           if (ids.length === 0) return
-          removeIds(PREFERENCE_KEYS.hiddenEntries, ids)
+          restoreHiddenEntries(ids)
           toast('All hidden entries restored.', 'info')
         }}
         starredEntries={starredEntries}
