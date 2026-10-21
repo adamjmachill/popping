@@ -212,8 +212,24 @@ event moves from drawing a card to that moment.
   marked (`added`), not the partition's count a render old; with nothing
   left to mark it starts the tab over with no toast. Not in the spec;
   without it, a card seen on scroll just before Mark all was undone by
-  Mark all's Undo. Since the review fixes every other reset flushes it
-  too (below).
+  Mark all's Undo. Every other snapshot started while the collector holds
+  a story places that story as seen (the partition's `isPending`, re-check
+  round 1; the second commit's flushes at each reset are gone).
+- **A tab that tracks seen on scroll starts its list at its top with each
+  new snapshot** (re-check round 1). The spec scrolls to the top only on
+  C1's return; a Refresh, a new Sort or age window reset in place. On the
+  phone a reset in place took the stories read off the top out from above
+  the screen, so the cards being read jumped up past the top, were marked
+  as scrolled past, and the reader's place was lost. Column does it in a
+  layout effect, for every reset of the phone tab; the desktop grid and
+  Saved don't track and are unchanged.
+- **A story used up on screen calls off C1's second reset** (re-check
+  round 1), as an open does (PR3b). The end rule uses cards up with no
+  touch, scroll or key, which were the only things that called it off.
+- **The marker's focus goes on to its other form inside a snapshot**
+  (re-check round 1). PR3b hands the focus on only after the end row's own
+  keyboard press; seen on scroll can now change the row's form with the
+  focus on it (the end rule using up the last cards).
 - **PR3b's flows and smoke states that count unseen stories with cards
   or the marker on screen now hold the page's clock.** Found by building
   with `SEEN_DWELL_MS = 50` and running every flow and state: in real time
@@ -488,6 +504,9 @@ none was skipped.
      adds it once. The same for a card read off just before a Refresh lands
      and just before ⋯ → Best. Mutants: each of the three flushes removed
      alone fails its own step (table above).
+   - Re-check round 1 replaced the three flushes (and `startTabsOver`)
+     with one rule in the partition, which also covers the paths left
+     alone here; see "Review fixes (re-check round 1)".
 2. **An opened story recorded no `view`** (and the desktop none at all),
    against D3's "recorded at that moment". `openEntry` now records it
    (`recordBatched`, next to `addSeenMarks`), on every layout and from
@@ -712,6 +731,209 @@ The local loop on `stack-pr3c` at the third commit, on `stack-pr3b` at
 | `flow-refresh-resets` | a new snapshot keeps the drawn limit (no `setLimit(BATCH)`) | "after a Refresh to 60 unseen with 60 drawn before it, the NHL tab draws 60 unseen cards without a "load more" sentinel" |
 | `flow-refresh-resets` | a new snapshot keeps `drewAllUnseen` | "after a Refresh that brought 20 to 13 unseen the tab draws 33 unseen cards without a "load more" sentinel" |
 
+## Review fixes (re-check round 1)
+
+The re-check's reviewers confirmed five findings (4 against this unit,
+1 against PR3b's flows). Four are fixed; the fifth is skipped as PR3b's
+(below). Each of the four is reproduced by its new test with the fix
+taken out (the mutation table below), with the symptoms the reviewers
+reported (for fix 2 the very ids and offsets: 7006-7009 marked, the list
+left at 1516 showing 7014-7017).
+
+1. **C1's second reset moved stories the end rule had just used up into
+   a folded Earlier, with no input.** A long return arms a second reset
+   for when its refresh lands; only an input (`RETURN_INPUTS`), a scroll
+   off the top or an open called it off. The end rule uses up the cards
+   on screen with the end row with none of those, so on a tab whose last
+   unseen cards fit on one screen, a refresh slower than the dwell and
+   the seen batch (normal for an iPhone resuming) landed, found the reset
+   still armed, and its snapshot put the cards just used up under a
+   folded "Earlier (N)". This broke D3 ("stays where it is until you
+   leave the tab or pull to refresh").
+   - Fix: `markSeen` calls `disarmReturnReset()` when it hands a story to
+     the collector (and returns early when there is none), as `openEntry`
+     does for an open. A story used up on screen, scrolled past or by the
+     end rule, now calls the second reset off. `disarmReturnReset` joins
+     `markSeen`'s dependencies; it is stable.
+   - Test: `flow-return-after-10-min` gains a last step. The clock is held
+     from the tap on NHL (its three stories and its end row on one
+     screen), and the tab is left at once. Back after 11 min with the
+     return's entries request held, the dwell and the seen batch run with
+     no input, and the row reads "You're all caught up". When the request
+     is let go, the three are still above the marker and there is no
+     Earlier.
+2. **A Refresh or a new Sort/age window on a scrolled phone list marked
+   the cards on screen and jumped the reading place.** The tracker can't
+   tell a scroll from a re-layout: any qualified card that ends up above
+   the list's top counts as scrolled past. A reset in place (the list
+   left where it was) took every story read off the top out from above
+   the screen, so the cards being read jumped up past the top and were
+   marked, and unseen cards no one had reached sat above the screen.
+   With PR3b alone only opened stories left the group, and nothing was
+   marked by it.
+   - Fix: Column starts the list of a tab that tracks seen on scroll
+     (`trackSeen`) at its top with each new snapshot. It is a layout
+     effect that runs after the commit's DOM changes and refs, before the
+     browser draws or reports any intersection, so no frame shows the
+     jump and no observer sees the cards cross the top. The list's
+     element comes through a new `setList` callback ref, which also hands
+     it to `scrollerRef` as before (it changes with `scrollerRef`, so App
+     still gets null when the width crosses 768px). This covers every
+     reset of the phone tab: a Refresh landing, a Sort or age-window
+     change, the filter's own fetch landing, Mark all and its Undo
+     (already at the top in practice: after Mark all the list is three
+     short rows), C1 (which scrolls there itself), and later units' resets
+     (PR6b's check, PR8a's feed edit). The desktop grid and Saved don't
+     track, so they keep PR3b's behaviour.
+   - At the top, the unseen stories start with the ones being read (for
+     the same sort; a Refresh's new stories come first), so the reader
+     keeps their place in the story order, if not the pixel offset.
+   - Why not the other option (the tracker forgetting its state at a new
+     generation): it stops the false marks but leaves the reader on
+     cards they hadn't reached, with unseen ones above the screen.
+   - Test: `flow-seen-reset-in-place` (new). NHL with 40 stories, clock
+     held: three screens read off the top (marked), the next screen read
+     for a dwell, then the header Refresh. No mark goes for the cards
+     being read, the list is at its top, the stories read off the top are
+     under the marker, and the cards being read lead the unseen ones, on
+     screen. Then two more screens and ⋯ → Best: no mark for the cards
+     being read, and the list at its top.
+3. **The end rule turned the focused end row into "You're all caught up"
+   and the focus fell to `<body>`.** The row's two forms are two elements
+   (a `<button>` and a `<div>`), and PR3b's hand-over (the refocus
+   effect) runs only after the row's own keyboard press.
+   - Fix: Column's marker ref is a callback (`setMarker`) around the
+     state setter. When the element going away holds the focus and a new
+     marker element comes in the same commit, within the same snapshot,
+     the new one is focused with `preventScroll`. A new snapshot (the
+     row's own press, any reset) is left to PR3b's refocus effect, so a
+     finger or mouse press still hands nothing on (round 3).
+   - "Within the same snapshot": the render's generation against the
+     last committed one, which the layout effect of fix 2 moves on after
+     the commit's refs.
+   - It relies on React's commit order: a detached ref is called with
+     null before its node leaves the page (so `document.activeElement` is
+     still the old row), and refs are set before layout effects. A marker
+     that goes with no new one in that commit hands nothing on later (the
+     layout effect clears the flag).
+   - It also covers the other swap inside a snapshot: an arrival turning
+     a focused "You're all caught up" into "1 not seen · Mark as read".
+   - Test: `flow-caught-up` gains a last step. On Podcast its two unseen
+     episodes are on screen with the end row, which is focused. After the
+     dwell and the seen batch, the row reads "You're all caught up" and
+     the focus is on `DIV[data-caught-up]`.
+4. **Turning the phone past 768px inside the collector's 300 ms drew the
+   story just read above the marker of its grid column.** The grid's
+   columns weren't drawn, so they start snapshots in the render the turn
+   causes. The story read off For You's top was still in the collector,
+   so it went into unseen and stayed there once its mark landed (ids
+   keep their group). It was drawn as new while counted out. The second
+   commit's flushes covered three paths. This one, and the others its
+   notes left alone (the resolve effect, the source filter), had none.
+   - Fix: one rule instead of a flush at each call site. A snapshot that
+     starts while a story is still in the collector places it as seen.
+     - `createSeenBatch` gets `has(id)`.
+     - `partitionTab` takes an optional `isPending`. A new snapshot, and
+       an arrival, place a pending story under the marker. The counts
+       still wait for the mark, so a written batch is still one change of
+       the badge (`flow-scroll-marks-seen` checks that the badge holds
+       until the batch runs).
+     - `useFeedOrder` passes `isPending` through, and App gives it
+       `(e) => seenBatch.has(e.id)`. The collector moved down beside the
+       partition, its first reader.
+   - The second commit's flushes in `selectTab` and `setPrefsFor`, and
+     the `startTabsOver` wrapper, are gone. Their call sites are PR3b's
+     `resetSnapshot` again. Mark all keeps its own flush, which decides
+     what it counts and what its Undo takes back. The hide's before-flush
+     stays too.
+   - Tests:
+     - Unit: a `feedOrder.test.ts` case (pending in its own snapshot keeps
+       its place and counts; a reset puts it under the marker and stops
+       counting it; its mark then moves nothing; a first snapshot and an
+       arrival place it the same). `seen.test.ts`'s collector case now
+       checks `has`.
+     - `flow-seen-turn-mid-batch` (new): For You's top story read off
+       the top, then the viewport turned to 844×390 before the seen batch
+       runs. The story is not above its column's marker, it is in that
+       column's Earlier, and `seen:news` adds it once.
+     - `flow-seen-tab-switch` now runs on the new rule. Each step reads a
+       story no earlier step used. The first mutant run showed why: with
+       the rule broken, the tab switch left 101 above the marker, the
+       Refresh step read 101 again (already marked, so nothing was
+       pending), and it passed. Each step now stands alone.
+5. **No flow guards C1's immediate reset on return**: skipped. The
+   finding and its verdict both place it in PR3b. The gap is in PR3b's
+   `slowReturn` and PR3b's mutation tables, and it reproduces at PR3b's
+   own head, 7d06cbf. PR3c's commits don't cause it and don't touch
+   `slowReturn`. This unit's rules say not to do another unit's work, so
+   it is left for PR3b's re-check with the reviewers' suggested check: in
+   `flow-return-after-10-min`'s first slow return, before `land()`, fail
+   when `shown` still holds `inView`; the same in
+   `flow-return-from-earlier` with its return's entries request gated;
+   then re-run the `onReturn` mutant.
+
+Also changed: `docs/DEVICE_CHECKS.md` gets one `#<pr>` line, for Refresh
+read a few screens down a tab. The README has the new and changed flow
+rows. Deviations and Open items above are corrected for fixes 1 to 4.
+
+### Verification
+
+The local loop on `stack-pr3c` (on `stack-pr3b` at 7d06cbf), the
+frontend's `node_modules` linked in, database `popping_test_f2`,
+`vite preview` on 127.0.0.1:4174 (started with nohup, stopped by its PID).
+
+- `npm run lint`: 0 errors (the 4 react-refresh warnings main has).
+  `npm run build`: clean. `package.json` and the lockfile: unchanged.
+- Unit tests: 222 of 222.
+- Backend pytest, the eight files that read frontend source (listed
+  under the third commit's Verification): 172 passed.
+- Strict smoke (`--csp --strict`), every state and flow: 0 failures, 0
+  warnings (180 runs, 610 s, another lane's smoke running beside it).
+  The only source change after it is one App comment line; the runs
+  below are on the final build.
+- The five flows this round adds or changes, the other PR3c flows, the
+  read-model flows and the states `caught-up`, `not-seen-row`,
+  `earlier-open` (30 runs): looped 3 times, 0 failures each time (148
+  to 155 s a loop).
+  - The third loop first stopped on a harness error, not a failure:
+    `route.fetch: socket hang up` on the page's first GET to the
+    preview, which was up and answering. `flow-seen-reset-in-place`, the
+    flow it stopped in, then ran alone 3 times (ok each time), and the
+    whole third loop again: 0 failures.
+- The five flows on builds with `SEEN_DWELL_MS` 50, 700 and 1500: 0
+  failures at 50 and 1500.
+  - At 700, one run of the five failed in PR3b's part of
+    `flow-return-after-10-min`: "the second slow return did not start
+    the tab over at its top", before any step this round adds.
+  - It didn't come back in 15 more runs at 700 (12 of the flow alone, 3
+    of the five), with a probe on `slowReturn`'s result.
+  - That part of the flow runs on the page's own clock in real time, so
+    a poll is free to land around it. One that lands with the step's
+    arrival would make the reset put that arrival first. This is a guess
+    that no run confirmed; the flow's slow returns are PR3b's.
+- Mutation checks: the table below.
+- Security checklist: unchanged. No route, fetch or server-side read.
+
+### Mutation checks
+
+Each was a scratch edit with a script, then a rebuild and a preview
+restart for app code, an `--only` run (or the unit file), and a restore
+checked by SHA-256. All fail where expected.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| unit | `partitionTab` places by `isSeen` alone (`isPending` ignored) | the new `feedOrder.test.ts` case |
+| unit | the collector's `has` always false | the collector case (`has: the stories still waiting`) |
+| `flow-return-after-10-min` | `markSeen` doesn't call off the second reset | RETURN: "[601,602,603], used up on screen by the end rule before the return's refresh landed, moved when it landed: above the marker now [], Earlier "Earlier (3)""; "… has "Earlier (3)", expected none" |
+| `flow-seen-reset-in-place` | no scroll to the top on a new snapshot | SEEN-RESET: "a Refresh marked [7006,7007,7008,7009], on screen being read and never scrolled past"; "after a Refresh the list is at 1516"; "after a Refresh [7014,7015,7016,7017] are on screen"; "after a new Sort the list is at 744" |
+| `flow-caught-up` | the marker's ref never records the focus | CAUGHT-UP: "the end rule turned the focused end row into "You're all caught up" and the focus is on BODY, expected the marker" |
+| `flow-caught-up` | the hand-over without the same-snapshot check | CAUGHT-UP: "after a tap on Mark as read the focus went to the marker" (round 3's rule) |
+| `flow-seen-tab-switch`, `flow-seen-turn-mid-batch` | App passes no `isPending` | SEEN-SWITCH: 101 (tab switch), 102 (Refresh) and 103 (Sort) "… is above the marker", and Earlier lacks 103; SEEN-TURN: "story 101, read off the top of For You just before the turn, is drawn above the news column's marker"; "the news column has no Earlier" |
+
+The second commit's three flush mutants (`selectTab`, `startTabsOver`,
+`setPrefsFor` without the flush) no longer apply: those flushes are gone,
+and the last row above breaks the rule that replaced them.
+
 ## Open items for later units
 
 - PR5a: the card's ActionSheet open state joins `modalOpen` (App, the
@@ -722,7 +944,12 @@ The local loop on `stack-pr3c` at the third commit, on `stack-pr3b` at
   their own partition.
 - PR6b: a pull moves the list down from its top, so nothing leaves
   through the top; `resetSnapshot()` on a check remounts what changes
-  group and re-registers it.
+  group and re-registers it, and the phone list starts at its top with
+  the new snapshot (Column, re-check round 1), where a pull leaves it
+  anyway.
+- PR8a: a feed edit on a custom tab resets its snapshot; the phone list
+  starts at its top with it (the same Column rule), so nothing read on
+  screen is marked by the re-layout.
 - Gate 1: a retune of `SEEN_DWELL_MS` is one edit in `src/lib/seen.ts`;
   the flows read it.
 - Known limit: a `view` recorded by the hide's `takeRecords` waits in the

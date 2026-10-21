@@ -283,7 +283,7 @@ export function ColumnInner({
     setDrewAllUnseen(false)
   }
   const [sentinel, setSentinel] = useState<HTMLElement | null>(null)
-  const [marker, setMarker] = useState<HTMLElement | null>(null)
+  const [marker, setMarkerEl] = useState<HTMLElement | null>(null)
   // The marker is above the scroller's visible top (its observer, below).
   // App holds arrivals back meanwhile; the rows between the marker and
   // Earlier stay as they were drawn (``end``, below).
@@ -305,6 +305,70 @@ export function ColumnInner({
   // The seen-on-scroll registry, for the stable card ref callback below.
   const seenRef = useRef(seenRegistry)
   seenRef.current = seenRegistry
+  // The snapshot this render draws, and the one the last commit drew
+  // (moved on by the layout effect below, which runs after the commit's
+  // refs are set): the marker's ref callback tells a change inside one
+  // snapshot from a new one by them.
+  const generationRef = useRef(generation)
+  generationRef.current = generation
+  const drawnGenerationRef = useRef(generation)
+
+  // The marker's element, for its ref callback. Its two forms are two
+  // elements, so the row turning from one into the other inside a
+  // snapshot (the end rule using up the last cards on screen with it, an
+  // arrival making the count 1) takes the old one out of the page, and
+  // the focus on it would fall to <body>. It goes on to the new row
+  // instead (no scroll), so a keyboard or screen-reader user keeps their
+  // place. React calls the old element's ref with null while it is still
+  // in the page, and the new one's in the same commit, before any layout
+  // effect. A new snapshot is left to the refocus effect below: the end
+  // row's own press resets the tab, and only a keyboard or reader press
+  // hands the focus on.
+  const markerElRef = useRef<HTMLElement | null>(null)
+  const markerFocusRef = useRef(false)
+  const setMarker = useCallback((el: HTMLElement | null) => {
+    if (el) {
+      const hand = markerFocusRef.current && generationRef.current === drawnGenerationRef.current
+      markerFocusRef.current = false
+      markerElRef.current = el
+      const active = document.activeElement
+      if (hand && (!active || active === document.body)) el.focus({ preventScroll: true })
+    } else {
+      const was = markerElRef.current
+      markerElRef.current = null
+      markerFocusRef.current = was != null && was === document.activeElement
+    }
+    setMarkerEl(el)
+  }, [])
+
+  // This Column's list (the phone's scroller; ``scrollerRef`` hands it
+  // to App too), for the scroll to its top below.
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const setList = useCallback(
+    (el: HTMLDivElement | null) => {
+      listRef.current = el
+      scrollerRef?.(el)
+    },
+    [scrollerRef],
+  )
+  // A tab that tracks seen on scroll starts its list at its top with
+  // each new snapshot: a Refresh landing, a new Sort or age window, Mark
+  // all and its Undo (C1's return scrolls there itself). The tab is
+  // starting over. Left where it was, the reset would take every story
+  // seen above the screen out from over the cards being read, and those
+  // would jump up past the top: the tracker can't tell that from a
+  // scroll past them, so it would mark them, and the reader would lose
+  // their place. At the top, the unseen stories start with the ones
+  // read last (for the same sort). Done in the commit, before the
+  // browser draws or reports any intersection, so no frame shows the
+  // jump. A marker that went without a new one in this commit hands no
+  // focus on later.
+  useLayoutEffect(() => {
+    markerFocusRef.current = false
+    if (drawnGenerationRef.current === generation) return
+    drawnGenerationRef.current = generation
+    if (trackSeen) listRef.current?.scrollTo({ top: 0 })
+  })
 
   // Keep the latest ``cardRefs`` value in a ref so we can ship a
   // stable ref callback to each ``Card``. Without this, the inline
@@ -698,7 +762,7 @@ export function ColumnInner({
           ``clip`` (not ``hidden``) keeps the element scrollable and
           avoids creating a scroll container on the X axis. */}
       <div
-        ref={scrollerRef}
+        ref={setList}
         data-scroller={scrollerRef ? '' : undefined}
         className="flex-1 overflow-x-clip overflow-y-auto overscroll-contain space-y-2 pr-1"
       >

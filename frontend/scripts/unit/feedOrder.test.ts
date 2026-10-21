@@ -22,11 +22,12 @@ const none = seenOf()
 // One tab over several polls: `step` partitions with the snapshot kept.
 function tab(order = 'newest') {
   let last: Partition<Story> | null = null
-  return (entries: Story[], opts: { isSeen?: (e: Item) => boolean; isRemoved?: (e: Story) => boolean; hold?: boolean; reset?: boolean; order?: string } = {}) => {
+  return (entries: Story[], opts: { isSeen?: (e: Item) => boolean; isRemoved?: (e: Story) => boolean; isPending?: (e: Item) => boolean; hold?: boolean; reset?: boolean; order?: string } = {}) => {
     last = partitionTab({
       entries,
       isSeen: opts.isSeen ?? none,
       isRemoved: opts.isRemoved,
+      isPending: opts.isPending,
       order: opts.order ?? order,
       snapshot: last?.snapshot,
       hold: opts.hold,
@@ -200,6 +201,39 @@ test('a change of the tab order (Sort; from PR4d the window) starts a new snapsh
   assert.equal(step([story(1), story(3), story(2)], { isSeen: seenOf(2), order: 'best' }).snapshot.generation, 2)
   // A window change, as PR4d encodes it in the order string.
   assert.equal(step([story(1)], { order: 'best|7d' }).snapshot.generation, 3)
+})
+
+// PR3c: a story seen on scroll waits a moment in App's collector before
+// its mark is written. A snapshot started meanwhile places it as seen;
+// the counts wait for the mark.
+test('a story seen and not yet marked goes under the marker of a new snapshot, and stays there', () => {
+  const step = tab()
+  const list = [story(4), story(3), story(2), story(1)]
+  step(list)
+  // Pending in the snapshot it was seen in: it keeps its place and still
+  // counts (one written batch, one change of the counts).
+  const kept = step(list, { isPending: seenOf(3) })
+  assert.deepEqual(ids(kept.unseen), [4, 3, 2, 1])
+  assert.equal(kept.unseenCount, 4)
+  // A reset (a tab switch, Refresh, Sort) while it is still pending.
+  const reset = step(list, { isPending: seenOf(3), reset: true })
+  assert.deepEqual(ids(reset.unseen), [4, 2, 1])
+  assert.deepEqual(ids(reset.earlier), [3])
+  assert.equal(reset.unseenCount, 3)
+  assert.deepEqual(reset.unseenIds, [4, 2, 1])
+  // Its mark lands: nothing moves.
+  const marked = step(list, { isSeen: seenOf(3) })
+  assert.deepEqual(ids(marked.unseen), [4, 2, 1])
+  assert.deepEqual(ids(marked.earlier), [3])
+  // A tab's first snapshot (one not drawn until now) places it the same.
+  const other = tab()
+  const first = other(list, { isPending: seenOf(2) })
+  assert.deepEqual(ids(first.unseen), [4, 3, 1])
+  assert.deepEqual(ids(first.earlier), [2])
+  // And an arrival still pending goes at the end of Earlier.
+  const arrived = other([story(9), ...list], { isPending: seenOf(2, 9) })
+  assert.deepEqual(ids(arrived.unseen), [4, 3, 1])
+  assert.deepEqual(ids(arrived.earlier), [2, 9])
 })
 
 test('D33: stories fetched more than 48 h before the first load count as seen', () => {

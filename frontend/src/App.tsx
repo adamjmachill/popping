@@ -554,37 +554,15 @@ export function App() {
     u.searchParams.delete('source')
     window.history.replaceState(null, '', u.toString())
   }, [])
-  // Seen on scroll's collector (PR3c; the rest of it is with the read
-  // model, below): the stories seen on scroll for SEEN_BATCH_MS, then one
-  // ``addIds`` per ``seen:<category>`` key (``addSeenMarks``), so one
-  // render per batch, not one per card. Opening a story doesn't wait for
-  // it (``openEntry``). It is declared this early because everything that
-  // starts a tab's snapshot over writes it first (``selectTab``,
-  // ``startTabsOver``, ``setPrefsFor``): the new snapshot then already
-  // counts those stories as seen. Left collecting, one would go above the
-  // marker of the snapshot just started and stay there once its mark
-  // landed, since ids in a snapshot keep their group.
-  const addSeenMarksRef = useRef<(stories: readonly Entry[]) => unknown>(() => undefined)
-  const [seenBatch] = useState(() =>
-    createSeenBatch<Entry>({
-      setTimer: (fn, ms) => window.setTimeout(fn, ms),
-      clearTimer: (timer) => window.clearTimeout(timer as number),
-      drain: (stories) => addSeenMarksRef.current(stories),
-      key: (e) => e.id,
-    }),
-  )
   // The phone's stored tab (see ``resolveTab`` for the tab shown).
   // Only ``selectTab`` writes it, from a tap, the Menu's Jump to, or
-  // the resolve effect settling a tab that went. A switch starts both
-  // tabs over (lib/useFeedOrder.ts), so the collector is written first:
-  // its marks and the switch land in the same render.
+  // the resolve effect settling a tab that went.
   const [mobileTab, setMobileTab] = useState<StoredTab>(loadMobileTab)
   const selectTab = useCallback((key: ColKey) => {
-    seenBatch.flush()
     setMobileTab((prev) => (prev && 'key' in prev && prev.key === key ? prev : { key }))
     safeSetItem(STORAGE_KEYS.mobileTab, key)
     safeRemoveItem(STORAGE_KEYS.mobileColLast)
-  }, [seenBatch])
+  }, [])
   // The phone tab's story list, its real scroller (Column's list, not
   // the wrapper around it, which only scrolls Brief). Set through
   // Column's ``scrollerRef``, so it changes on every tab remount and
@@ -623,17 +601,6 @@ export function App() {
   // and below "You're all caught up", kept still while you read.
   const feed = useFeedOrder<Entry>()
   const { resetSnapshot, setHold, latest: latestPart } = feed
-  // Every reset App asks for (Refresh, Mark all and its Undo, C1) goes
-  // through here: the stories seen on scroll and still being collected
-  // are written first, so the snapshot it starts already has them under
-  // the marker (see ``seenBatch``).
-  const startTabsOver = useCallback(
-    (key?: string) => {
-      seenBatch.flush()
-      resetSnapshot(key)
-    },
-    [seenBatch, resetSnapshot],
-  )
   // Each refresh's number; a result older than one already applied is
   // dropped. (Declared here: C1's return handler below reads it.)
   const refreshSeqRef = useRef(0)
@@ -687,13 +654,13 @@ export function App() {
   const onReturn = useCallback(
     ({ away, openedBefore }: Return) => {
       if (away < RETURN_RESET_MS || openedBefore) return
-      startTabsOver()
+      resetSnapshot()
       armReturnReset()
       const { phone, desktop } = scrollersRef.current
       phone?.scrollTo({ top: 0 })
       desktop?.scrollTo({ top: 0 })
     },
-    [startTabsOver, armReturnReset],
+    [resetSnapshot, armReturnReset],
   )
   // A newer build on the server: the phone reloads onto it when the user
   // comes back after 10 min away; the desktop shows a Reload button.
@@ -1221,7 +1188,8 @@ export function App() {
   // stay up instead of being replaced by "Nothing new".
   // A refresh that isn't silent (Refresh, ``r``) also starts every tab
   // over once its stories land: what arrived is sorted into place and
-  // what was read goes under the marker. Polls never do.
+  // what was read goes under the marker (the phone's list goes back to
+  // its top with it: Column). Polls never do.
   // Each refresh also reads what changed in the preferences since the
   // last read (a save made on another device shows within a poll).
   const resyncPrefs = prefs.resync
@@ -1298,7 +1266,7 @@ export function App() {
       const armed = resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current
       const afterReturn = armed && lastStoryOpenAt() < returnAtRef.current
       if (armed) disarmReturnReset()
-      if (!opts?.silent || afterReturn) startTabsOver()
+      if (!opts?.silent || afterReturn) resetSnapshot()
       // Surface a brief success toast so the user knows the pull
       // actually happened: how many stories it brought that weren't
       // here before it was asked for, or "Nothing new". (PR6b replaces
@@ -1319,7 +1287,7 @@ export function App() {
     } finally {
       setRefreshing(false)
     }
-  }, [activeSources, resyncPrefs, startTabsOver, disarmReturnReset])
+  }, [activeSources, resyncPrefs, resetSnapshot, disarmReturnReset])
   // The latest ``refresh`` for callers that must stay stable: Column's
   // memo ignores callbacks, so it would keep calling an old one with
   // an old filter.
@@ -1736,7 +1704,26 @@ export function App() {
   // Out of a snapshot at once, cached copies too: a hidden story, and
   // one from a feed that was deleted. (PR5b adds muted feeds here.)
   const isRemoved = (e: Entry) => hiddenSet.has(e.id) || (sourcesLoaded && !sourcesById.has(e.source_id))
-  const parts = feed.partition(drawnTabs, { isSeen, isRemoved, ready: !prefs.loading && firstRefreshDone })
+  // Seen on scroll's collector (PR3c; the rest of it is below): the
+  // stories seen on scroll for SEEN_BATCH_MS, then one ``addIds`` per
+  // ``seen:<category>`` key (``addSeenMarks``), so one render per batch,
+  // not one per card. Opening a story doesn't wait for it
+  // (``openEntry``). A snapshot started meanwhile places what it holds
+  // as seen (``isPending``), whatever started it: a tab switch, a
+  // Refresh, a new Sort or age window, the phone turned past 768px (the
+  // grid's columns start theirs). Placed as unseen, such a story would
+  // stay above the marker once its mark landed: ids keep their group.
+  const addSeenMarksRef = useRef<(stories: readonly Entry[]) => unknown>(() => undefined)
+  const [seenBatch] = useState(() =>
+    createSeenBatch<Entry>({
+      setTimer: (fn, ms) => window.setTimeout(fn, ms),
+      clearTimer: (timer) => window.clearTimeout(timer as number),
+      drain: (stories) => addSeenMarksRef.current(stories),
+      key: (e) => e.id,
+    }),
+  )
+  const isPending = (e: Entry) => seenBatch.has(e.id)
+  const parts = feed.partition(drawnTabs, { isSeen, isRemoved, isPending, ready: !prefs.loading && firstRefreshDone })
   // One count per tab (D4): the partition's for a tab drawn now (held
   // arrivals and stories a poll dropped included), otherwise the tab's
   // stories not seen yet. It is the badge, the marker, the md+ "N new"
@@ -1862,14 +1849,17 @@ export function App() {
   // story it draws (one a poll dropped too), and what is seen by then.
   const seenReadRef = useRef({ isSeen, phoneKey: phoneCol?.key })
   seenReadRef.current = { isSeen, phoneKey: phoneCol?.key }
-  // The collector (``seenBatch``, declared with the phone's tab) drains
+  // The collector (``seenBatch``, declared before the partition) drains
   // into the latest ``addSeenMarks``.
   addSeenMarksRef.current = addSeenMarks
   // Cards seen on scroll. One already seen is left alone: an opened one
   // recorded its ``view`` when it was opened (``openEntry``), one marked
   // on another device recorded it there, and Mark all isn't a read. For
   // the rest the ranking's ``view`` is recorded now, the moment the story
-  // is used up (D3), not when its card is drawn.
+  // is used up (D3), not when its card is drawn. A story used up here
+  // calls off C1's second reset, as an open does: the end rule uses the
+  // last cards up with no touch, scroll or key, and a return's slow
+  // refresh landing after that would move them under a folded Earlier.
   const markSeen = useCallback(
     (ids: number[]) => {
       const { isSeen: seen, phoneKey } = seenReadRef.current
@@ -1882,9 +1872,11 @@ export function App() {
         recordBatched({ entry_id: e.id, type: 'view' })
         stories.push(e)
       }
+      if (!stories.length) return
+      disarmReturnReset()
       seenBatch.add(stories)
     },
-    [latestPart, seenBatch],
+    [latestPart, seenBatch, disarmReturnReset],
   )
   const seenOnScroll = useSeenObserver(isDesktop ? null : phoneScroller, { modalOpen, onSeen: markSeen })
   // The page hiding (or the reload onto a new build): what the observer
@@ -2001,9 +1993,9 @@ export function App() {
   const unmarkColumnRead = useCallback(
     (key: ColKey, added: ReadonlyMap<`seen:${string}`, number[]>) => {
       for (const [k, ids] of added) removeIds(k, ids)
-      startTabsOver(key)
+      resetSnapshot(key)
     },
-    [removeIds, startTabsOver],
+    [removeIds, resetSnapshot],
   )
 
   // Reverse of ``hideEntry`` / ``toggleHideEntry`` (hide branch):
@@ -2348,7 +2340,7 @@ export function App() {
       if (e) stories.push(e)
     }
     const added = addSeenMarks(stories)
-    startTabsOver(key)
+    resetSnapshot(key)
     // What this marked: the partition is a render old, so a story the
     // flush above just wrote is in it, and isn't counted or undone here.
     let n = 0
@@ -2358,7 +2350,7 @@ export function App() {
       kind: 'info',
       action: { label: 'Undo', onClick: () => unmarkColumnRead(key, added) },
     })
-  }, [seenBatch, latestPart, addSeenMarks, startTabsOver, unmarkColumnRead])
+  }, [seenBatch, latestPart, addSeenMarks, resetSnapshot, unmarkColumnRead])
 
   const toggleSource = useCallback((name: string) => {
     setActiveSources((prev) => {
@@ -2557,13 +2549,9 @@ export function App() {
     }
   }, [columns, keyColumns, setSelectedCardId, columnRefs, selectTab])
 
-  // A new Sort or age window starts the tab's snapshot over (its
-  // ``order``), so the seen-on-scroll collector is written first, as for
-  // every other reset (``seenBatch``).
   const setPrefsFor = useCallback((columnName: string, prefs: ColumnPrefs) => {
-    seenBatch.flush()
     setColumnPrefs(columnName, prefs as ColumnPrefsValue)
-  }, [seenBatch, setColumnPrefs])
+  }, [setColumnPrefs])
 
   // C8's row opens its tab the way the Menu's Jump to column does: the
   // phone's tab, or the desktop column scrolled into view. Stable: the

@@ -66,6 +66,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · Tap a tab with a badge and straight away (within a second) open the Menu; leave it open for a few seconds, close it, and flick the top story off the screen at once. Pass: the badge doesn't drop (a story behind the Menu wasn't being read).
 - [ ] #<pr> · Scroll slowly through Saved, and through a search's results. Pass: no tab's badge changes; only opening a story from there counts it as seen.
 - [ ] #<pr> · (If you have a desktop) On the laptop, scroll slowly down a column past several stories. Pass: its "N new" doesn't change; on the desktop only opening a story counts it as seen.
+- [ ] #<pr> · On the phone, read a few screens down a tab with a badge, then, with a story on screen, tap Refresh at the top. Pass: the tab goes back to its top with that story first (after any new ones), the badge counts it as not seen yet, and the stories you scrolled past are under "Earlier".
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

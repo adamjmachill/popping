@@ -339,7 +339,9 @@ export type BatchDeps<T> = {
 
 /** Collects scroll-seen stories for ``SEEN_BATCH_MS`` from the first
  *  one, then hands them on in one call. ``flush`` hands them on now (the
- *  page is hiding, or Mark all is about to read the marks). */
+ *  page is hiding, or Mark all is about to read the marks). ``has``
+ *  says whether a story is still waiting here: seen, its mark not
+ *  written yet (a snapshot started meanwhile puts it under the marker). */
 export function createSeenBatch<T>(deps: BatchDeps<T>) {
   const delay = deps.delayMs ?? SEEN_BATCH_MS
   let items = new Map<number, T>()
@@ -359,5 +361,5 @@ export function createSeenBatch<T>(deps: BatchDeps<T>) {
     }
     if (items.size && timer == null) timer = deps.setTimer(flush, delay)
   }
-  return { add, flush, size: () => items.size }
+  return { add, flush, has: (key: number) => items.has(key), size: () => items.size }
 }
