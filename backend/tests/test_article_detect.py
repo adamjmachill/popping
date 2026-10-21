@@ -197,6 +197,37 @@ def test_url_ok_reads_an_ending_only_at_the_end_of_the_path(path, ok):
 
 
 @pytest.mark.parametrize(
+    "ending", ["jhtml", "jspx", "shtm", "dhtml", "phtm", "xhtm", "rhtml", "lasso", "nsf", "land"]
+)
+def test_url_ok_reads_a_sitemap_entrys_unknown_ending_as_a_page(ending):
+    """A sitemap lists pages, and main fetched every entry: an ending of
+    2 to 5 letters no list here knows (ATG's ``.jhtml``, ``.jspx``,
+    ``.shtm``, Domino's ``.nsf``) is a page's there. A listing page's
+    link keeps the rule, as courlan's ending test read it on main."""
+    url = f"https://www.example.com/news/story-123-council-approves-plan.{ending}"
+    assert url_ok(url, SITE, sitemap_entry=True)
+    assert url_ok(url, SITE, sitemap_entry=True, section="/news/")
+    assert not url_ok(url, SITE)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/uploads/trail-map.jpg",
+        "/files/annual-report.pdf",
+        "/files/annual-report.pdf.html",
+        "/feed.xml",
+        "/assets/app.js",
+        "/img_1234",
+        "/tag/parks/",
+        "/about/",
+    ],
+)
+def test_url_ok_keeps_its_other_rules_for_a_sitemap_entry(path):
+    assert not url_ok("https://www.example.com" + path, SITE, sitemap_entry=True)
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "https://www.example.com/library/tag/python",
@@ -487,6 +518,59 @@ def test_news_sitemap_reads_first():
 )
 def test_classify_sitemap_edge_cases(url, cls):
     assert classify_sitemap(url) == cls
+
+
+@pytest.mark.parametrize(
+    ("name", "cls"),
+    [
+        # A custom post type named with a media, product or user word
+        # lists posts: the word only qualifies its last one (round 6).
+        ("media_release-sitemap.xml", "other"),
+        ("media-release-sitemap.xml", "other"),
+        ("product_update-sitemap.xml", "other"),
+        ("user_story-sitemap.xml", "post"),
+        ("wp-sitemap-posts-media_release-1.xml", "post"),
+        ("wp-sitemap-posts-product_update-1.xml", "post"),
+        ("?sitemap=posts&sitemap-subtype=media_release", "post"),
+        # Taxonomies keep their class by their last word, or by WordPress
+        # core's taxonomy provider, whatever the taxonomy is called.
+        ("product_tag-sitemap.xml", "taxonomy"),
+        ("tribe_events_cat-sitemap.xml", "taxonomy"),
+        ("wp-sitemap-taxonomies-post_format-1.xml", "taxonomy"),
+        ("wp-sitemap-taxonomies-region-1.xml", "taxonomy"),
+        ("sitemap-tax-post_tag.xml", "taxonomy"),
+        # A product or author sitemap is still one, and so is an
+        # attachment sitemap ...
+        ("attachment-sitemap.xml", "media"),
+        ("sitemap-media.xml", "media"),
+        ("store-products-sitemap.xml", "product"),
+        ("sitemap_products_1.xml", "product"),
+        ("wp-sitemap-posts-product-1.xml", "product"),
+        ("sitemap-authors.xml", "author"),
+        # ... but a video or image sitemap lists the pages that show them
+        # (and a ``video`` post type's posts), as main read them.
+        ("video-sitemap.xml", "other"),
+        ("sitemap-images.xml", "other"),
+        # Words after "sitemap" count each.
+        ("sitemap-pt-post-2026-10.xml", "post"),
+        ("blog-posts-sitemap.xml", "post"),
+        # A name with no "sitemap" in it counts by its last word too, and
+        # so does the section a sitemap is filed under.
+        ("media-releases.xml", "other"),
+        ("sitemaps/product-updates.xml", "other"),
+        ("media-centre/sitemap.xml", "other"),
+        ("video-news/sitemap.xml", "news"),
+        ("videos.xml", "other"),
+        ("attachments.xml", "media"),
+        ("shop/sitemap.xml", "product"),
+        # A taxonomy named by a word this module doesn't know is read, as
+        # main read every sitemap (score_page then rejects a brand's
+        # archive pages, one fetch each).
+        ("product_brand-sitemap.xml", "other"),
+    ],
+)
+def test_a_sitemap_name_of_several_words_counts_by_its_last_word(name, cls):
+    assert classify_sitemap(f"https://www.example.com/{name}") == cls
 
 
 # ---------------------------------------------------------------------------

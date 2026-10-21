@@ -452,8 +452,10 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   sitemap first (an HTML `/sitemap/` page is still read as a page after
   it). A check whose usual read fails or finds nothing reads the other
   one; a page that check reads is read once more when the usual read
-  lists it, so one bad check can't lose a story. A `sitemap_url` is read
-  as the sitemap whatever its address looks like (`/?sitemap=index`);
+  lists it, so one bad check can't lose a story. So is a page read while
+  one of the site's sitemaps failed (a news sitemap down beside a post
+  sitemap that loads), once a check's sitemaps all load. A `sitemap_url`
+  is read as the sitemap whatever its address looks like (`/?sitemap=index`);
   one that names nothing and doesn't look like a sitemap (the site's own
   address) leads to the site's sitemaps through robots.txt. With a
   `link_pattern`, the page's links under that path are the list;
@@ -462,9 +464,13 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   whole site instead.
 - **Keeps only articles.** Of a site's sitemaps only news, post and
   unknown ones are read (a page sitemap only when there is no post
-  sitemap; never tag, author, product or media sitemaps). URLs that are
-  not article-shaped (tag, author, cart and archive pages, About,
-  Contact) are dropped, and each new page is scored as an article
+  sitemap; never tag, author, product or attachment sitemaps; a video or
+  image sitemap lists pages and is read). A sitemap's name of several
+  words counts by its last one, so a `media_release` or `product_update`
+  post type's sitemap is read. URLs that are not article-shaped (tag,
+  author, cart and archive pages, About, Contact, files) are dropped; a
+  sitemap's entry is a page whatever its ending (`.jhtml`, `.nsf`)
+  unless that ending is a file type's. Each new page is scored as an article
   before it is kept (`backend/app/article_detect.py`). A date the
   site's own list gives a page (a listing card's `<time>`, a news
   sitemap's publication date) counts as the page's date. A feed with a
@@ -472,15 +478,20 @@ A site with no feed is added as a website feed (`type` `generic_scrape`,
   `sitemap_url` for the pages it lists. A news section under a static one
   (`/about/news/<slug>`) is news, and the section a feed reads (its
   address's section or its `link_pattern`) is never dropped for its own
-  name: a feed pointed at `/about/media-centre` reads its pages.
+  name: a feed pointed at `/about/media-centre` reads its pages. On a
+  listing page the section's name is lifted only when nothing else there
+  is a list, so a category page's links to its subcategories never
+  outvote its posts.
 - **Fetches only new pages,** at most 10 a check, skipping stories
   already stored. At most `ingest.max_undated_per_poll` (2) of them may
   be undated, and an undated page that is old backlog is skipped: on a
   listing page, or in a sitemap that gives the page no `<lastmod>`, one
-  listed below a stored story (in the sitemap's own order); in a
-  sitemap, one last modified before the check's backlog line. A page a
-  check left for later while it was new (refused, failed, or read while
-  the usual read gave nothing) is still new when it is read. A page
+  listed below a stored story (in the sitemap's own order; on a listing
+  page, stored stories pinned at its top above newer ones, such as a
+  sticky post, don't count); in a sitemap, one last modified before the
+  check's backlog line. A page a check left for later while it was new
+  (refused, failed, or read while the usual read gave nothing or had a
+  sitemap fail) is still new when it is read. A page
   that times out or answers 5xx is asked for again on the next checks
   (3 in all).
 

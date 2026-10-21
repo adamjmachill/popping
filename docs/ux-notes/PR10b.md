@@ -266,12 +266,16 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   listing page, and in a sitemap for a page with no `<lastmod>` (round 2), by its place in the
   sitemap's own order, not the candidates' date order (round 3), below any stored story whatever
   the stored stories' own dates (round 4's test; round 5 tests both orders of the stored
-  stories' dates); in a sitemap, last modified before the poll's backlog line. A page a poll
-  left for later (refused, failed in a way that passes, read while the usual read gave nothing)
-  while it was new is still new when it is read, even below a story stored in between (round
-  3). The rule reads the order of the read that gave the poll's plan; a page dropped in a poll
-  whose usual read gave nothing is read once more when the usual read lists it, and judged by
-  that read's order and dates (round 5). Pages the cap drops stay marked. PR4a's notes
+  stories' dates); in a sitemap, last modified before the poll's backlog line. On a listing
+  page, stored stories that lead the list above a page that isn't stored, with a stored story
+  further down, are pinned (a sticky post), and the line is that story further down (final
+  round). A page a poll left for later (refused, failed in a way that passes, read while the
+  usual read gave nothing or while one of its sitemaps failed) while it was new is still new
+  when it is read, even below a story stored in between (rounds 3 and 5, final round). The rule
+  reads the order of the read that gave the poll's plan; a page dropped in a poll whose usual
+  read gave nothing (round 5), or one of whose sitemaps failed (final round), is read once more
+  when a complete usual read lists it, and judged by that read's order and dates. Pages the cap
+  drops stay marked. PR4a's notes
   suggested leaving them unmarked, but then every poll would fetch them again only to drop
   them again, up to 8 wasted fetches a poll on an undated site.
 - **`url_ok` applies under a link pattern too,** as the spec's raw-discovery rule says, but
@@ -285,7 +289,20 @@ need `**kwargs` and the tests that patch `fetch_html` in `generic_scrape`.
   With no section to go by (a root feed, `/auto`), a static section (`/about/`, `/pages/`) with
   a news section under it (`/about/news/<slug>`) is not static (round 5). A code word that ends
   a software name (`.js`, `.json`, `.css`, `.xml`) is a file's ending only at the very end of the
-  path, not before a `/` or under `.html` (round 4).
+  path, not before a `/` or under `.html` (round 4). A sitemap's entries aren't judged by the
+  2-to-5-letter ending rule either (final round): a sitemap lists pages, and main fetched every
+  entry (`.jhtml`, `.nsf`). A listing page's links keep the rule, as courlan read them on main.
+  On a listing page the feed's own section is lifted only when the page has no list without it
+  (final round), so a category page's subcategory links don't outvote its posts.
+- **Video and image sitemaps are read; a sitemap's name counts by its last word** (final round).
+  The spec skips media sitemaps, and PR10a classed video and image sitemaps as media. Their
+  entries are the pages that show the video or image, though, and Yoast names a `video` post
+  type's sitemap `video-sitemap.xml`. Only attachment sitemaps (`attachment`, `media`) are
+  skipped as media now. A name of several words counts by its last word, so a custom post
+  type's `media_release-sitemap.xml` or `product_update-sitemap.xml` is read, while
+  `post_tag-sitemap.xml` and `product_cat-sitemap.xml` are still taxonomies. main read every
+  sitemap; the spec's skip list (taxonomy, author, product, media) still applies to the
+  sitemaps that list archives, people, products or attachment pages.
 - **Article pages that fail in a way that passes are asked for again.** The first cut marked a
   page that timed out or answered 5xx, so a transient failure lost the story (review fix). Now
   only a page that was read (gone, not HTML, not an article, kept) is marked. A failed page is
@@ -970,6 +987,196 @@ and Open items above and below are corrected for them.
 - **`ruff check --select F,E9,B`** on the changed files: clean (`article_detect.py`,
   `feed_autodiscovery.py`, `generic_scrape.py` and the four test files).
 
+## Review fixes (final round)
+
+The sixth review's six findings: five regressions (against main, and the first one against round
+4 too) and one test gap. A previous fixer stopped at the spend limit partway; its WIP commit was
+reviewed and folded in here. Fixes 1, 4 and 6 and most of 2 and 3 are kept as it wrote them.
+Four of its choices were changed, because each kept or widened a rule that rejects what main
+read, or broke round 5: a refused robots.txt counted as a failed document, a sitemap name with
+no "sitemap" in it still judged by each of its words, "brand" added to the taxonomy words, and
+nine page endings added to a whitelist instead of narrowing the ending rule. As this round asked, each fix
+narrows a rule back toward main's behaviour rather than adding a special case. Each finding was
+reproduced first with the reviewers' probes. Each fix has a test that fails when the fix is
+reverted in place (Verification below). No finding was skipped; two of the reviewers' suggested
+mechanisms were not taken (in 3 and 4, with the reason).
+
+1. **A category page's subcategory links outvoted its posts** (minor; a regression against round
+   4, and against main when the site has a sitemap). Round 5 passed the page's own section to
+   `listing_links`, so on a feed at `/category/news/` the links to `/category/news/<child>/`
+   passed `url_ok` and, when there were more of them than posts, made the largest group. Every
+   candidate was then a category archive: rejected and marked, with the plan not empty, so the
+   feed stored nothing and reported nothing. `_page_links` now reads the listing with `url_ok`'s
+   rules on every segment first (round 4's read). It lifts the page's own section only when that
+   finds no group of 3 or more (round 5's read). The subcategory links never compete with the
+   posts, and `/about/media-centre/<slug>` still comes in. Test:
+   `test_a_category_pages_subcategory_links_do_not_outvote_its_posts` (10 posts against 12
+   child categories, and 4 against 6; every post stored on poll 1, no child category fetched).
+2. **One sitemap document failing for one poll lost a story** (minor; a regression against
+   main). Take a news sitemap that answers 503 while the post sitemap beside it loads. The read
+   was not empty, so round 5's fallback flag stayed off. An undated `og:type=website` story with
+   no news sitemap date was rejected and marked for good. Now:
+   - `discover_sitemap_entries(..., failures=)` collects every document of the crawl that
+     failed: a 5xx, a timeout or other network error, or a refused sitemap.
+   - A 404 or other 4xx is not collected (the document is gone), nor is a refused robots.txt
+     (see below).
+   - Every sitemap document is now fetched with `raise_for_status`, so its 5xx is seen. A 4xx or
+     5xx on any document but the input sitemap still reads as empty and the crawl moves on. Only
+     the input's own status fails the crawl, as before.
+   - `plan_candidates` sets `Plan.degraded` when the sitemap read gave the candidates and one of
+     its documents failed. `Plan.degraded` defaults to False, like `Plan.fallback`.
+   - `fetch` marks such a poll's pages `unvouched`, as it marks a fallback read's. Only a
+     complete poll (the usual read, with nothing failed) reads them once more, so a news
+     sitemap that keeps failing doesn't make every poll fetch the same pages again.
+
+   The WIP also collected a refused robots.txt. Such a refusal tends to last, so every poll of
+   that site would be degraded and round 5's fallback re-read would never run for it. A refused
+   robots.txt is read as no robots.txt again, as in round 5, and is not collected. Tests:
+   - `test_a_news_sitemap_that_fails_beside_a_post_sitemap_keeps_its_new_story` (robots.txt and
+     sitemap-index layouts, each with a 503 and a timeout);
+   - `test_a_news_sitemap_that_keeps_failing_does_not_reread_its_stories_each_poll`;
+   - `test_the_sitemap_crawl_reports_the_documents_that_failed`, which now includes the refused
+     robots.txt;
+   - a robots.txt axis (lists the sitemap, refused) on
+     `test_a_root_feed_whose_sitemap_fails_for_one_poll_does_not_drop_its_new_post`.
+
+   main stores the story on poll 1. This tree stores it on poll 2, the first poll whose
+   sitemaps all load, and asks for it twice.
+3. **Sitemaps of custom post types named with a media, product or user word were skipped**
+   (minor; a regression against main, which read every sitemap). Two changes to
+   `classify_sitemap`, both narrowing. Every word the old rule used is still one the new rule
+   may use, but it uses fewer, so it skips only sitemaps the old rule skipped:
+   - **A name of several words counts by its last word.** That covers three shapes:
+     - a WordPress type or taxonomy joined with `_`: `post_tag` reads as tag, `product_cat` as
+       cat, `media_release` as release, `product_update` as update, `user_story` as story;
+     - the whole name in front of "sitemap": Yoast's `<type>-sitemap.xml`,
+       `media-release-sitemap.xml`;
+     - a name, or the section folder a sitemap is filed under, with no "sitemap" in it:
+       `media-releases.xml`, `/media-centre/sitemap.xml`.
+
+     After "sitemap", each `-` part still counts, so WordPress core's
+     `wp-sitemap-<provider>-<subtype>-1` keeps its provider:
+     `wp-sitemap-taxonomies-region-1` is a taxonomy, `wp-sitemap-posts-product-1` products, and
+     `wp-sitemap-posts-media_release-1` posts.
+
+     The WIP counted each part of a name with no "sitemap" in it, so it still read
+     `/media-centre/sitemap.xml` as media. It also added "brand" to the taxonomy words, which
+     newly skipped a `brand-sitemap.xml` that main and round 5 read. Both are undone.
+     `product_brand-sitemap.xml` is now read as other: `score_page` rejects its `/brand/<x>/`
+     archives, one fetch each.
+   - **Video and image sitemaps are read.** Their `<loc>` is the page that shows the video or
+     image (Google's sitemap extensions), and Yoast names a `video` post type's sitemap
+     `video-sitemap.xml`; the reviewer's `video-sitemap.xml` feed read `[no list]` where main
+     stored 3. They now class as other, read after news and post sitemaps. The media class is
+     attachment sitemaps (`attachment`, `media`), whose entries are attachment pages.
+
+   Not taken: reading the skipped sitemaps as a last resort when the crawl finds nothing. It
+   would be a third read, and it could pre-empt the home page's fallback with attachment pages
+   or archives. With the two narrowings every case the reviewers tried is read. What is still
+   skipped (tag, category, topic, collection, author, user, product, shop, attachment) lists
+   archives, people, products or files, as the spec's skip list intends. Tests:
+   `test_a_sitemap_name_of_several_words_counts_by_its_last_word` (30 names) and
+   `test_a_custom_post_types_sitemap_is_read` (`media_release`, `product_update` and `video`;
+   root, section and `sitemap_url` feeds).
+4. **A sticky post at the top of a section's listing made every new undated post backlog**
+   (minor; a regression against main). `_backlog_rule`, on a listing page only: when stored
+   stories lead the list, a page that isn't stored follows them and a stored story comes
+   further down, the leading ones are pinned. The line is then the first stored story below the
+   first page that isn't stored. With no stored story further down, the leading ones stay the
+   line, as before. That is a listing after a restart, whose newest story is stored and the
+   pages it passed over are below it. A sitemap keeps "below any stored story is backlog",
+   whatever leads it.
+
+   Not taken: the reviewer's other suggestion, which is to make the line the first stored story
+   that starts a run of stored ones. Two sticky posts in a row start a run, so that rule reads
+   them as the line.
+
+   Tests:
+   - `test_a_pinned_post_above_new_posts_does_not_make_them_backlog` (one and two sticky posts,
+     three polls, one new post each, through the real fetch path);
+   - `test_stored_stories_pinned_at_the_top_of_a_listing_are_not_the_line` (with an old page
+     between two stored stories below the pinned one, which stays backlog);
+   - `test_a_listing_led_by_stored_posts_with_none_below_keeps_them_as_the_line`;
+   - `test_a_stored_story_at_the_top_of_a_sitemap_is_still_the_line`.
+
+   Round 5's root-feed fallback test used a sticky post to make the bad poll drop the new post.
+   The sticky post is now pinned, so the test uses a stored post that was edited this morning,
+   listed by update time above the new one (the update-time risk below).
+5. **A sitemap's pages with an ending this module doesn't know were read as files** (minor; a
+   regression against main). Examples are ATG's `.jhtml`, `.jspx`, `.shtm`, `.dhtml` and
+   Domino's `.nsf`. `url_ok(..., sitemap_entry=True)` doesn't apply the 2-to-5-letter ending rule
+   to a sitemap's entry. The file endings, camera file names and courlan still apply.
+   `_read_sitemap` passes it. main never filtered sitemap entries by their ending. A file that a
+   sitemap lists under an ending of its own is dropped by the page fetch's HTML check, at one
+   fetch, and then marked. A listing page's links keep the rule, as courlan's ending test read
+   them on main. So a section feed whose links end in `.jhtml` reads its section of the
+   sitemap, as its second read, as main read it. The WIP added nine endings to
+   `_ARTICLE_EXTENSIONS` instead; that list is back to round 3's. Tests:
+   - `test_url_ok_reads_a_sitemap_entrys_unknown_ending_as_a_page` (10 endings; the same URL as
+     a listing link is still rejected);
+   - `test_url_ok_keeps_its_other_rules_for_a_sitemap_entry`;
+   - `test_a_server_page_ending_is_an_article_page` (6 endings, root and section feeds, through
+     the real fetch path).
+6. **Round 5's fallback re-read had no test for a feed with a link pattern** (minor; test
+   only). The two fallback tests now run with and without `link_pattern="/blog/"`, for one bad
+   poll and for two (the root-feed one also with robots.txt refused). With two bad polls the
+   page must not be read again on the second. The code is unchanged.
+
+README's "Website feeds" and ARCHITECTURE.md's `_extracted_urls` and `_deferred_new` rows follow
+fixes 2 to 5. The Deviations, Risks and Open items are corrected for them.
+
+### Verification of the final-round fixes
+
+- **Reproduced first** with the reviewers' probes (one plugin instance per scenario through the
+  real fetch path; findings 1 to 5). Results at HEAD a395334 are the reviewers'. This tree's
+  results are below:
+  - Subcategories: p_subcat (4 posts, 6 child categories, a sitemap) stores the 4 posts on
+    poll 1 and fetches no child category; HEAD stored none. p_subcat2 (10 posts, 12 children)
+    gives `[10, 0, 0]`, the same as round 4; HEAD gave `[0, 0, 0]`.
+  - Partial sitemap failure: p_partial and p_partial_idx store the new story on poll 2 and ask
+    for it twice; HEAD never stored it, and main stored it on poll 1. p_partial_ok (no outage)
+    stores it on poll 1 and asks once.
+  - Custom post types: p_media stores the 3 releases on poll 1 in all its setups; HEAD read
+    `[no list]`. p_product stores 3 for `product_update-sitemap.xml`,
+    `wp-sitemap-posts-product_update-1.xml` and `video-sitemap.xml`, as main did.
+  - Sticky post: p_sticky stores one new post a poll, 3 in all, as main; HEAD stored none.
+  - Endings: p_ext and p_ext2 store the 3 stories on poll 1 for `.jhtml`, `.shtm`, `.dhtml`,
+    `.jspx` and `.nsf`, on a root feed and a `/news` feed; HEAD read `[no list]`.
+  - The control-fetch probe beside them (p_ctrl) gives the same results as HEAD.
+- **Revert in place.** A script applied each of 29 mutants to the worktree and ran the 10 PR10b
+  test files that cover this code. It required a failure, then restored the file byte for byte
+  (SHA-256 of the file, and of `git diff` before and after). All 29 were caught. The counts are
+  failing test cases:
+  - fix 1: round 5's lift on every read: 2; never lifting (round 4): 1.
+  - fix 2:
+    - `Plan.degraded` never set: 6; `unvouched` from the fallback only (HEAD): 5;
+    - degraded polls reading unvouched pages again: 1; a non-input 5xx not raised (HEAD): 4;
+    - not collected: a document's 5xx: 4, a network error: 3, a refused sitemap: 1, robots.txt's
+      5xx: 1;
+    - wrongly collected: robots.txt's refusal (the WIP's rule): 5, robots.txt's 404: 1.
+  - fix 3: HEAD's every-word rule: 18; the WIP's rule for a name with no "sitemap": 3; the first
+    word as the head: 25; video and image skipped (PR10a's words): 5; "brand" a taxonomy word
+    (the WIP's): 1; the words after "sitemap" read as one phrase: 4.
+  - fix 4: HEAD's rule: 3; pinning in sitemaps too: 1; pinned with nothing stored below (no
+    line): 10; the line at the last stored story below instead of the first: 1 (it survived the
+    first run, so the pinned test gained a page between two stored stories).
+  - fix 5: `sitemap_entry` ignored: 22; not passed by the sitemap read: 12; skipping every file
+    test: 4; skipping courlan too: 1.
+  - fix 6: `unvouched` left off for owner-configured feeds: 6, for link-pattern feeds: 6; round
+    4's rule: 18.
+- **Against HEAD a395334's code** (a scratch export with this round's tests): 65 cases fail
+  there. They are the new tests of fixes 1 to 5; the `sitemap_entry` cases fail on the new
+  argument. Fix 6's link-pattern cases pass there, as they should: the code was right and only
+  the test was missing. So do the robots.txt-refused cases, which guard round 5's rule against
+  the WIP's.
+- **PR10b test files** (the 12, `test_slice27_deferred_perf.py`, `test_feed_autodiscovery.py`
+  and `test_b1_b8_coverage_gaps.py`): 576 passed, 4 failed. The 4 are the DNS-only `/auto` route
+  tests in the baseline. Round 5 had 483 passed; this round adds 93 cases.
+- **Backend pytest** (database `popping_test_b`, worktree `PYTHONPATH`): **13 failed, 1582
+  passed**. The 13 are exactly the DNS-only baseline (`/root/popping-env/baseline.txt`).
+- **`ruff check --select F,E9,B`** on the changed files: clean (`article_detect.py`,
+  `feed_autodiscovery.py`, `generic_scrape.py` and the three test files).
+
 ## Risks and data-compatibility notes
 
 - **Some website feeds will pull fewer stories or show a new state.** This is the intended
@@ -987,6 +1194,11 @@ and Open items above and below are corrected for them.
   still uses the position rule for undated pages: a new undated page below a stored one that
   was just updated is dropped as backlog. The review asked to keep position for listing pages;
   a `sitemap_url` or a dated listing avoids it.
+- **Pinned stories on a listing** (final round) are told apart only by a stored story further
+  down. A sticky post above more new posts than the listing shows, with no stored story left on
+  it, is still the line, and those new posts, if undated, are backlog. After a restart, a page
+  passed over between the newest stored story and an older one is no longer backlog: it is read
+  once more, and comes in if it is an article within the undated cap.
 - **A sitemap with no `<lastmod>` and pages with no date** uses the listing page's position rule
   (round 2) on the sitemap's own order (round 3): a new undated page listed above every stored
   one comes in; one listed below any of them is dropped as backlog, whatever the stored stories'
@@ -1002,10 +1214,25 @@ and Open items above and below are corrected for them.
   read (round 5). Its pages are marked `unvouched`, which costs nothing while that lasts; if the
   usual read starts working, each of them is read once more (10 a poll at most), and those that
   weren't backlog when read wait in `_deferred_new` (1000 at most) until then.
-- **The section a feed reads isn't judged by `url_ok`'s segment words** (round 5): a section
-  feed at `/category/news` takes a subcategory listing such as `/category/news/local/` as a
-  candidate, and a `/products/` pattern its product pages; `score_page` alone rejects the ones
-  that aren't articles (one fetch each, then marked), where main stored all of them. The words
+- **A sitemap document that keeps failing** (a 5xx, a timeout or a refusal; final round)
+  leaves every poll's sitemap read degraded. Its pages are marked `unvouched` and read once more
+  only when every document loads again, so while a news sitemap is down for good its dates are
+  lost, as before this round, and a page that a fallback poll read is not read once more
+  either. A refused robots.txt doesn't count, and neither does a 404.
+- **More sitemaps and sitemap entries are read** (final round): video, image and custom-type
+  sitemaps (`media_release`, `product_brand`), and entries with an ending this module doesn't
+  know. Their entries join the newest-first order beside the posts'. Those that aren't articles
+  (an image sitemap's static pages, a brand's archives, a file under an unknown ending) cost one
+  fetch each before `score_page` or the HTML check drops them, and are then marked, as main
+  fetched them all.
+- **The section a feed reads isn't judged by `url_ok`'s segment words** (round 5): in its
+  section of the sitemap, and on its listing page when the page has no list without the lift
+  (final round), a section feed at `/category/news` takes a subcategory listing such as
+  `/category/news/local/` as a candidate, and a `/products/` pattern its product pages;
+  `score_page` alone rejects the ones that aren't articles (one fetch each, then marked), where
+  main stored all of them. A listing page whose posts sit under a static-named section and that
+  also has another list of 3 or more links elsewhere in its body reads that other list (round
+  4's read), as round 4 did. The words
   below the section are still judged (`/category/news/tag/parks/`, `/category/news/page/2/`). A
   static section with a news section under it is news on every feed (`/about/news/<slug>`); its
   other pages (`/about/team/<x>`) are still dropped.
@@ -1051,9 +1278,9 @@ and Open items above and below are corrected for them.
   generators that keep a slug's dots (Hugo, Eleventy, Jekyll: `/posts/whats-new-in-vue.js/`,
   `/2026/10/18/whats-new-in-vue.js.html`) are read. Any other ending of 2 to 5 letters that is
   no web page's or known CMS's (`/blog/announcing-socket.io`) is a file only at the very end of
-  the path and without the owner's link pattern, which brings such a feed in (rounds 2 and 3).
-  courlan's own ending test, which main's `url_ok` used for listing links, reads all of these as
-  files.
+  the path, without the owner's link pattern and outside a sitemap, which brings such a feed in
+  (rounds 2 and 3, final round). courlan's own ending test, which main's `url_ok` used for
+  listing links, reads all of these as files, so on a listing page they still are.
 - **The plan's frontend-only rollback command** still lacks `--no-deps` (PR9a's open item).
 
 ## Device checks

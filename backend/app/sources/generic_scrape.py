@@ -163,6 +163,10 @@ class Plan(NamedTuple):
     # The candidates came from the second read, because the first (the
     # usual read for the feed's kind of address) failed or found none.
     fallback: bool = False
+    # The sitemap read gave the candidates while one of its documents
+    # failed (a news sitemap's 503 beside a post sitemap that loads), so
+    # it may lack what that document says about them.
+    degraded: bool = False
 
 
 async def plan_candidates(
@@ -188,8 +192,9 @@ async def plan_candidates(
       second: an HTML sitemap page (``/sitemap/``) is a listing, and an
       XML one reads as no page at the cost of one fetch.
 
-    ``Plan.fallback`` says the second read gave the candidates (see
-    ``GenericScrapePlugin.fetch``).
+    ``Plan.fallback`` says the second read gave the candidates, and
+    ``Plan.degraded`` that the sitemap read gave them while one of its
+    documents failed (see ``GenericScrapePlugin.fetch``).
 
     The sitemap read takes the owner's ``sitemap_url`` as the sitemap
     whatever its address looks like, so a 404 there is the feed's own
@@ -217,6 +222,8 @@ async def plan_candidates(
     the Test preview), nothing raises and an empty plan comes back.
     """
     prefix = link_pattern or _section_prefix(url)
+    # The sitemap documents that failed (``discover_sitemap_entries``).
+    sitemap_failures: list[BaseException] = []
 
     async def read_sitemap() -> list[Candidate]:
         return await discover_sitemap_entries(
@@ -227,6 +234,7 @@ async def plan_candidates(
             raise_errors=raise_errors,
             input_is_sitemap=bool(sitemap_url),
             owner_pattern=bool(link_pattern),
+            failures=sitemap_failures,
         )
 
     async def read_page() -> list[Candidate]:
@@ -259,7 +267,8 @@ async def plan_candidates(
             raise NoArticleListError("no sitemap or listing page with articles")
         return Plan("", [], [])
     stored = await known_urls([c.url for c in found]) if known_urls is not None else set()
-    return Plan(mode, found, [c for c in found if c.url not in stored], fallback)
+    degraded = mode == "sitemap" and bool(sitemap_failures)
+    return Plan(mode, found, [c for c in found if c.url not in stored], fallback, degraded)
 
 
 def _too_old(item: dict) -> bool:
@@ -590,13 +599,20 @@ def _extract_links_from_html(html: str, page_url: str, pattern: str) -> list[str
 def _page_links(html: str, page_url: str, final_url: str, pattern: str | None) -> list[Candidate]:
     """The article links on a fetched listing page, as candidates. With
     a link pattern, the links under it (``_extract_links_from_html``),
-    undated and untitled, passing ``url_ok`` as the owner's choice;
-    without, the page's repeating list of posts (``listing_links``),
-    each with its card's title and date, passing ``url_ok``. Either way
-    ``url_ok`` judges a link below the feed's own section (the pattern,
-    else the page's section) by the segments below it. CPU-bound (an
-    HTML parse and a URL test per link), so ``_discover_page_links``
-    runs it in a thread."""
+    undated and untitled, passing ``url_ok`` as the owner's choice, which
+    judges a link below the pattern by the segments below it; without,
+    the page's repeating list of posts (``listing_links``), each with
+    its card's title and date, passing ``url_ok``. CPU-bound (an HTML
+    parse and a URL test per link), so ``_discover_page_links`` runs it
+    in a thread.
+
+    The listing is read with ``url_ok``'s rules on every segment first.
+    Only when that finds no list is it read again with the page's own
+    section lifted (``url_ok``'s ``section``): stories filed under a
+    section that reads as static (``/about/media-centre/<slug>``) need
+    it, while a category page's links to its subcategories
+    (``/category/news/<child>/``) would pass with it too, and can
+    outnumber its posts."""
     if pattern:
         return [
             Candidate(link, None, None)
@@ -606,11 +622,12 @@ def _page_links(html: str, page_url: str, final_url: str, pattern: str | None) -
     # Resolve against where the page ended up (``/news`` redirecting to
     # ``/news/`` changes what a relative link means), unless it
     # redirected off the site.
-    return listing_links(
-        html,
-        final_url if same_site(final_url, page_url) else page_url,
-        section=_section_prefix(page_url),
-    )
+    base = final_url if same_site(final_url, page_url) else page_url
+    links = listing_links(html, base)
+    section = _section_prefix(page_url)
+    if not links and section:
+        links = listing_links(html, base, section=section)
+    return links
 
 
 async def _discover_page_links(
@@ -658,7 +675,8 @@ class _Read(NamedTuple):
     # page that was gone, wasn't HTML, kept failing or refused everyone.
     served: bool = False
     # Read in a poll whose usual read gave nothing, on the other read's
-    # weaker evidence (see ``GenericScrapePlugin.fetch``).
+    # weaker evidence, or whose sitemap read had a document fail (see
+    # ``GenericScrapePlugin.fetch``).
     unvouched: bool = False
 
 
@@ -669,7 +687,12 @@ def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[s
 
     - A listing page (``plan.mode == "page"``) is in publication order,
       newest first, so a page listed below a stored story is older than
-      it: backlog.
+      it: backlog. Except for the stories pinned at its top (a sticky or
+      featured post, stored long ago): when stored stories lead the list
+      and a story that isn't stored follows them, with a stored story
+      further down, the leading ones are pinned, and the line is the
+      first stored story below them. With no stored story further down,
+      the leading ones are the line, as for any listing.
     - A sitemap is ordered by ``<lastmod>``, which moves a stored story
       up whenever it is edited, so that order says nothing about age. A
       page last modified before ``backlog_before`` (the line
@@ -687,7 +710,14 @@ def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[s
     # Where the site listed each candidate: a sitemap entry's place, else
     # its place in the list (a listing page's cards are in page order).
     place = {c.url: i if c.place is None else c.place for i, c in enumerate(plan.candidates)}
-    first_stored = min((place[c.url] for c in plan.candidates if c.url not in fresh), default=None)
+    stored = sorted(place[c.url] for c in plan.candidates if c.url not in fresh)
+    first_stored = stored[0] if stored else None
+    first_fresh = min((place[c.url] for c in plan.fresh), default=None)
+    if plan.mode == "page" and stored and first_fresh is not None and stored[0] < first_fresh:
+        # Stored stories lead the listing: pinned, when one is stored below.
+        below = [p for p in stored if p > first_fresh]
+        if below:
+            first_stored = below[0]
 
     def backlog(url: str) -> bool:
         changed = modified.get(url)
@@ -768,9 +798,8 @@ class GenericScrapePlugin(SourcePlugin):
         # that passes (see ``_page_failed``); bounded FIFO.
         self._page_failures: "OrderedDict[str, int]" = OrderedDict()
         # Pages a poll left for a later one (refused, failed in a way that
-        # passes, or read while the usual read gave nothing) while they
-        # weren't backlog. Their next read keeps that verdict (see
-        # ``fetch``); bounded FIFO.
+        # passes, or read unvouched) while they weren't backlog. Their
+        # next read keeps that verdict (see ``fetch``); bounded FIFO.
         self._deferred_new: "OrderedDict[str, None]" = OrderedDict()
 
     def _mark_extracted(self, url: str, *, served: bool = False, unvouched: bool = False) -> None:
@@ -780,8 +809,8 @@ class GenericScrapePlugin(SourcePlugin):
 
         ``served``: the site answered with a page (``_Read.served``).
         ``unvouched``: the page was read in a poll whose usual read gave
-        nothing (see ``fetch``), so ``_seen`` lets a poll whose usual
-        read lists it read it once more.
+        nothing or had a sitemap fail (see ``fetch``), so ``_seen`` lets a
+        poll whose usual read lists it, complete, read it once more.
         """
         # ``setdefault`` would also work but ``__setitem__`` is faster
         # and we don't need the existing-value semantics.
@@ -795,7 +824,7 @@ class GenericScrapePlugin(SourcePlugin):
     def _seen(self, url: str, usual: bool) -> bool:
         """Whether this poll skips ``url`` as already read: it is marked,
         unless it was marked ``unvouched`` and this poll's candidates
-        came from the feed's usual read (``usual``)."""
+        came from the feed's usual read with nothing failed (``usual``)."""
         if url not in self._extracted_urls:
             return False
         return not (usual and self._extracted_urls[url].unvouched)
@@ -869,24 +898,33 @@ class GenericScrapePlugin(SourcePlugin):
         # other one (``Plan.fallback``), which judges a page on other
         # evidence: a listing page's links carry no news sitemap date (nor
         # a ``sitemap_url``'s word), a sitemap's entries no listing card's
-        # date, and the backlog rule reads another order. So each page it
-        # reads is marked as read on that evidence (``unvouched``), and a
-        # later poll whose usual read lists it reads it once more: one bad
-        # poll mustn't lose a page.
-        unvouched = plan.fallback
-        if unvouched and self.sitemap_url:
+        # date, and the backlog rule reads another order. A sitemap read
+        # with one document failed (``Plan.degraded``: the news sitemap
+        # down, the post sitemap up) lacks that document's evidence too.
+        # So each page such a poll reads is marked as read on that
+        # evidence (``unvouched``), and a later poll whose usual read
+        # lists it, complete, reads it once more: one bad poll mustn't
+        # lose a page.
+        complete = not (plan.fallback or plan.degraded)
+        unvouched = not complete
+        if plan.fallback and self.sitemap_url:
             logger.info(
                 "generic_scrape: %s: its sitemap_url %s gave no pages; read %s instead",
                 self.name, self.sitemap_url, self.url,
             )
-        elif unvouched:
+        elif plan.fallback:
             logger.debug(
                 "generic_scrape: %s: its usual read gave no pages; read the %s instead",
                 self.name, plan.mode,
             )
+        elif plan.degraded:
+            logger.debug(
+                "generic_scrape: %s: a sitemap failed; its pages are read again once all load",
+                self.name,
+            )
         batch: list[Candidate] = []
         for candidate in plan.fresh:
-            if self._seen(candidate.url, not plan.fallback):
+            if self._seen(candidate.url, complete):
                 continue
             if len(batch) >= _MAX_NEW_PER_POLL:
                 # Leave the rest for the next poll — see
@@ -957,8 +995,8 @@ class GenericScrapePlugin(SourcePlugin):
             if result is not None and not _too_old(result):
                 items.append(result)
         # The pages this poll leaves for a later one (refused, failed in a
-        # way that passes, or read while the usual read gave nothing)
-        # while they are new stay new until they are read for good.
+        # way that passes, or read unvouched) while they are new stay new
+        # until they are read for good.
         for candidate in batch:
             read = self._extracted_urls.get(candidate.url)
             if (read is None or read.unvouched) and not backlog(candidate.url):
@@ -1047,8 +1085,8 @@ class GenericScrapePlugin(SourcePlugin):
         no publication date.
 
         A page in ``new_before`` was left for this poll by an earlier one
-        (refused, failed in a way that passes, or read while the usual
-        read gave nothing) while it wasn't backlog, so it isn't now: it
+        (refused, failed in a way that passes, or read unvouched: see
+        ``fetch``) while it wasn't backlog, so it isn't now: it
         would have come in then, before the stories stored since.
 
         Every page dropped here stays marked extracted: it was read and

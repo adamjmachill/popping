@@ -219,6 +219,7 @@ async def discover_sitemap_entries(
     raise_errors: bool = False,
     input_is_sitemap: bool = False,
     owner_pattern: bool = False,
+    failures: list[BaseException] | None = None,
 ) -> list[Candidate]:
     """Return up to ``limit`` article candidates from ``page_url``'s
     sitemap, newest first, as ``Candidate(url, published, title,
@@ -238,11 +239,20 @@ async def discover_sitemap_entries(
     usual sitemap paths are tried. ``owner_pattern``: ``path_prefix`` is
     the owner's ``link_pattern`` (``url_ok``'s ``owner_pattern``).
 
+    ``failures``: when given, each document of the crawl that failed is
+    added to it (refused, a 5xx, a timeout or another network error;
+    not a 404 or another 4xx, which says the document is gone, nor a
+    refused robots.txt, which is read as none), whether or not the crawl
+    found pages. A crawl that found pages while one of its documents
+    failed may have missed what that document says about them (a news
+    sitemap's publication dates), so the plugin reads them once more
+    when every document loads (``Plan.degraded``).
+
     Only entries that could be articles are kept
     (``article_detect.url_ok``), and only the sitemaps worth reading
     are fetched, best first (``article_detect.order_sitemaps``: news,
-    then posts; never tag, author, product or media sitemaps, and a page
-    sitemap only when there is nothing else). ``path_prefix`` (e.g.
+    then posts; never tag, author, product or attachment sitemaps, and a
+    page sitemap only when there is nothing else). ``path_prefix`` (e.g.
     ``/news/``) keeps only URLs under that path, so a section of a large
     site doesn't get buried by the rest of its sitemap. ``headers`` are
     sent with every request (a feed's ``custom_headers``).
@@ -280,6 +290,7 @@ async def discover_sitemap_entries(
                 raise_errors=raise_errors,
                 input_is_sitemap=input_is_sitemap,
                 owner_pattern=owner_pattern,
+                failures=failures,
             ),
             _TRAFILATURA_BUDGET,
         )
@@ -399,7 +410,7 @@ def _read_sitemap(
     """Parse one sitemap document and keep the pages that could be
     articles on ``site``: under ``path_prefix`` when there is one, and
     passing ``url_ok`` below it (``section``; as the owner's pattern
-    when ``owner_pattern``).
+    when ``owner_pattern``; as a sitemap's entry, ``sitemap_entry``).
     At most ``room`` pages. Returns ``(pages, nested sitemaps, listed)``,
     ``listed`` False when the document named no page or sitemap at all,
     before any filter (an HTML page, an empty urlset). Pure and
@@ -412,7 +423,9 @@ def _read_sitemap(
             break
         if path_prefix and not _under_prefix(entry[0], path_prefix):
             continue
-        if url_ok(entry[0], site, owner_pattern=owner_pattern, section=path_prefix):
+        if url_ok(
+            entry[0], site, owner_pattern=owner_pattern, section=path_prefix, sitemap_entry=True
+        ):
             pages.append(entry)
     return pages, nested, bool(found or nested)
 
@@ -481,6 +494,7 @@ async def _crawl_sitemaps(
     raise_errors: bool = False,
     input_is_sitemap: bool = False,
     owner_pattern: bool = False,
+    failures: list[BaseException] | None = None,
 ) -> list[Candidate]:
     """Find article candidates for ``page_url`` from its sitemap(s),
     using only SSRF-guarded fetches. ``page_url`` may be a sitemap
@@ -507,6 +521,11 @@ async def _crawl_sitemaps(
     - a network error, when a document couldn't be fetched at all.
 
     Otherwise it returns ``[]``: the site has no sitemap with articles.
+
+    ``failures`` collects every document that failed, robots.txt
+    included unless it was refused (see ``discover_sitemap_entries``). A
+    5xx on a document other than the input reads as empty, as before; it
+    is only collected.
     """
     parsed = urlparse(page_url)
     host = (parsed.hostname or "").lower()
@@ -515,6 +534,8 @@ async def _crawl_sitemaps(
     own_failure: BaseException | None = None
     refused: list[FetchRefusedError] = []
     network: list[BaseException] = []
+    # Every document that failed (``failures``).
+    failed: list[BaseException] = []
 
     async def site_sitemaps() -> list[str]:
         """The site's sitemaps: robots.txt ``Sitemap:`` lines, else the
@@ -522,14 +543,24 @@ async def _crawl_sitemaps(
         robots = ""
         try:
             robots = await fetch_html_checked(
-                f"{origin}/robots.txt", custom_headers=headers, content_types=None
+                f"{origin}/robots.txt",
+                custom_headers=headers,
+                content_types=None,
+                raise_for_status=True,
             ) or ""
         except FetchRefusedError:
             # Read as no robots.txt: the guessed paths below still run,
-            # and a refusal counts only if they are refused too.
+            # and a refusal counts only if they are refused too. Nor is
+            # it a failed document (``failures``): a refusal of robots.txt
+            # tends to last, and would leave every poll's read degraded.
             pass
+        except httpx.HTTPStatusError as exc:
+            # A 404 is routine: no robots.txt.
+            if exc.response.status_code >= 500:
+                failed.append(exc)
         except NETWORK_ERRORS as exc:
             network.append(exc)
+            failed.append(exc)
         listed = [
             line.split(":", 1)[1].strip()
             for line in robots.splitlines()
@@ -562,21 +593,26 @@ async def _crawl_sitemaps(
                 url,
                 custom_headers=headers,
                 content_types=None,
-                raise_for_status=url == input_doc,
+                raise_for_status=True,
             )
         except FetchRefusedError as exc:
             refused.append(exc)
+            failed.append(exc)
             if url == input_doc:
                 own_failure = exc
             continue
         except httpx.HTTPStatusError as exc:
-            # Only the input sitemap raises for a status: it is the
-            # user's own address. Any other document that 404s reads as
-            # empty, and the crawl moves on.
-            own_failure = exc
+            # A status fails the crawl only on the input sitemap: it is
+            # the user's own address. Any other document that 404s reads
+            # as empty, and the crawl moves on; a 5xx too, but it failed.
+            if url == input_doc:
+                own_failure = exc
+            if exc.response.status_code >= 500:
+                failed.append(exc)
             continue
         except NETWORK_ERRORS as exc:
             network.append(exc)
+            failed.append(exc)
             if url == input_doc:
                 own_failure = exc
             continue
@@ -609,6 +645,8 @@ async def _crawl_sitemaps(
         # never the page or tag sitemaps beside them).
         queue.extend(order_sitemaps(_newest_first(nested)))
 
+    if failures is not None:
+        failures.extend(failed)
     if not pages and raise_errors:
         if own_failure is not None:
             raise own_failure

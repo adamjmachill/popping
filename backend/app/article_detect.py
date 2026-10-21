@@ -240,7 +240,8 @@ _ARTICLE_EXTENSIONS = frozenset({"ece", "cms", "ghtml", "page", "jsf", "cfml"})
 # above (``.gpx``, ``.kmz``, ``.rtf``, ``.wmv``), as courlan's own
 # ending test reads the end of a path. Not at the end of a path that
 # ends in ``/`` (``/blog/moving-to-fly.io/`` has no ending, for courlan
-# too), and not under the owner's link pattern (see ``url_ok``).
+# too), not under the owner's link pattern, and not in a sitemap (see
+# ``url_ok``).
 _LETTERS_ENDING_RE = re.compile(r"[a-z]{2,5}")
 # A camera's file name used as the page name (WordPress attachment
 # pages: ``/img_1234/``, ``/IMG-1234``).
@@ -364,7 +365,12 @@ def _own_segments(path: str, section: str | None) -> int:
 
 
 def url_ok(
-    url: str, site: str, *, owner_pattern: bool = False, section: str | None = None
+    url: str,
+    site: str,
+    *,
+    owner_pattern: bool = False,
+    section: str | None = None,
+    sitemap_entry: bool = False,
 ) -> bool:
     """Cheap test of whether ``url`` could be an article on ``site``
     (the source's URL or host). Same-site http(s) URLs only.
@@ -420,6 +426,15 @@ def url_ok(
     ``/about/news/<slug>`` and ``/shop/journal/<slug>`` are candidates
     of a feed that reads them. The page's own name, date archives, the
     file endings and courlan are judged as for any URL.
+
+    ``sitemap_entry``: the URL is a sitemap's entry. A sitemap lists a
+    site's pages, and main fetched every entry, so an ending this module
+    doesn't know is a page's there (ATG's ``.jhtml``, ``.jspx``,
+    ``.shtm``, Domino's ``.nsf``): the 2-to-5-letter ending rule doesn't
+    apply, while the file endings (as read above) still do. A file the
+    sitemap lists under an ending of its own is dropped by the page
+    fetch's HTML check, once. A listing page's links keep the rule, as
+    courlan's ending test read them on main.
     """
     try:
         parts = urlsplit(url.strip())
@@ -444,7 +459,11 @@ def url_ok(
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
     page = segments[-1] if segments else ""
-    if _is_file(page, at_end=not parts.path.endswith("/"), any_ending=not owner_pattern):
+    if _is_file(
+        page,
+        at_end=not parts.path.endswith("/"),
+        any_ending=not (owner_pattern or sitemap_entry),
+    ):
         return False
     # Blogspot's date archives (/2026_10_01_archive.html).
     if page.endswith("_archive.html"):
@@ -480,16 +499,17 @@ SITEMAP_PRODUCT = "product"
 SITEMAP_MEDIA = "media"
 SITEMAP_OTHER = "other"
 
-# Never read: their entries are listings, people, products or files.
+# Never read: their entries are listings, people, products or files
+# (attachment pages). A video or image sitemap is read: its ``<loc>`` is
+# the page that shows the video or image (Google's sitemap extensions),
+# and Yoast names a ``video`` post type's sitemap ``video-sitemap.xml``.
 SKIPPED_SITEMAPS = frozenset({
     SITEMAP_TAXONOMY, SITEMAP_AUTHOR, SITEMAP_PRODUCT, SITEMAP_MEDIA,
 })
 
-# Whole tokens of a sitemap's file name. Checked in this order, so the
-# subtype wins over a broader word next to it: WordPress core's
-# ``wp-sitemap-posts-page-1.xml`` is pages, Yoast's
-# ``post_tag-sitemap.xml`` is tags and ``product_cat-sitemap.xml`` is
-# product categories, not posts or products.
+# Whole words of a sitemap's file name (``_sitemap_tokens``). Checked
+# in this order, so the subtype wins over a broader word next to it:
+# WordPress core's ``wp-sitemap-posts-page-1.xml`` is pages, not posts.
 _SITEMAP_TOKENS: tuple[tuple[str, frozenset[str]], ...] = (
     (SITEMAP_TAXONOMY, frozenset({
         "tag", "tags", "category", "categories", "cat", "taxonomy",
@@ -497,9 +517,7 @@ _SITEMAP_TOKENS: tuple[tuple[str, frozenset[str]], ...] = (
     })),
     (SITEMAP_AUTHOR, frozenset({"author", "authors", "user", "users"})),
     (SITEMAP_PRODUCT, frozenset({"product", "products", "shop"})),
-    (SITEMAP_MEDIA, frozenset({
-        "attachment", "attachments", "image", "images", "video", "videos", "media",
-    })),
+    (SITEMAP_MEDIA, frozenset({"attachment", "attachments", "media"})),
     (SITEMAP_PAGE, frozenset({"page", "pages"})),
     (SITEMAP_NEWS, frozenset({"news", "googlenews"})),
     (SITEMAP_POST, frozenset({
@@ -509,22 +527,53 @@ _SITEMAP_TOKENS: tuple[tuple[str, frozenset[str]], ...] = (
 
 _SITEMAP_EXT_RE = re.compile(r"\.(?:xml|txt)(?:\.gz)?$|\.gz$")
 _TOKEN_SPLIT_RE = re.compile(r"[-_.]+")
+_PART_SPLIT_RE = re.compile(r"[-.]+")
+_SITEMAP_WORD_RE = re.compile(r"sitemaps?")
 # Trailing page numbers: post-sitemap2, sitemap_products_1.
 _TOKEN_DIGITS_RE = re.compile(r"\d+$")
 _NOISE_TOKENS = frozenset({"sitemap", "sitemaps", "index", "wp", "xml", ""})
 
 
+def _head_word(phrase: str) -> str | None:
+    """The last word of ``phrase``, without page numbers, "index" and
+    the like: the word the others only qualify."""
+    words = [
+        word
+        for word in (_TOKEN_DIGITS_RE.sub("", raw) for raw in _TOKEN_SPLIT_RE.split(phrase))
+        if word not in _NOISE_TOKENS
+    ]
+    return words[-1] if words else None
+
+
 def _sitemap_tokens(name: str) -> list[str]:
-    """Whole words of a sitemap name, without "sitemap" and page
-    numbers. "sitemap" glued to a word is split off, so
-    ``newssitemap1`` and ``sitemapnews`` both give ``news``; a word is
-    never searched for inside another (``heritage`` holds no tag)."""
-    tokens = []
-    for raw in _TOKEN_SPLIT_RE.split(name.lower()):
-        for token in _TOKEN_DIGITS_RE.sub("", raw).split("sitemap"):
-            token = _TOKEN_DIGITS_RE.sub("", token)
-            if token not in _NOISE_TOKENS:
-                tokens.append(token)
+    """The words of a sitemap name that say what it lists, without
+    "sitemap" and page numbers.
+
+    A name of several words counts by its last word, which the others
+    only qualify: a WordPress type or taxonomy joined with "_"
+    (``post_tag``, ``product_cat``, ``media_release``,
+    ``product_update``), the whole name in front of "sitemap" (Yoast's
+    and Rank Math's ``<type>-sitemap.xml``, Wix's
+    ``blog-posts-sitemap.xml``, a ``media-release-sitemap.xml``), and a
+    name with no "sitemap" in it (a section's ``/media-centre/sitemap.xml``,
+    a ``media-releases.xml``). So ``media_release-sitemap.xml`` lists
+    releases, not media, and ``post_tag-sitemap.xml`` tags. After
+    "sitemap", each part between "-" counts (WordPress core's
+    ``wp-sitemap-<provider>-<subtype>-1``: ``wp-sitemap-posts-page-1``,
+    ``wp-sitemap-taxonomies-region-1``; ``sitemap-pt-post-2026-10``).
+    "sitemap" glued to a word is split off, so ``newssitemap1`` and
+    ``sitemapnews`` both give ``news``; a word is never searched for
+    inside another (``heritage`` holds no tag)."""
+    lead, *rest = _SITEMAP_WORD_RE.split(name.lower(), maxsplit=1)
+    head = _head_word(lead)
+    tokens = [head] if head else []
+    if not rest:
+        return tokens
+    for part in _PART_SPLIT_RE.split(rest[0]):
+        for piece in _SITEMAP_WORD_RE.split(part):
+            head = _head_word(piece)
+            if head:
+                tokens.append(head)
     return tokens
 
 
@@ -580,8 +629,8 @@ _SITEMAP_ORDER = {SITEMAP_NEWS: 0, SITEMAP_POST: 1, SITEMAP_OTHER: 2, SITEMAP_PA
 def order_sitemaps(urls: Iterable[str]) -> list[str]:
     """The sitemaps worth reading, best first: news, then post (post,
     article and blog), then unknown ones, keeping the given order
-    within each class. Taxonomy, author, product and media sitemaps
-    are dropped.
+    within each class. Taxonomy, author, product and media (attachment)
+    sitemaps are dropped.
 
     A page sitemap is dropped whenever a news or post sitemap exists.
     Page sitemaps are where About and Contact come from, and because

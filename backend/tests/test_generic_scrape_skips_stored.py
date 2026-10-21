@@ -202,6 +202,40 @@ async def test_undated_pages_below_a_stored_story_on_a_listing_page_are_backlog(
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
+async def test_stored_stories_pinned_at_the_top_of_a_listing_are_not_the_line(monkeypatch):
+    """A listing's sticky or featured posts sit at its top, stored long
+    ago, above the newest ones. When stored stories lead the list, a page
+    that isn't stored follows them and a stored story comes further
+    down, the leading ones are pinned: the line is the stored story below
+    them. The new page above it comes in; the old ones below it are
+    backlog, also one between it and a stored story further down."""
+    pinned, new, stored, old, stored2, older = (
+        f"{SITE}/news/{s}" for s in ("pinned", "new", "stored", "old", "stored2", "older")
+    )
+    _serve(monkeypatch, [pinned, new, stored, old, stored2, older], dated=False, listing=True)
+    plugin = GenericScrapePlugin(_row(url=LISTING))
+    items = await plugin.fetch(known_urls=_known({pinned, stored, stored2}), max_undated=5)
+    assert [i["url"] for i in items] == [new]
+    assert {old, older} <= set(plugin._extracted_urls)
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
+async def test_a_stored_story_at_the_top_of_a_sitemap_is_still_the_line(monkeypatch):
+    """Pinning is a listing page's: a sitemap with no ``<lastmod>`` keeps
+    "below any stored story is backlog", whatever leads it."""
+    top, between, stored, old = (f"{SITE}/{s}" for s in ("top", "between", "stored", "old"))
+    _serve(monkeypatch, [top, between, stored, old], dated=False)
+    plugin = GenericScrapePlugin(_row())
+    items = await plugin.fetch(
+        known_urls=_known({top, stored}), max_undated=5, backlog_before=NOW - dt.timedelta(days=2)
+    )
+    assert items == []
+    assert {between, old} <= set(plugin._extracted_urls)
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
 async def test_an_edited_story_at_the_top_of_a_sitemap_does_not_bury_a_new_page(monkeypatch):
     """A sitemap is in ``<lastmod>`` order, and editing a stored story
     moves it to the top. The new undated page below it is no older for

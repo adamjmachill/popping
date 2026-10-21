@@ -1150,55 +1150,329 @@ async def test_a_root_feed_whose_news_sitemap_fails_for_one_poll_keeps_its_new_s
     assert site.requests.count(new) == 2
 
 
-async def test_a_root_feed_whose_sitemap_fails_for_one_poll_does_not_drop_its_new_post(site):
+@pytest.mark.parametrize("robots", ["lists the sitemap", "refused"])
+@pytest.mark.parametrize("bad_polls", [1, 2])
+@pytest.mark.parametrize("link_pattern", [None, "/blog/"])
+async def test_a_root_feed_whose_sitemap_fails_for_one_poll_does_not_drop_its_new_post(
+    site, link_pattern, bad_polls, robots
+):
     """Undated posts, a sitemap with no ``<lastmod>`` (newest first), and
-    a home page that keeps a sticky post at the top of its list. The
-    sitemap answers 503 for one poll while a new post is up. On the home
-    page the new post is listed below the sticky one, which is stored, so
-    that poll drops it as backlog. It was judged by the home page's order,
-    not the sitemap's, so when the sitemap is back the post is read once
-    more, listed above every stored post, and comes in. main stored it
-    then too."""
-    sticky, second, new = (
+    a home page that lists its posts by when they were last updated, so
+    a stored post edited this morning is listed above the new one. The
+    sitemap answers 503 for a poll or two while a new post is up. On the
+    home page the new post is listed below the edited one, which is
+    stored, so those polls drop it as backlog. It was judged by the home
+    page's order, not the sitemap's, so when the sitemap is back the
+    post is read once more (and not on each bad poll), listed above
+    every stored post, and comes in. main stored it then too, with a
+    link pattern or without. A site that refuses its robots.txt (the
+    guessed ``/sitemap.xml`` is read) is no different: that refusal is
+    read as no robots.txt, not as a sitemap that failed, so the poll
+    whose sitemap is back is complete."""
+    edited, new, older = (
         f"{SITE}/blog/{slug}/"
         for slug in (
-            "welcome-to-the-trail-blog", "second-post-on-the-rivers", "new-post-on-the-markets"
+            "second-post-on-the-rivers", "new-post-on-the-markets", "first-post-on-the-trails"
         )
     )
-    for n, post in enumerate((sticky, second, new)):
+    for n, post in enumerate((edited, new, older)):
         site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
-    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
-    site.routes[f"{SITE}/sitemap.xml"] = _once(503, _xml(_urlset(new, second, sticky)))
-    site.routes[f"{SITE}/"] = _list_of(sticky, new, second)
-    stored = _Stored(sticky, second)
-    plugin = _plugin(f"{SITE}/")
-    assert await stored.poll(plugin) == []
+    site.routes[f"{SITE}/robots.txt"] = (
+        403 if robots == "refused" else _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
+    )
+    site.routes[f"{SITE}/sitemap.xml"] = _once(503, _xml(_urlset(new, edited, older)), times=bad_polls)
+    site.routes[f"{SITE}/"] = _list_of(edited, new, older)
+    stored = _Stored(edited)
+    plugin = _plugin(f"{SITE}/", link_pattern=link_pattern)
+    for _ in range(bad_polls):
+        assert await stored.poll(plugin) == []
     assert new in plugin._extracted_urls
+    assert site.requests.count(new) == 1
     assert await stored.poll(plugin) == [new]
     assert await stored.poll(plugin) == []
     assert site.requests.count(new) == 2
 
 
-async def test_a_section_feed_whose_listing_fails_for_one_poll_does_not_drop_its_new_post(site):
-    """The mirror case: a section feed's listing page answers 503 for one
-    poll while a new post is up, so its section of the sitemap is read.
-    That sitemap lists oldest first with no ``<lastmod>``, so the new
-    (undated) post is listed below the stored ones: backlog. When the
+@pytest.mark.parametrize("bad_polls", [1, 2])
+@pytest.mark.parametrize("link_pattern", [None, "/blog/"])
+async def test_a_section_feed_whose_listing_fails_for_one_poll_does_not_drop_its_new_post(
+    site, link_pattern, bad_polls
+):
+    """The mirror case: a section feed's listing page answers 503 for a
+    poll or two while a new post is up, so its section of the sitemap is
+    read. That sitemap lists oldest first with no ``<lastmod>``, so the
+    new (undated) post is listed below the stored ones: backlog. When the
     listing page is back, it lists the post first, and the post comes in.
-    main, which read the sitemap, stored it."""
+    main, which read the sitemap, stored it, with a link pattern or
+    without."""
     first, second, third, new = (f"{SITE}/blog/post-on-the-trails-{n}/" for n in range(4))
     for n, post in enumerate((first, second, third, new)):
         site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
     site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
     site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(first, second, third, new))
-    site.routes[f"{SITE}/blog"] = _once(503, _list_of(new, third, second, first))
+    site.routes[f"{SITE}/blog"] = _once(503, _list_of(new, third, second, first), times=bad_polls)
     stored = _Stored(first, second, third)
-    plugin = _plugin(f"{SITE}/blog")
-    assert await stored.poll(plugin) == []
+    plugin = _plugin(f"{SITE}/blog", link_pattern=link_pattern)
+    for _ in range(bad_polls):
+        assert await stored.poll(plugin) == []
     assert new in plugin._extracted_urls
+    assert site.requests.count(new) == 1
     assert await stored.poll(plugin) == [new]
     assert await stored.poll(plugin) == []
     assert site.requests.count(new) == 2
+
+
+@pytest.mark.parametrize("failure", [503, httpx.ReadTimeout])
+@pytest.mark.parametrize("layout", ["robots.txt", "sitemap index"])
+async def test_a_news_sitemap_that_fails_beside_a_post_sitemap_keeps_its_new_story(
+    site, layout, failure
+):
+    """The Yoast and News SEO layout: a news sitemap beside a post
+    sitemap, listed in robots.txt or in a sitemap index. Only the news
+    sitemap dates the stories (og:type=website pages with no date). It
+    fails for one poll while a new story is up, and the post sitemap
+    loads, so the poll's read is the usual one but lacks the news
+    sitemap's dates: the new story is rejected. That read had a document
+    fail, so the next complete read reads the story once more, and it
+    comes in. main stored it on the first poll."""
+    older, old, new = (
+        f"{SITE}/news/{slug}/"
+        for slug in (
+            "council-approves-river-trail", "harvest-market-returns", "library-extends-hours"
+        )
+    )
+    for n, story in enumerate((older, old, new)):
+        site.routes[story] = _undated_page(f"Story {n} from the council", "website")
+    news, posts = f"{SITE}/news-sitemap.xml", f"{SITE}/post-sitemap.xml"
+    if layout == "robots.txt":
+        site.routes[f"{SITE}/robots.txt"] = _html(
+            f"User-agent: *\nSitemap: {news}\nSitemap: {posts}\n"
+        )
+    else:
+        site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap_index.xml\n")
+        site.routes[f"{SITE}/sitemap_index.xml"] = _xml(_index(posts, news))
+    site.routes[news] = failure
+    site.routes[posts] = _xml(_urlset(new, old, older))
+    site.routes[f"{SITE}/"] = _list_of(new, old, older)
+    stored = _Stored(older, old)
+    plugin = _plugin(f"{SITE}/")
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 1
+    site.routes[news] = _news_sitemap((new, "2026-10-16"), (old, "2026-10-14"), (older, "2026-10-12"))
+    assert await stored.poll(plugin) == [new]
+    assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 2
+    # The home page was never read: the sitemaps found the stories.
+    assert site.asked("/") == 0
+
+
+async def test_a_news_sitemap_that_keeps_failing_does_not_reread_its_stories_each_poll(site):
+    """While the news sitemap keeps failing, each poll's read lacks its
+    dates, so a story such a poll read is not read again until a poll
+    whose sitemaps all load."""
+    old, new = (f"{SITE}/news/{slug}/" for slug in ("harvest-market-returns", "library-extends-hours"))
+    for n, story in enumerate((old, new)):
+        site.routes[story] = _undated_page(f"Story {n} from the council", "website")
+    news, posts = f"{SITE}/news-sitemap.xml", f"{SITE}/post-sitemap.xml"
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {news}\nSitemap: {posts}\n")
+    site.routes[news] = _once(503, _news_sitemap((new, "2026-10-16"), (old, "2026-10-14")), times=3)
+    site.routes[posts] = _xml(_urlset(new, old))
+    stored = _Stored(old)
+    plugin = _plugin(f"{SITE}/")
+    for _ in range(3):
+        assert await stored.poll(plugin) == []
+    assert site.requests.count(new) == 1
+    assert await stored.poll(plugin) == [new]
+    assert site.requests.count(new) == 2
+
+
+async def test_the_sitemap_crawl_reports_the_documents_that_failed(site):
+    """``discover_sitemap_entries`` collects every document that failed,
+    robots.txt included: a refusal, a 5xx, a timeout. A 404 is a document
+    that is gone, not one that failed, and a refused robots.txt is read
+    as none. With every document loading, nothing is collected, and the
+    plan reads as complete."""
+    story = f"{SITE}/news/council-approves-river-trail/"
+    site.routes[f"{SITE}/robots.txt"] = _html(
+        "User-agent: *\n"
+        + "".join(f"Sitemap: {SITE}/{name}-sitemap.xml\n" for name in ("news", "post", "blog", "story"))
+    )
+    site.routes[f"{SITE}/news-sitemap.xml"] = 503
+    site.routes[f"{SITE}/post-sitemap.xml"] = _xml(_urlset(story))
+    site.routes[f"{SITE}/blog-sitemap.xml"] = httpx.ReadTimeout
+    site.routes[f"{SITE}/story-sitemap.xml"] = 403
+    failures: list[BaseException] = []
+    entries = await feed_autodiscovery.discover_sitemap_entries(f"{SITE}/", failures=failures)
+    assert [e.url for e in entries] == [story]
+    assert sorted(type(f).__name__ for f in failures) == [
+        "FetchRefusedError", "HTTPStatusError", "ReadTimeout",
+    ]
+    plan = await plan_candidates(f"{SITE}/", raise_errors=True)
+    assert plan.mode == "sitemap" and plan.degraded and not plan.fallback
+
+    # A refused robots.txt is read as none (the guessed paths are read),
+    # not as a document that failed.
+    site.routes[f"{SITE}/robots.txt"] = 403
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(story))
+    failures = []
+    entries = await feed_autodiscovery.discover_sitemap_entries(f"{SITE}/", failures=failures)
+    assert [e.url for e in entries] == [story]
+    assert failures == []
+    plan = await plan_candidates(f"{SITE}/", raise_errors=True)
+    assert plan.mode == "sitemap" and not plan.degraded
+
+    for name in ("news", "blog", "story"):
+        site.routes[f"{SITE}/{name}-sitemap.xml"] = 404
+    site.routes[f"{SITE}/robots.txt"] = 503
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(story))
+    failures = []
+    entries = await feed_autodiscovery.discover_sitemap_entries(f"{SITE}/", failures=failures)
+    assert [e.url for e in entries] == [story]
+    assert [f.response.status_code for f in failures] == [503]
+
+    site.routes[f"{SITE}/robots.txt"] = 404
+    failures = []
+    await feed_autodiscovery.discover_sitemap_entries(f"{SITE}/", failures=failures)
+    assert failures == []
+    plan = await plan_candidates(f"{SITE}/", raise_errors=True)
+    assert plan.mode == "sitemap" and not plan.degraded
+
+
+@pytest.mark.parametrize(
+    "pinned",
+    [["welcome-to-the-trail-blog"], ["welcome-to-the-trail-blog", "how-to-read-our-trail-maps"]],
+    ids=["one sticky post", "two sticky posts"],
+)
+async def test_a_pinned_post_above_new_posts_does_not_make_them_backlog(site, pinned):
+    """A section feed's listing keeps its sticky posts at the top, in the
+    same list as the rest, and its posts carry no date. Each poll a new
+    post appears below the sticky ones and above the stored ones. The
+    stored sticky posts are pinned, not the line between new and old:
+    each new post comes in on its poll. main read the section's sitemap
+    and stored each one."""
+    sticky = [f"{SITE}/blog/{slug}/" for slug in pinned]
+    olds = [f"{SITE}/blog/old-post-on-the-rivers-{n}/" for n in range(3)]
+    news = [f"{SITE}/blog/new-post-on-the-markets-{n}/" for n in range(3)]
+    for n, post in enumerate(sticky + olds + news):
+        site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
+    stored = _Stored(*sticky, *olds)
+    plugin = _plugin(f"{SITE}/blog")
+    for k in range(3):
+        site.routes[f"{SITE}/blog"] = _list_of(*sticky, *reversed(news[: k + 1]), *olds)
+        assert await stored.poll(plugin) == [news[k]]
+    assert all(site.requests.count(post) == 1 for post in news)
+
+
+@pytest.mark.parametrize("leading", [1, 2])
+async def test_a_listing_led_by_stored_posts_with_none_below_keeps_them_as_the_line(
+    site, leading
+):
+    """Stored posts at the top of the listing and none further down: they
+    are the line, as on any listing, so the undated pages below them are
+    old backlog (after a restart, the feed reads again the pages it
+    passed over). A lone stored post is the line too."""
+    stored_posts = [f"{SITE}/blog/stored-post-on-the-rivers-{n}/" for n in range(leading)]
+    olds = [f"{SITE}/blog/old-post-on-the-markets-{n}/" for n in range(3)]
+    for n, post in enumerate(stored_posts + olds):
+        site.routes[post] = _undated_page(f"Post {n} on the trails", "article")
+    site.routes[f"{SITE}/blog"] = _list_of(*stored_posts, *olds)
+    stored = _Stored(*stored_posts)
+    plugin = _plugin(f"{SITE}/blog")
+    assert await stored.poll(plugin) == []
+    assert set(olds) <= set(plugin._extracted_urls)
+
+
+@pytest.mark.parametrize(("posts", "children"), [(10, 12), (4, 6)])
+async def test_a_category_pages_subcategory_links_do_not_outvote_its_posts(site, posts, children):
+    """A section feed at a WordPress category (``/category/news/``) whose
+    page links to more child categories than it lists posts, outside nav
+    and aside. The child categories are under the feed's own section,
+    but the listing is read with every segment judged first, so they are
+    no candidates and the posts are the list: each is stored on the first
+    poll, and no child category is fetched."""
+    stories = [f"{SITE}/council-story-number-{n}-with-details/" for n in range(posts)]
+    subs = [f"{SITE}/category/news/region-{n}/" for n in range(children)]
+    chips = "".join(f'<li><a href="{u}">Region {n}</a></li>' for n, u in enumerate(subs))
+    cards = "".join(
+        f'<article><h2><a href="{u}">Council story number {n} with a long headline</a></h2></article>'
+        for n, u in enumerate(stories)
+    )
+    site.routes[f"{SITE}/category/news/"] = _html(
+        "<html><body><header><nav><a href='/'>Home</a></nav></header>"
+        f"<div class='cat-header'><h1>News</h1><ul class='subcats'>{chips}</ul></div>"
+        f"<main>{cards}</main></body></html>"
+    )
+    for story in stories:
+        site.routes[story] = _html(_fixture("yoast-post.html"))
+    plugin = _plugin(f"{SITE}/category/news/")
+    items = await plugin.fetch()
+    assert [i["url"] for i in items] == stories
+    assert not any(site.asked(u.removeprefix(SITE)) for u in subs)
+
+
+@pytest.mark.parametrize(
+    ("name", "feed"),
+    [
+        ("media_release-sitemap.xml", "root"),
+        ("media_release-sitemap.xml", "root and sitemap_url"),
+        ("media_release-sitemap.xml", "section"),
+        ("media_release-sitemap.xml", "section and sitemap_url"),
+        ("product_update-sitemap.xml", "section"),
+        ("wp-sitemap-posts-product_update-1.xml", "section"),
+        ("wp-sitemap-posts-media_release-1.xml", "section"),
+        ("video-sitemap.xml", "section"),
+        ("video-sitemap.xml", "root"),
+    ],
+)
+async def test_a_custom_post_types_sitemap_is_read(site, name, feed):
+    """A WordPress site whose stories are a custom post type named with a
+    media or product word (``media_release``, ``product_update``, or
+    ``video``, whose Yoast sitemap is ``video-sitemap.xml``), beside a
+    page sitemap, and whose pages list nothing in their HTML (rendered by
+    script). The type's sitemap lists the stories: it is read, and the
+    stories come in, as main stored them. The page sitemap is still read
+    last and gives nothing."""
+    section = "/media-releases/" if "media" in name else "/updates/"
+    stories = [f"{SITE}{section}council-approves-river-trail-plan-{n}/" for n in range(3)]
+    index = f"{SITE}/sitemap_index.xml"
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {index}\n")
+    site.routes[index] = _xml(_index(f"{SITE}/page-sitemap.xml", f"{SITE}/{name}"))
+    site.routes[f"{SITE}/page-sitemap.xml"] = _xml(_urlset(f"{SITE}/about/", f"{SITE}/contact/"))
+    site.routes[f"{SITE}/{name}"] = _xml(_urlset(*stories))
+    for story in stories:
+        site.routes[story] = _html(_fixture("yoast-post.html"))
+    empty = _html("<html><body><main><h1>News</h1><div id='app'></div></main></body></html>")
+    site.routes[f"{SITE}/"] = empty
+    site.routes[f"{SITE}{section.rstrip('/')}"] = empty
+    url = f"{SITE}{section.rstrip('/')}" if feed.startswith("section") else f"{SITE}/"
+    sitemap_url = index if feed.endswith("sitemap_url") else None
+    items = await _plugin(url, sitemap_url=sitemap_url).fetch()
+    assert sorted(i["url"] for i in items) == stories
+    assert site.asked(f"/{name}") == 1
+
+
+@pytest.mark.parametrize("ending", ["jhtml", "jspx", "shtm", "dhtml", "nsf", "lasso"])
+@pytest.mark.parametrize("feed", ["root", "section"])
+async def test_a_server_page_ending_is_an_article_page(site, ending, feed):
+    """Article pages whose URLs end in a server page's ending that
+    neither courlan nor ``article_detect`` knows (ATG's ``.jhtml``,
+    ``.jspx``, ``.shtm``, ``.dhtml``, Domino's ``.nsf``, ``.lasso``),
+    listed by the sitemap and the listing page, with no link pattern.
+    main stored them from the sitemap, which lists pages: its entries
+    are read as pages. The listing page's links are judged as courlan
+    judged them on main, so a section feed's listing gives no list, and
+    its section of the sitemap brings the stories in."""
+    stories = [f"{SITE}/news/story-{n}-council-approves-plan.{ending}" for n in range(3)]
+    site.routes[f"{SITE}/robots.txt"] = _html(f"User-agent: *\nSitemap: {SITE}/sitemap.xml\n")
+    site.routes[f"{SITE}/sitemap.xml"] = _xml(_urlset(*stories))
+    site.routes[f"{SITE}/"] = _list_of(*stories)
+    site.routes[f"{SITE}/news"] = _list_of(*stories)
+    for story in stories:
+        site.routes[story] = _html(_fixture("yoast-post.html"))
+    url = f"{SITE}/news" if feed == "section" else f"{SITE}/"
+    items = await _plugin(url).fetch()
+    assert sorted(i["url"] for i in items) == stories
+    assert site.asked("/sitemap.xml") == 1
 
 
 async def test_a_listing_cards_date_dates_a_page_that_carries_none(site):
