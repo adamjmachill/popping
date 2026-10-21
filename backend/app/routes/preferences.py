@@ -28,7 +28,9 @@ Endpoints
   - ``GET    /api/preferences/{key}`` -- one row. Optional; the
     frontend can read from the bulk response.
   - ``PUT    /api/preferences/{key}`` -- upsert. Body is
-    ``{"value": <json>}``. Idempotent.
+    ``{"value": <json>}``. Idempotent. Not for the set keys
+    (``SET_KEYS``): a whole-list PUT of one is a 409, because it
+    would overwrite what other devices added since.
   - ``PATCH  /api/preferences/{key}`` -- apply a change to a set
     key (``{"add": [...], "remove": [...]}``, or ``{"set": {...}}``
     for votes) under a row lock, so concurrent writers merge
@@ -123,10 +125,10 @@ register_url_convertor("preference_key", _PreferenceKeyConvertor())
 # hidden tabs, one whole value written by PUT; the server never reads
 # it.
 # ``seen:<category>`` is the home for new seen marks, which clients
-# write only by PATCH (PUT of set keys is refused from PR2c on): old
-# bundles still PUT whole 200-id lists to ``read_entries:<col.name>``,
-# which is the same string as a per-category ``read_entries`` key, so
-# new marks can't share it.
+# write only by PATCH (PUT of a set key is a 409): old bundles PUT
+# whole 200-id lists to ``read_entries:<col.name>``, which is the
+# same string as a per-category ``read_entries`` key, so new marks
+# can't share it.
 # The ``hidden_entries`` etc. keys are also valid WITHOUT a
 # suffix because the legacy localStorage keys were the bare
 # names; the frontend migrates them on first load.
@@ -242,17 +244,30 @@ SET_KEY_CAPS: dict[str, int] = {
     "seen:*": 1000,
 }
 
+# The one list of set keys: PATCH takes only these, and PUT refuses
+# them with a 409. A bundle older than PR2b PUTs whole lists, and one
+# resumed days after launch still holds the lists it read then, so its
+# next save, hide or vote would overwrite everything other devices
+# added since. Clients from PR2b on write these keys only by PATCH. A
+# new set key goes into ``SET_KEY_CAPS`` and so joins both (PR5b adds
+# ``muted_sources``). Pinned by ``test_preferences_put_set_keys.py``.
+SET_KEYS: tuple[str, ...] = tuple(SET_KEY_CAPS)
+
+SET_KEY_PUT_DETAIL = "Popping was updated. Reload to keep saving."
+
 _VOTES_KEY = "voted_entries"
 _ID_MAX = 2**63 - 1
 _VOTE_ID_RE = re.compile(r"[1-9][0-9]{0,18}")
 
 
-def _set_key_cap(key: str) -> int | None:
-    """The cap for an allowlisted ``key``, or None if it isn't a set
-    key. Call after ``_validate_key``: it relies on suffixed names
-    having a non-empty suffix and global names having none."""
+def _set_key(key: str) -> str | None:
+    """The ``SET_KEYS`` entry an allowlisted ``key`` falls under
+    (``seen:Tech`` -> ``seen:*``), or None if it isn't a set key. Call
+    after ``_validate_key``: it relies on suffixed names having a
+    non-empty suffix and global names having none."""
     name, sep, _ = key.partition(":")
-    return SET_KEY_CAPS.get(f"{name}:*" if sep else name)
+    pattern = f"{name}:*" if sep else name
+    return pattern if pattern in SET_KEYS else None
 
 
 def is_entry_id(value: object) -> bool:
@@ -264,9 +279,10 @@ def is_entry_id(value: object) -> bool:
 def _coerce_ids(value: object) -> list[int]:
     """The stored id list as clean, de-duplicated ints, in stored order.
 
-    PUT stores opaque JSON, so the row may hold anything: a non-list
-    becomes empty and non-id elements are dropped. Without this a
-    malformed row would 500 every PATCH to its key.
+    A row written by PUT before set keys were refused holds opaque
+    JSON, so it may hold anything: a non-list becomes empty and non-id
+    elements are dropped. Without this a malformed row would 500
+    every PATCH to its key.
     """
     if not isinstance(value, list):
         return []
@@ -463,6 +479,13 @@ async def put_preference(
     the JSONB column without coercion. The frontend's TS types
     are the source of truth for what shape each key holds.
 
+    409 for a set key (``SET_KEYS``): those change only by PATCH. A
+    whole-list PUT of one comes from a bundle older than PR2b, whose
+    lists may be days stale, and storing it would undo saves, hides
+    and votes made since on every device. Refused, that bundle loses
+    only its own latest change, and shows "Couldn't save" until it
+    reloads.
+
     Implementation note
     --------------------
     We use ``INSERT ... ON CONFLICT (user_id, key) DO UPDATE`` so
@@ -472,6 +495,8 @@ async def put_preference(
     burn 2x the round-trips.
     """
     _validate_key(key)
+    if _set_key(key) is not None:
+        raise HTTPException(status_code=409, detail=SET_KEY_PUT_DETAIL)
     user_id = resolve_user_id(user)
     stmt = (
         pg_insert(UserPreference)
@@ -515,7 +540,7 @@ async def patch_preference(
 ) -> UserPreferenceOut:
     """Apply a change to one set key and return the whole new row.
 
-    400 for a key that isn't a set key (see ``SET_KEY_CAPS``). 422 for
+    400 for a key that isn't a set key (see ``SET_KEYS``). 422 for
     a body that doesn't fit the key: ``set`` on an id-list key,
     ``add`` / ``remove`` on ``voted_entries``, or a list longer than
     the key's cap.
@@ -536,21 +561,23 @@ async def patch_preference(
          a conflicting row's writer, and when that writer deleted the
          row it retries the insert, so a row always comes back, locked.
       2. The locked value is coerced (``_coerce_ids`` /
-         ``_coerce_votes``), since a PUT may have stored anything.
+         ``_coerce_votes``), since a PUT from before set keys were
+         refused may have stored anything.
       3. ``remove`` is applied before ``add``, then the result is
          trimmed to the cap, smallest entry id first.
       4. The value is written with ``updated_at = now()``.
     """
     _validate_key(key)
-    cap = _set_key_cap(key)
-    if cap is None:
+    set_key = _set_key(key)
+    if set_key is None:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"preference key {key!r} doesn't take PATCH; only the "
-                f"set keys do ({', '.join(SET_KEY_CAPS)})"
+                f"set keys do ({', '.join(SET_KEYS)})"
             ),
         )
+    cap = SET_KEY_CAPS[set_key]
     sent = body.model_fields_set
     if key == _VOTES_KEY:
         if sent & {"add", "remove"}:

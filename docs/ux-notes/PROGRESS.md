@@ -12,7 +12,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | merged | #38 |
 | PR2a Preference PATCH routes | B | merged | #28 |
 | PR2b prefSync client and sync rules | F | merged | #40 |
-| PR2c Refuse whole-list PUTs of set keys | B (floating) | waits for both devices on the PR2b build | |
+| PR2c Refuse whole-list PUTs of set keys | B (floating) | in review | #37 |
 | PR3a Desktop single scroller and batching | F | in review | #43 |
 | PR3b Read model | F | not started | |
 | PR3c Seen on scroll | F | not started | |
@@ -53,6 +53,7 @@ Work in progress is pushed to `claude/ux-<unit>` branches as it goes.
 
 - The owner tests on the phone only; no desktop is in use. Device checks are written phone-first, and desktop-only lines say "(If you have a desktop)".
 - PR2c's condition is now that the phone shows the PR2b build in Settings. No browser tab is open on an old build; a browser opened later loads the current build.
+  - Met on 2026-10-21: the phone shows the PR2b build `b6bd7e7f` (20 Oct 21:09). PR2c (#37) is rebased onto main and back in review.
 - The process stays as before: every unit gets the full review, and units with major fixes or risky logic get re-checks. Each unit is built on top of the one before it, so the next can start while the last finishes review.
 - PR10b merged after six review rounds. The owner's real-feed probe (baseline, then 3 hours and a day after deploying) is its final check. PR11a waits for that probe.
 - D34: cards get preview text under the headline, and the Summary arrow stays for the full AI summary. PR5a builds it.

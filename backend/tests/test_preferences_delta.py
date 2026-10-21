@@ -46,6 +46,23 @@ async def _value(client, key: str):
     return resp.json()["value"]
 
 
+async def _store(key: str, value) -> None:
+    """Write the anonymous row as given, the way a whole-list PUT did
+    before PUT refused set keys. Rows like these (stale, over the cap,
+    malformed) are still in the database, and PATCH has to cope."""
+    async with SessionLocal() as s:
+        stmt = pg_insert(UserPreference).values(
+            user_id=ANONYMOUS_USER_ID, key=key, value=value
+        )
+        await s.execute(
+            stmt.on_conflict_do_update(
+                index_elements=["user_id", "key"],
+                set_={"value": stmt.excluded.value},
+            )
+        )
+        await s.commit()
+
+
 def _anon_row(key: str):
     return select(UserPreference).where(
         UserPreference.user_id == ANONYMOUS_USER_ID,
@@ -190,7 +207,7 @@ async def test_concurrent_first_patches_on_a_new_key_all_land(app_client):
 @pytest.mark.asyncio
 async def test_remove_is_applied_before_add(app_client):
     key = "hidden_entries"
-    await app_client.put(_url(key), json={"value": [1, 2]})
+    await _patch(app_client, key, {"add": [1, 2]})
     resp = await _patch(app_client, key, {"add": [3, 1], "remove": [1, 3]})
     assert resp.status_code == 200, resp.text
     # 1 and 3 are removed, then added back: the add wins.
@@ -210,7 +227,8 @@ async def test_cap_trims_smallest_ids_first(app_client):
     key = "hidden_entries"
     cap = SET_KEY_CAPS[key]
     # Stored newest-first order is kept for the ids that survive.
-    await app_client.put(_url(key), json={"value": list(range(cap, 0, -1))})
+    resp = await _patch(app_client, key, {"add": list(range(cap, 0, -1))})
+    assert resp.json()["value"] == list(range(cap, 0, -1))
     resp = await _patch(app_client, key, {"add": [5000, 4000]})
     assert resp.status_code == 200, resp.text
     value = resp.json()["value"]
@@ -226,10 +244,10 @@ async def test_cap_trims_smallest_ids_first(app_client):
 
 
 @pytest.mark.asyncio
-async def test_cap_trims_an_over_cap_row_written_by_put(app_client):
+async def test_cap_trims_an_over_cap_row_written_by_an_old_put(app_client):
     key = "read_entries:Tech"
     cap = SET_KEY_CAPS["read_entries:*"]
-    await app_client.put(_url(key), json={"value": list(range(1, cap + 6))})
+    await _store(key, list(range(1, cap + 6)))
     resp = await _patch(app_client, key, {"remove": [cap + 5]})
     assert resp.json()["value"] == list(range(5, cap + 5))
 
@@ -245,9 +263,7 @@ async def test_votes_set_clear_and_cap(app_client):
     resp = await _patch(app_client, key, {"set": {"10": None, "11": "up", "12": None}})
     assert resp.json()["value"] == {"11": "up"}
 
-    await app_client.put(
-        _url(key), json={"value": {str(i): "up" for i in range(1, cap + 1)}}
-    )
+    await _store(key, {str(i): "up" for i in range(1, cap + 1)})
     resp = await _patch(
         app_client, key, {"set": {str(cap + 100): "down", str(cap + 101): "up"}}
     )
@@ -278,8 +294,7 @@ async def test_votes_set_clear_and_cap(app_client):
 )
 async def test_malformed_list_row_is_coerced(app_client, stored, expected):
     key = "starred_entries"
-    resp = await app_client.put(_url(key), json={"value": stored})
-    assert resp.status_code == 200, resp.text
+    await _store(key, stored)
     resp = await _patch(app_client, key, {"add": [42]})
     assert resp.status_code == 200, resp.text
     assert resp.json()["value"] == expected
@@ -296,7 +311,7 @@ async def test_malformed_list_row_is_coerced(app_client, stored, expected):
 )
 async def test_malformed_votes_row_is_coerced(app_client, stored):
     key = "voted_entries"
-    await app_client.put(_url(key), json={"value": stored})
+    await _store(key, stored)
     resp = await _patch(app_client, key, {"set": {"9": "up"}})
     assert resp.status_code == 200, resp.text
     kept = {"1": "up", "4": "down"} if isinstance(stored, dict) else {}
@@ -334,8 +349,12 @@ async def test_key_longer_than_60_is_400(app_client, method):
     body = {"value": [1]} if method == "PUT" else {"add": [1]}
     resp = await app_client.request(method, _url(key), json=body)
     assert resp.status_code == 400, resp.text
-    # 60 is still fine.
-    ok = await app_client.put(_url(key[:-1]), json={"value": [1]})
+    # 60 is still fine, on a set key (PATCH) and on a PUT key.
+    ok = await _patch(app_client, key[:-1], {"add": [1]})
+    assert ok.status_code == 200, ok.text
+    put_key = "column_prefs:" + "x" * 47
+    assert len(put_key) == 60
+    ok = await app_client.put(_url(put_key), json={"value": {"sort": "top"}})
     assert ok.status_code == 200, ok.text
 
 
@@ -550,11 +569,19 @@ async def test_since_with_overlap_returns_writes_that_commit_out_of_order(app_cl
 async def test_slash_keys_round_trip_through_every_route(app_client, key):
     """A category can contain ``/``. The client percent-encodes the key,
     the server decodes ``%2F`` before routing, and ``{key:path}`` has to
-    match the decoded ``/``. A plain ``{key}`` 404'd these."""
+    match the decoded ``/``. A plain ``{key}`` 404'd these.
+
+    These are set keys, so PUT reaches the handler and is refused with
+    a 409 (a 404 would mean the route didn't match);
+    ``test_slash_key_put_of_a_non_set_key`` covers a stored PUT."""
     url = _url(key)
     assert "%2F" in url
 
     resp = await app_client.put(url, json={"value": [1]})
+    assert resp.status_code == 409, resp.text
+    assert (await app_client.get(url)).status_code == 404
+
+    resp = await app_client.patch(url, json={"add": [1]})
     assert resp.status_code == 200, resp.text
     assert resp.json()["key"] == key
 
@@ -569,6 +596,19 @@ async def test_slash_keys_round_trip_through_every_route(app_client, key):
     assert resp.json()["value"] == [1, 2]
     assert key in _keys(await app_client.get("/api/preferences"))
 
+    resp = await app_client.delete(url)
+    assert resp.status_code == 204, resp.text
+    assert (await app_client.get(url)).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_slash_key_put_of_a_non_set_key(app_client):
+    key = "column_prefs:News/Tech"
+    url = _url(key)
+    resp = await app_client.put(url, json={"value": {"sort": "top"}})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["key"] == key
+    assert await _value(app_client, key) == {"sort": "top"}
     resp = await app_client.delete(url)
     assert resp.status_code == 204, resp.text
     assert (await app_client.get(url)).status_code == 404

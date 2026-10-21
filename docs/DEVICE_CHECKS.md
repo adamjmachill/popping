@@ -32,6 +32,8 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #35 · An hour after deploying, run `cd /opt/popping && docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT name, last_attempt_at, last_item_count, last_new_count, left(last_error, 30) AS error FROM sources ORDER BY last_attempt_at DESC NULLS LAST LIMIT 15"'`. Pass: the feeds checked since the deploy show a `last_attempt_at` after it, and the ones without an error show both counts.
 - [ ] #36 · Open Saved and remove its only story. Pass: the phone moves to the tab next to it; saving a story from there brings Saved back without moving the phone.
 - [ ] #36 · On a tab other than For You, force-quit the home-screen app and reopen it. Pass: it opens on the same tab.
+- [ ] #37 · After the deploy, on the phone save a story, hide one and upvote one, then reload the desktop tab. Pass: the desktop shows all three, and neither device shows "Couldn't save".
+- [ ] #37 · If any device or tab still runs a build from before PR2b, save a story there. Pass: it shows "Couldn't save…", and after a reload of that device your saves from the phone are all still there and saving works.
 - [ ] #38 · Open For You's ⋯. Pass: Best is chosen; tapping Newest puts the most recent stories first, and Best puts back the order it had.
 - [ ] #38 · With a saved view chip showing, set News to Best and tap the chip. Pass: News stays on Best.
 - [ ] #38 · Only if no AI provider is set up: open the Brief tab. Pass: it shows "Brief needs an AI provider · Set up" on one line; Set up opens Settings › AI. (With a provider set up: Generate or Regenerate shows as before.)
