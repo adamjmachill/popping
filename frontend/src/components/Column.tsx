@@ -1,8 +1,8 @@
 import { memo, useCallback, useEffect, useId, useRef, useState } from 'react'
 import type { Entry } from '../api'
 import { Card } from './Card'
-import { categoryLabel } from '../lib/labels'
-import { SAVED_KEY, type ColKey } from '../lib/columns'
+import { FORYOU_KEY, SAVED_KEY, type ColKey } from '../lib/columns'
+import { FirstFeedButton } from './FirstFeedButton'
 import { normalizeSort, type Sort, type TabPrefs } from '../lib/sorting'
 
 // Per-column sort/filter preferences. Owned by App (so it persists
@@ -24,10 +24,17 @@ const SORTS: ReadonlyArray<{ value: Sort; label: string }> = [
 ]
 
 type Props = {
-  name: string
-  // The tab's key (lib/columns): which sort it defaults to, and whether
-  // it has a sort at all (Saved doesn't).
-  tabKey: ColKey
+  // The tab's key (lib/columns): which sort it defaults to, whether it
+  // has a sort at all (Saved doesn't), and whether its empty state may
+  // offer "Add your first feed" (Saved and For You).
+  columnKey: ColKey
+  // The name the header shows (App's column label: the category's
+  // label, or Saved / For You).
+  label: string
+  // The feed the empty state reports on (``sourcesByName``'s key): the
+  // one feed a filter shows, or for a category the feed named like it.
+  // Saved, For You and a filter of several feeds leave it unset.
+  sourceName?: string
   // Pre-split entry lists. App owns the "what's new" semantics
   // (derived from per-column lastViewed timestamps + the manual
   // readEntries set), and ships the two slices down in the tab's
@@ -46,10 +53,15 @@ type Props = {
   // the source's last_fetch_at / error_count / last_error and
   // tell the user why the column is empty ("last fetch errored",
   // "auto-disabled after 5 errors", etc.) instead of just
-  // "no entries yet". Optional — meta columns (Saved, For You,
-  // Multisub) pass ``undefined`` and the empty-state falls back
-  // to the original generic message. Added in slice 19.
+  // "no entries yet". Optional — a column with no ``sourceName``
+  // (Saved, For You, a filter of several feeds), or one whose name
+  // matches no feed, falls back to "No stories yet". Added in slice 19.
   sourcesByName?: Map<string, import('../api').Source>
+  // Every feed is a built-in one: an empty Saved or For You adds the
+  // "Add your first feed" button, which calls ``onAddFeed`` (stable;
+  // the memo comparator ignores it).
+  noOwnFeeds?: boolean
+  onAddFeed?: () => void
   // Number of entries in this column that are "new since the user's
   // last visit to this column". Rendered as a chip in the header so
   // the user knows to come look. ``undefined`` means we haven't
@@ -182,14 +194,17 @@ type Props = {
 // renders — otherwise the JSX-passed inline arrows would still defeat
 // the memo even with this comparator.
 export function ColumnInner({
-  name,
-  tabKey,
+  columnKey,
+  label,
+  sourceName,
   sections,
   sourcesById,
   // Slice 19: optional sourcesByName map for context-aware empty-state.
   // Meta columns (Saved / For You / Multisub) pass undefined; the
   // empty-state falls back to the original generic message in that case.
   sourcesByName,
+  noOwnFeeds,
+  onAddFeed,
   newCount,
   selectedId,
   cardRefs,
@@ -349,7 +364,7 @@ export function ColumnInner({
         />
         <div className="flex items-center gap-2 min-w-0">
           <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary truncate">
-            {categoryLabel(name)}
+            {label}
           </h2>
           {/* New-entry chip. Only renders when newCount > 0 — when
               it hits 0 the user has acknowledged the column and the
@@ -430,7 +445,7 @@ export function ColumnInner({
           >
             {/* Newest | Best. Not on Saved, which keeps its own order
                 (lib/sorting), so a control there would do nothing. */}
-            {tabKey !== SAVED_KEY && (
+            {columnKey !== SAVED_KEY && (
               <div>
                 <div
                   id={sortLabelId}
@@ -444,7 +459,7 @@ export function ColumnInner({
                   className="grid grid-cols-2 rounded-ios overflow-hidden border border-hairline"
                 >
                   {SORTS.map((o) => {
-                    const active = normalizeSort(prefs.sort, tabKey) === o.value
+                    const active = normalizeSort(prefs.sort, columnKey) === o.value
                     return (
                       <button
                         key={o.value}
@@ -511,7 +526,11 @@ export function ColumnInner({
           // the source auto-disabled? Meta columns (Saved /
           // For You / Multisub) don't have a backing source so
           // we fall back to the original generic message.
-          <EmptyColumnMessage name={name} sourcesByName={sourcesByName} />
+          <EmptyColumnMessage
+            sourceName={sourceName}
+            sourcesByName={sourcesByName}
+            onAddFeed={noOwnFeeds && (columnKey === SAVED_KEY || columnKey === FORYOU_KEY) ? onAddFeed : undefined}
+          />
         ) : (
           <>
             {/* Fresh section. Rendered first (the only section
@@ -830,20 +849,27 @@ function ChevronIcon({ className, collapsed }: { className?: string; collapsed?:
 const AUTO_DISABLE_THRESHOLD = 5
 
 function EmptyColumnMessage({
-  name,
+  sourceName,
   sourcesByName,
+  onAddFeed,
 }: {
-  name: string
+  sourceName?: string
   sourcesByName?: Map<string, import('../api').Source>
+  // Set on an empty Saved or For You while every feed is a built-in.
+  onAddFeed?: () => void
 }) {
-  const source = sourcesByName?.get(name)
-  // Meta column (Saved / For You / Multisub) or sourcesByName not
-  // provided — fall back to the original generic message.
+  // The column's feed: the one feed a filter shows, or the feed named
+  // like a category.
+  const source = sourceName != null ? sourcesByName?.get(sourceName) : undefined
+  // No such feed (Saved, For You, a filter of several feeds) or
+  // sourcesByName not provided: "No stories yet", with the first-feed
+  // button when set.
   if (!source) {
     return (
-      <p className="text-ios-body text-label-secondary italic px-1">
-        no entries in this column yet — new stories show up after the next check
-      </p>
+      <div className="px-1 space-y-3">
+        <p className="text-ios-body text-label-secondary">No stories yet</p>
+        {onAddFeed && <FirstFeedButton onClick={onAddFeed} />}
+      </div>
     )
   }
   // Source-backed column. Pick the most specific message:
@@ -901,11 +927,13 @@ function EmptyColumnMessage({
 // the section containers and delegates to memoized Card children.
 function _columnPropsEqual(prev: Props, next: Props): boolean {
   return (
-    prev.name === next.name &&
-    prev.tabKey === next.tabKey &&
+    prev.columnKey === next.columnKey &&
+    prev.label === next.label &&
+    prev.sourceName === next.sourceName &&
     prev.sections === next.sections &&
     prev.sourcesById === next.sourcesById &&
     prev.sourcesByName === next.sourcesByName &&
+    prev.noOwnFeeds === next.noOwnFeeds &&
     prev.newCount === next.newCount &&
     prev.selectedId === next.selectedId &&
     // ``prefs`` is a fresh object per columnPrefs write, but its

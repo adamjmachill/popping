@@ -1,10 +1,10 @@
 // Tab keys, and which tab the phone shows. No imports (see feedRules.ts),
 // so the unit tests run it under strip-types.
 //
-// A tab is named by a key, never by its place in the strip: Saved and For
-// You come and go as they fill and empty, and categories come and go with
-// their feeds, so an index stored on one render can point at another tab
-// on the next.
+// A tab is named by a key, never by its place in the strip: tabs can be
+// moved and hidden (``category_layout``, lib/categories.ts), and categories
+// come and go with their feeds, so an index stored on one render can point
+// at another tab on the next.
 
 export const BRIEF_KEY = 'meta:brief'
 export const SAVED_KEY = 'meta:saved'
@@ -79,12 +79,16 @@ export type ResolveOpts = {
 
 /** The tab a device opens on when it has none stored: the first tab
  *  after Brief that shows something, For You first. With nothing to
- *  show anywhere, the first tab after Brief. */
+ *  show anywhere, For You (a new install's "No stories yet" and its
+ *  first-feed button), or the first tab after Brief when For You is
+ *  hidden. */
 export function freshTabIndex(tabs: readonly Tab[]): number {
   const forYou = tabs.findIndex((t) => t.key === FORYOU_KEY && t.size > 0)
   if (forYou >= 0) return forYou
   const full = tabs.findIndex((t) => t.key !== BRIEF_KEY && t.size > 0)
   if (full >= 0) return full
+  const empty = tabs.findIndex((t) => t.key === FORYOU_KEY)
+  if (empty >= 0) return empty
   const any = tabs.findIndex((t) => t.key !== BRIEF_KEY)
   return any >= 0 ? any : 0
 }
@@ -102,12 +106,15 @@ export function freshTabIndex(tabs: readonly Tab[]): number {
  *    stored tab last stood, so the neighbour of a tab that just went),
  *    or the fresh-device tab when it was never shown here. Once the
  *    list is loaded (and no filter replaces it), that tab becomes the
- *    stored one, so a Saved or For You tab that reappears later can't
- *    pull the phone back. Before that, the stored key is kept, and so
+ *    stored one, so the tab coming back later (a hidden tab shown
+ *    again, a category whose stories return) can't pull the phone
+ *    back. Before that, the stored key is kept, and so
  *    it is when only Brief is left. A stored ``meta:filter`` whose
  *    filter was cleared gets the fresh-device tab.
  *  - A legacy index is the tab at that place after Brief (clamped to the
- *    last, -1 is Brief). It is stored as a key once loaded.
+ *    last, -1 is Brief), counting an empty Saved or For You out, as the
+ *    strip of the build that stored it did. It is stored as a key once
+ *    loaded.
  *  - Nothing stored: the fresh-device tab, stored once loaded.
  *
  *  The fresh-device tab is stored only when it shows something: an
@@ -153,7 +160,10 @@ export function resolveTab(
       const brief = tabs.findIndex((t) => t.key === BRIEF_KEY)
       if (brief >= 0) return pick(brief)
     } else {
-      const after = tabs.flatMap((t, i) => (t.key === BRIEF_KEY ? [] : [i]))
+      // Counted as the strip stood when the index was stored: Saved and
+      // For You were in it only while they had stories.
+      const counted = (t: Tab) => t.key !== BRIEF_KEY && (t.size > 0 || (t.key !== SAVED_KEY && t.key !== FORYOU_KEY))
+      const after = tabs.flatMap((t, i) => (counted(t) ? [i] : []))
       if (after.length) return pick(after[Math.min(wanted.index, after.length - 1)])
     }
     return fresh()

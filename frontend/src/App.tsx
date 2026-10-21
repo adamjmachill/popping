@@ -26,6 +26,7 @@ import { Column, type ColumnPrefs } from './components/Column'
 import { byNewest, normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
 import { Drawer } from './components/Drawer'
 import { FramingWatch } from './components/FramingWatch'
+import { FirstFeedButton } from './components/FirstFeedButton'
 import { Hamburger } from './components/Hamburger'
 import { LoginPage } from './components/LoginPage'
 import { SearchResults } from './components/SearchResults'
@@ -38,6 +39,9 @@ import { Settings } from './components/Settings'
 import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
 import { recordImmediate } from './lib/interactions'
 import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
+import { fullOrder, moveKey, orderColumns, type Move } from './lib/categories'
+import { isBuiltIn } from './lib/feedRules'
+import { TabsEditor } from './components/TabsEditor'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
 import { useUpdateCheck } from './lib/useUpdateCheck'
 import {
@@ -200,6 +204,13 @@ function capSetFIFO<T>(set: Set<T>, max: number): Set<T> {
 // permanently-collapsed sections.
 type SectionCollapse = { newCollapsed: boolean; historyCollapsed: boolean }
 type ColumnSections = Record<string, SectionCollapse>
+
+// One tab's column: ``key`` names it, ``label`` is what it shows,
+// ``name`` is the id its stored rows are kept under (see
+// ``availableTabs``). ``sourceName`` is the feed an empty column reports
+// on (Column's empty state): the one feed a filter shows, or for a
+// category the feed named like it. Saved and For You have none.
+type TabColumn = { key: ColKey; name: string; label: string; entries: Entry[]; sourceName?: string }
 
 // User-saved filter preset. Captures a complete dashboard
 // view: which sources are filtered, and the per-column
@@ -706,6 +717,10 @@ export function App() {
   // then the tab list is incomplete: the first-load skeleton shows, and
   // the phone neither migrates its stored tab nor settles a missing one.
   const [firstRefreshDone, setFirstRefreshDone] = useState(false)
+  // A refresh has brought the feed list back. Unlike ``firstRefreshDone``
+  // it stays false after a failed first load, while ``sources`` is still
+  // its initial empty list.
+  const [sourcesLoaded, setSourcesLoaded] = useState(false)
   // The source filter (``filterScope``) the last applied refresh loaded
   // the tabs for. Until it is the filter in force, the strip still holds
   // another scope's stories, so a missing phone tab may only be late,
@@ -733,6 +748,10 @@ export function App() {
   const votedEntries = prefs.state.votedEntries
   const filterPresets = prefs.state.filterPresets as FilterPreset[]
   const historyGroupBy = prefs.state.historyGroupBy
+  // The tab order and the hidden tabs (null: never edited, the default
+  // order). Written whole, one PUT per change, by the tab editor.
+  const categoryLayout = prefs.state.categoryLayout
+  const setCategoryLayout = prefs.setCategoryLayout
   // Stable references to the provider's calls, aliased so the
   // handlers below read like they did. All stable across renders.
   const { addIds, removeIds, setVotes, latest: latestPrefs } = prefs
@@ -801,8 +820,9 @@ export function App() {
   // to full width (matching Apple Mail's header behaviour). ``false``
   // on first mount so the large title gets the full row.
   const [searchOpen, setSearchOpen] = useState(false)
-  // Keyboard selection.
-  const [selectedColumnIndex, setSelectedColumnIndex] = useState(0)
+  // Keyboard selection. The column is held by its key, so a column that
+  // moves (Edit tabs) keeps the selection; null is the first column.
+  const [selectedColumnKey, setSelectedColumnKey] = useState<ColKey | null>(null)
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null)
   // Per-card summary expansion. Session-scoped on purpose — the user
   // typically expands once to scan, and re-expanding after a reload
@@ -897,15 +917,6 @@ export function App() {
     return grouped
   }, [visibleEntries, categoriesBySourceId])
 
-  // Sorted by what the column shows, so a typed "Hockey" or "NHL" sits
-  // among the lower-case categories, in the same order as the picker.
-  const categories = useMemo(
-    () =>
-      Array.from(byCategory.keys()).sort((a, b) =>
-        categoryLabel(a).localeCompare(categoryLabel(b), undefined, { sensitivity: 'base' }),
-      ),
-    [byCategory],
-  )
   const visibleForYou = useMemo(
     () => forYou.filter((e) => !hiddenSet.has(e.id)),
     [forYou, hiddenSet],
@@ -958,27 +969,36 @@ export function App() {
   // as its first column on mobile).
   const viewKind: 'all' | 'multisub' = activeSources.size > 0 ? 'multisub' : 'all'
 
-  // All-subs columns. For You is the first column on mobile so swiping
-  // between tabs goes For You → news → tech → … The desktop grid
-  // renders For You as a separate row above the category columns (see
-  // the render block); on mobile the For You column *is* the For You
-  // row, in a single-column swipe.
-  const allSubsColumns = useMemo<Array<{ key: ColKey; name: string; entries: Entry[] }>>(() => {
-    const out: Array<{ key: ColKey; name: string; entries: Entry[] }> = []
-    // Saved column — the user's starred entries. Pinned at the
-    // top of the dashboard so intentional saves are the first
-    // thing they see on every load. Skipped when empty so a
-    // user who hasn't starred anything doesn't see an empty
-    // column wasting horizontal space.
-    if (visibleStarred.length > 0) {
-      out.push({ key: SAVED_KEY, name: 'Saved', entries: visibleStarred })
-    }
-    if (visibleForYou.length > 0) out.push({ key: FORYOU_KEY, name: 'For You', entries: visibleForYou })
-    for (const cat of categories) {
-      out.push({ key: colKey(cat), name: cat, entries: byCategory.get(cat) ?? [] })
+  // All-subs tabs: Saved and For You, always (empty, they say "No
+  // stories yet"), then a tab per category with stories. The desktop
+  // grid renders For You as a separate row above the category columns
+  // (see the render block); on mobile the For You column *is* the For
+  // You row, one tab of the strip.
+  //
+  // ``key`` names the tab everywhere in memory (React keys, the
+  // per-column maps, the phone's stored tab); ``label`` is what it
+  // shows; ``name`` is only the id its stored rows are kept under
+  // (``read_entries:<name>``, ``column_prefs:<name>``, …), unchanged so
+  // what is stored stays readable by every build.
+  const availableTabs = useMemo<TabColumn[]>(() => {
+    const out: TabColumn[] = [
+      { key: SAVED_KEY, name: 'Saved', label: 'Saved', entries: visibleStarred },
+      { key: FORYOU_KEY, name: 'For You', label: 'For You', entries: visibleForYou },
+    ]
+    for (const [cat, list] of byCategory) {
+      out.push({ key: colKey(cat), name: cat, label: categoryLabel(cat), entries: list, sourceName: cat })
     }
     return out
-  }, [visibleForYou, categories, byCategory, visibleStarred])
+  }, [visibleForYou, byCategory, visibleStarred])
+  // The strip's order (``lib/categories``): Brief, Saved, For You, then
+  // the categories by label until the owner edits it; then as stored,
+  // with a new category at the end. ``shown`` leaves out the hidden
+  // tabs and is what everything that walks the tabs uses: the phone's
+  // strip and its fresh-device pick, the desktop grid, Jump to column
+  // and the arrow keys. Hiding a tab doesn't take its stories out of
+  // For You.
+  const tabOrder = useMemo(() => orderColumns(availableTabs, categoryLayout), [availableTabs, categoryLayout])
+  const allSubsColumns = tabOrder.shown
 
   // Multi-sub column. One column, name reads "Filtering" so it stays
   // distinct from any category. The chip-bar header above the column
@@ -1014,20 +1034,22 @@ export function App() {
     return `${names[0]} + ${names.length - 1} more`
   }, [activeSources])
 
-  const multisubColumn = useMemo<Array<{ key: ColKey; name: string; entries: Entry[] }>>(() => {
+  const multisubColumn = useMemo<TabColumn[]>(() => {
     if (activeSources.size === 0) {
       // Defensive: this branch shouldn't be reached because
       // ``viewKind`` switches to 'all' when ``activeSources``
       // is empty, but we keep the empty case explicit so
       // a stale memo doesn't accidentally render a
       // unfiltered column.
-      return [{ key: FILTER_KEY, name: multisubColumnName, entries: [] }]
+      return [{ key: FILTER_KEY, name: multisubColumnName, label: categoryLabel(multisubColumnName), entries: [] }]
     }
     const filtered = visibleEntries.filter((e) => {
       const name = sourcesById.get(e.source_id)
       return name != null && activeSources.has(name)
     })
-    return [{ key: FILTER_KEY, name: multisubColumnName, entries: filtered }]
+    // One feed: an empty filter says how that feed is doing.
+    const sourceName = activeSources.size === 1 ? Array.from(activeSources)[0] : undefined
+    return [{ key: FILTER_KEY, name: multisubColumnName, label: categoryLabel(multisubColumnName), entries: filtered, sourceName }]
   }, [visibleEntries, activeSources, sourcesById, multisubColumnName])
 
   const baseColumns = viewKind === 'multisub' ? multisubColumn : allSubsColumns
@@ -1043,7 +1065,7 @@ export function App() {
 
   // Apply per-column prefs: the age filter, then the tab's sort, once
   // (the sections below keep this order). Saved is never sorted.
-  const columns = useMemo<Array<{ key: ColKey; name: string; entries: Entry[]; totalCount: number }>>(() => {
+  const columns = useMemo<Array<TabColumn & { totalCount: number }>>(() => {
     const now = Date.now()
     return baseColumns.map((col) => {
       const prefs = prefsFor(col)
@@ -1056,9 +1078,30 @@ export function App() {
         })
       }
       filtered = sortEntries(filtered, normalizeSort(prefs.sort, col.key), col.key)
-      return { key: col.key, name: col.name, entries: filtered, totalCount: col.entries.length }
+      return {
+        key: col.key,
+        name: col.name,
+        label: col.label,
+        entries: filtered,
+        sourceName: col.sourceName,
+        totalCount: col.entries.length,
+      }
     })
   }, [baseColumns, prefsFor])
+  // The columns the arrow keys walk (``selectedColumnKey``): on the
+  // desktop the grid's, which leaves out For You in the 'all' view (it
+  // is the row above the grid, with no selection); on the phone the
+  // strip's.
+  const keyColumns = useMemo(
+    () => (isDesktop && viewKind === 'all' ? columns.filter((c) => c.key !== FORYOU_KEY) : columns),
+    [columns, isDesktop, viewKind],
+  )
+  // The selected column's place in ``keyColumns``, and the column itself.
+  // A key that is gone selects nothing until the effect below moves it.
+  const keyIndex = keyColumns.findIndex((c) => c.key === selectedColumnKey)
+  const selectedColumnIndex = keyIndex >= 0 ? keyIndex : 0
+  const selectedKeyColumn: TabColumn | undefined =
+    keyIndex >= 0 ? keyColumns[keyIndex] : selectedColumnKey == null ? keyColumns[0] : undefined
 
   // Read state is stored per-column (``readEntries[columnName]``)
   // because "mark all read" and its Undo are column-scoped
@@ -1094,7 +1137,7 @@ export function App() {
   // completely different signals (fetch/visit timing vs. manual
   // read state).
   const newCountByColumn = useMemo(() => {
-    const out = new Map<string, number>()
+    const out = new Map<ColKey, number>()
     const seen = seenEntryIdsRef.current
     for (const col of columns) {
       const last = lastViewed[col.name]
@@ -1107,7 +1150,7 @@ export function App() {
           lastMs > 0 && e.fetched_at != null && new Date(e.fetched_at).getTime() > lastMs
         if (isNewSinceRefresh || isNewSinceVisit) n++
       }
-      if (n > 0) out.set(col.name, n)
+      if (n > 0) out.set(col.key, n)
     }
     return out
   }, [columns, lastViewed, globalReadIds])
@@ -1123,13 +1166,13 @@ export function App() {
   // in ``newCountByColumn``. ``globalReadIds`` is defined above,
   // next to ``newCountByColumn``, since both now depend on it.
   const unreadIdsByColumn = useMemo(() => {
-    const out = new Map<string, Set<number>>()
+    const out = new Map<ColKey, Set<number>>()
     for (const col of columns) {
       const ids = new Set<number>()
       for (const e of col.entries) {
         if (!globalReadIds.has(e.id)) ids.add(e.id)
       }
-      if (ids.size > 0) out.set(col.name, ids)
+      if (ids.size > 0) out.set(col.key, ids)
     }
     return out
   }, [columns, globalReadIds])
@@ -1144,16 +1187,16 @@ export function App() {
   // section membership in Column, so we don't need to pass the Set
   // down anymore.
   const sectionsByColumn = useMemo(() => {
-    const out = new Map<string, { new: Entry[]; history: Entry[] }>()
+    const out = new Map<ColKey, { new: Entry[]; history: Entry[] }>()
     for (const col of columns) {
-      const unread = unreadIdsByColumn.get(col.name) ?? new Set<number>()
+      const unread = unreadIdsByColumn.get(col.key) ?? new Set<number>()
       const fresh: Entry[] = []
       const past: Entry[] = []
       for (const e of col.entries) {
         if (unread.has(e.id)) fresh.push(e)
         else past.push(e)
       }
-      out.set(col.name, { new: fresh, history: past })
+      out.set(col.key, { new: fresh, history: past })
     }
     return out
   }, [columns, unreadIdsByColumn])
@@ -1239,6 +1282,7 @@ export function App() {
         }
         return reconcileById(prev, next)
       })
+      setSourcesLoaded(true)
       setForYou((prev) => reconcileById(prev, fy))
       setFirstRefreshDone(true)
       setTabsLoadedFor(filterScope(activeSources))
@@ -1541,10 +1585,22 @@ export function App() {
     return () => window.clearTimeout(id)
   }, [activeSources, refresh, authProbed])
 
-  // Desktop: j/k/o never target a column that has gone.
+  // The arrow keys never target a column that has gone (hidden, or out
+  // of the view): the selection moves to the column now at its last
+  // place, or the last one, and its card is dropped, since that card
+  // belonged to the column that went.
+  const lastKeyIndexRef = useRef(0)
   useEffect(() => {
-    if (columns.length) setSelectedColumnIndex((i) => Math.min(i, columns.length - 1))
-  }, [columns.length])
+    if (selectedColumnKey == null) return
+    const i = keyColumns.findIndex((c) => c.key === selectedColumnKey)
+    if (i >= 0) {
+      lastKeyIndexRef.current = i
+      return
+    }
+    const fallback = keyColumns[Math.min(lastKeyIndexRef.current, keyColumns.length - 1)]
+    setSelectedColumnKey(fallback?.key ?? null)
+    setSelectedCardId(null)
+  }, [keyColumns, selectedColumnKey])
 
   // The phone's tabs in strip order: Brief, then the columns.
   const phoneTabs = useMemo<Tab[]>(
@@ -1562,12 +1618,12 @@ export function App() {
   // stored (``tabsLoaded`` false, or under the filter): a neighbour, a
   // fresh device's first tab, or an old index's tab. In memory only.
   // ``resolveTab`` keeps showing it by key until the list settles, so a
-  // save that adds Saved in front of it can't move the phone, however
-  // long For You or the preferences stay down.
+  // tab appearing in front of it (a category's first stories) can't move
+  // the phone, however long For You or the preferences stay down.
   const [standIn, setStandIn] = useState<ColKey | null>(null)
-  // The tab the phone shows. It follows the stored key, so Saved or
-  // For You appearing or emptying around it, or a feed moving between
-  // categories, never moves the phone. Nothing is migrated or settled
+  // The tab the phone shows. It follows the stored key, so tabs
+  // appearing, emptying, moving or hidden around it, or a feed moving
+  // between categories, never move the phone. Nothing is migrated or settled
   // until preferences have loaded and the first refresh has answered,
   // and the last refresh applied loaded every tab for the filter in
   // force: before that a stored tab can be missing only because its
@@ -1632,6 +1688,68 @@ export function App() {
     },
     [shownTab, storedKey, phoneScroller, selectTab],
   )
+  // The shown tab's chip stays in the strip's view when code picks it
+  // (Jump to column, a tab that went, a move in Edit tabs), not only
+  // when a finger does. ``nearest`` leaves a chip already in view alone.
+  const stripRef = useRef<HTMLDivElement | null>(null)
+  const stripOrder = columns.map((c) => c.key).join('\u0000')
+  useEffect(() => {
+    stripRef.current
+      ?.querySelector<HTMLElement>('[aria-selected="true"]')
+      ?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
+  }, [shownTab, stripOrder])
+
+  // Edit tabs: the order and the Show switches (``lib/categories``).
+  // Each change is one PUT of the whole ``category_layout``, built from
+  // ``latestPrefs()`` so two taps in one tick both count. A move stores
+  // the full order (from then on a new category goes at the end); a
+  // Show switch changes only ``hidden``.
+  const [tabsEditorOpen, setTabsEditorOpen] = useState(false)
+  // Where focus goes back to when the editor closes: the Edit pill, or
+  // the Menu's ≡ button when it was opened from the Menu.
+  const tabsEditorReturn = useRef<'pill' | 'menu'>('pill')
+  const editPillRef = useRef<HTMLButtonElement | null>(null)
+  const openTabsEditor = useCallback((from: 'pill' | 'menu') => {
+    tabsEditorReturn.current = from
+    setTabsEditorOpen(true)
+  }, [])
+  const closeTabsEditor = useCallback(() => {
+    setTabsEditorOpen(false)
+    requestAnimationFrame(() => {
+      const back =
+        tabsEditorReturn.current === 'pill' && editPillRef.current?.getClientRects().length
+          ? editPillRef.current
+          : document.querySelector<HTMLElement>('button[aria-label="open menu"]')
+      back?.focus()
+    })
+  }, [])
+  const hiddenTabs = useMemo(() => new Set(tabOrder.hidden.map((t) => t.key)), [tabOrder])
+  const moveTab = useCallback(
+    (key: string, to: Move) => {
+      const layout = latestPrefs().categoryLayout
+      const present = new Set<string>(availableTabs.map((t) => t.key))
+      const order = fullOrder(availableTabs, layout)
+      const next = moveKey(order, key, to, (k) => present.has(k))
+      if (next.every((k, i) => k === order[i])) return
+      setCategoryLayout({ v: 1, order: next, hidden: layout?.hidden ?? [] })
+    },
+    [availableTabs, latestPrefs, setCategoryLayout],
+  )
+  const showTab = useCallback(
+    (key: string, show: boolean) => {
+      const layout = latestPrefs().categoryLayout
+      const hidden = (layout?.hidden ?? []).filter((k) => k !== key)
+      if (!show) hidden.push(key)
+      setCategoryLayout({ v: 1, order: layout?.order ?? [], hidden })
+    },
+    [latestPrefs, setCategoryLayout],
+  )
+  // Every feed is a built-in: an empty Saved or For You offers "Add
+  // your first feed" (Settings → Feeds). Only once a refresh has brought
+  // the feed list back: before that, or after a failed first load,
+  // ``sources`` is still empty and says nothing about the owner's feeds.
+  const noOwnFeeds = sourcesLoaded && !sources.some((s) => !isBuiltIn(s))
+  const openFeeds = useCallback(() => openSettings('feeds'), [openSettings])
 
   // Note: readEntries, lastViewed, columnPrefs, columnSections,
   // hiddenEntries, starredEntries, filterPresets, and
@@ -1837,7 +1955,7 @@ export function App() {
   // The column lookup here uses the currently-selected
   // column's lastViewed for the mark-read. The user's
   // exact current column is best-effort (we use
-  // selectedColumnIndex or 0) because the mark-read flip
+  // the selected column or the first) because the mark-read flip
   // is per-column, not per-entry.
   const toggleHideEntry = useCallback(
     (columnName: string, entryId: number) => {
@@ -2032,20 +2150,21 @@ export function App() {
         return
       }
 
-      if (columns.length === 0) return
+      if (keyColumns.length === 0) return
 
       if (e.key === 'ArrowLeft') {
         e.preventDefault()
-        setSelectedColumnIndex((i) => Math.max(0, i - 1))
+        setSelectedColumnKey(keyColumns[Math.max(0, selectedColumnIndex - 1)].key)
         setSelectedCardId(null)
       } else if (e.key === 'ArrowRight') {
         e.preventDefault()
-        setSelectedColumnIndex((i) => Math.min(columns.length - 1, i + 1))
+        setSelectedColumnKey(keyColumns[Math.min(keyColumns.length - 1, selectedColumnIndex + 1)].key)
         setSelectedCardId(null)
       } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault()
-        const col = columns[selectedColumnIndex]
+        const col = selectedKeyColumn
         if (!col || col.entries.length === 0) return
+        setSelectedColumnKey(col.key)
         const idx = col.entries.findIndex((e2) => e2.id === selectedCardId)
         const next =
           e.key === 'ArrowDown'
@@ -2064,7 +2183,7 @@ export function App() {
         // only fire on bare ``m``.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const col = columns[selectedColumnIndex]
+        const col = selectedKeyColumn
         if (!col) return
         markEntryRead(col.name, selectedCardId)
         recordImmediate({ entry_id: selectedCardId, type: 'view' })
@@ -2115,7 +2234,7 @@ export function App() {
         // focus.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const col = columns[selectedColumnIndex]
+        const col = selectedKeyColumn
         if (!col) return
         // Mirrors the eye button's onClick (Card.tsx): record the
         // 'never' signal only on the hide direction (not unhide),
@@ -2139,7 +2258,9 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey)
   }, [
     columns,
+    keyColumns,
     selectedColumnIndex,
+    selectedKeyColumn,
     selectedCardId,
     searchQuery,
     markEntryRead,
@@ -2395,29 +2516,30 @@ export function App() {
     setActiveSources(new Set())
   }, [setActiveSources])
 
-  // The Menu's Jump to column. Clears a search first (results replace
-  // the columns), then selects the column on both layouts: the phone's
-  // tab (scrolled into the strip's view) and the desktop grid's column.
-  const jumpToCategory = useCallback((category: string) => {
-    const idx = columns.findIndex((c) => c.name === category)
-    if (idx >= 0) {
+  // The Menu's Jump to column, by tab key. Clears a search first
+  // (results replace the columns), then selects the column on both
+  // layouts: the phone's tab (the strip scrolls it into view, as for
+  // any tab selected by code) and the desktop grid's column.
+  const jumpToCategory = useCallback((key: string) => {
+    const col = columns.find((c) => c.key === key)
+    if (col) {
       setSearchInput('')
       setSearchQuery('')
       setSearchOpen(false)
-      setSelectedColumnIndex(idx)
+      // For You on the desktop is the row above the grid, not a column
+      // the arrow keys select: the selection stays where it is.
+      if (keyColumns.some((c) => c.key === key)) setSelectedColumnKey(col.key)
       setSelectedCardId(null)
-      selectTab(columns[idx].key)
+      selectTab(col.key)
       requestAnimationFrame(() => {
-        document
-          .querySelector<HTMLElement>('[role="tablist"][aria-label="dashboard sections"] [aria-selected="true"]')
-          ?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
-        // The column ref is a ``display: contents`` wrapper, which has
-        // no box to scroll to; its first child does.
-        const el = columnRefs.current.get(category)
+        // A column's ref is a ``display: contents`` wrapper, which has
+        // no box to scroll to; its first child does (For You's row: its
+        // header).
+        const el = columnRefs.current.get(key)
         ;(el?.firstElementChild as HTMLElement | null)?.scrollIntoView({ block: 'start', behavior: 'smooth' })
       })
     }
-  }, [columns, setSelectedColumnIndex, setSelectedCardId, columnRefs, selectTab])
+  }, [columns, keyColumns, setSelectedCardId, columnRefs, selectTab])
 
   const setPrefsFor = useCallback((columnName: string, prefs: ColumnPrefs) => {
     setColumnPrefs(columnName, prefs as ColumnPrefsValue)
@@ -2479,9 +2601,9 @@ export function App() {
   // without breaking the grid layout — the wrapper uses
   // ``display: contents`` so its child (Column) participates in
   // the grid as if it weren't wrapped.
-  const setColumnRef = (name: string) => (el: HTMLElement | null) => {
-    if (el) columnRefs.current.set(name, el)
-    else columnRefs.current.delete(name)
+  const setColumnRef = (key: ColKey) => (el: HTMLElement | null) => {
+    if (el) columnRefs.current.set(key, el)
+    else columnRefs.current.delete(key)
   }
 
   // --- Render gates -----------------------------------------------------
@@ -2872,38 +2994,44 @@ export function App() {
             votedMap={votedMap}
           />
         </main>
-      ) : !firstRefreshDone || (columns.length === 0 && refreshing) ? (
-        // First load in flight — the empty-state copy below would
-        // otherwise flash for a moment before the very first response
-        // lands; also while an empty dashboard (a first load that
-        // failed) refreshes. Once any stories exist, a later refresh
-        // never brings it back.
+      ) : !firstRefreshDone ? (
+        // First load in flight: the tabs would otherwise show empty for
+        // a moment before the very first response lands. Saved and For
+        // You are in the strip from the first render, so the columns are
+        // never empty; an empty tab says so itself ("No stories yet").
         <div className="flex-1 overflow-y-auto overscroll-contain">
           <SkeletonGrid />
-        </div>
-      ) : columns.length === 0 ? (
-        <div className="flex-1 flex items-center justify-center text-ios-body text-label-secondary px-4 text-center">
-          No stories yet. Tap Refresh to check now, or add feeds in Menu → Settings → Feeds.
         </div>
       ) : (
         <>
           {/* Desktop. The view is two surfaces stacked:
-              1. For You row — only in 'all' view, only when forYou is
-                 non-empty. Full-width card grid; no column chrome so
-                 the personal feed reads as the "front page".
+              1. For You row — only in 'all' view, whenever its tab is
+                 shown (Edit tabs), empty or not, as the phone's For You
+                 tab is: Jump to column lands on it. Full-width card grid;
+                 no column chrome so the personal feed reads as the "front
+                 page". Empty, it says "No stories yet", with the
+                 first-feed button while every feed is a built-in.
               2. By-category grid — the All Subs columns. Skipped in
                  'multisub' view because the multi-sub column is the
                  whole dashboard there. */}
-          {isDesktop && viewKind === 'all' && visibleForYou.length > 0 && (
-            <section className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
+          {isDesktop && viewKind === 'all' && !hiddenTabs.has(FORYOU_KEY) && (
+            <section ref={setColumnRef(FORYOU_KEY)} className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
               <header className="flex items-center justify-between mb-2">
                 <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
                   For You
                 </h2>
-                <span className="text-ios-caption text-label-tertiary">
-                  {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
-                </span>
+                {visibleForYou.length > 0 && (
+                  <span className="text-ios-caption text-label-tertiary">
+                    {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
+                  </span>
+                )}
               </header>
+              {visibleForYou.length === 0 && (
+                <div className="px-1 space-y-3">
+                  <p className="text-ios-body text-label-secondary">No stories yet</p>
+                  {noOwnFeeds && <FirstFeedButton onClick={openFeeds} />}
+                </div>
+              )}
               <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                 {visibleForYou.map((e) => {
                   // Per-card engagement props. The For You
@@ -2983,65 +3111,66 @@ export function App() {
           {isDesktop && viewKind === 'all' && <FramingWatch />}
           {isDesktop && (
             <main className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 py-4 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] flex-1 overflow-x-clip overflow-y-auto">
-              {columns
-                .filter((col) => viewKind === 'multisub' || col.name !== 'For You')
-                .map((col, ci) => (
-                  <div key={col.name} ref={setColumnRef(col.name)} className="contents">
-                    <Column
-                      name={col.name}
-                      tabKey={col.key}
-                      sections={sectionsByColumn.get(col.name) ?? { new: [], history: [] }}
-                      sourcesById={sourcesById}
-                      sourcesByName={sourcesByName}
-                      newCount={newCountByColumn.get(col.name)}
-                      onRefresh={manualRefresh}
-                      onSourceTap={onSourceTap}
-                      selectedId={ci === selectedColumnIndex ? selectedCardId ?? undefined : undefined}
-                      cardRefs={cardRefs}
-                      onMarkRead={() => markColumnRead(col.name)}
-                      onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
-                      onHideEntry={(entryId) => {
-                        hideEntry(entryId)
-                        toast('Entry hidden.', {
-                          kind: 'info',
-                          action: {
-                            label: 'Undo',
-                            onClick: () => restoreHiddenEntry(entryId),
-                          },
-                        })
-                      }}
-                      onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
-                      hiddenSet={hiddenSet}
-                      onStarEntry={(entryId) => {
-                        const wasStarred = toggleStarEntry(entryId)
-                        toast(
-                            wasStarred
-                              ? 'Removed from Saved.'
-                              : 'Saved for later — see the Saved column.',
-                            {
-                              kind: 'info',
-                              action: {
-                                label: 'Undo',
-                                onClick: () => setStarred(entryId, wasStarred),
-                              },
+              {keyColumns.map((col) => (
+                <div key={col.key} ref={setColumnRef(col.key)} className="contents">
+                  <Column
+                    columnKey={col.key}
+                    label={col.label}
+                    sourceName={col.sourceName}
+                    sections={sectionsByColumn.get(col.key) ?? { new: [], history: [] }}
+                    sourcesById={sourcesById}
+                    sourcesByName={sourcesByName}
+                    noOwnFeeds={noOwnFeeds}
+                    onAddFeed={openFeeds}
+                    newCount={newCountByColumn.get(col.key)}
+                    onRefresh={manualRefresh}
+                    onSourceTap={onSourceTap}
+                    selectedId={col.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined}
+                    cardRefs={cardRefs}
+                    onMarkRead={() => markColumnRead(col.name)}
+                    onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
+                    onHideEntry={(entryId) => {
+                      hideEntry(entryId)
+                      toast('Entry hidden.', {
+                        kind: 'info',
+                        action: {
+                          label: 'Undo',
+                          onClick: () => restoreHiddenEntry(entryId),
+                        },
+                      })
+                    }}
+                    onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
+                    hiddenSet={hiddenSet}
+                    onStarEntry={(entryId) => {
+                      const wasStarred = toggleStarEntry(entryId)
+                      toast(
+                          wasStarred
+                            ? 'Removed from Saved.'
+                            : 'Saved for later — see the Saved column.',
+                          {
+                            kind: 'info',
+                            action: {
+                              label: 'Undo',
+                              onClick: () => setStarred(entryId, wasStarred),
                             },
-                          )
-                      }}
-                      starredSet={starredSet}
-                      onVoteEntry={voteEntry}
-                      votedMap={votedMap}
-                      prefs={prefsFor(col)}
-                      onPrefsChange={(next) => setPrefsFor(col.name, next)}
-                      totalCount={col.totalCount}
-                      categoriesBySourceId={categoriesBySourceId}
-                      faviconBySourceId={faviconBySourceId}
-                      expandedSummaries={expandedSummaries}
-                      onToggleSummary={toggleSummary}
-                      sectionsCollapsed={sectionsCollapsedFor(col.name)}
-                      onToggleSection={(key) => setColumnSection(col.name, key)}
-                    />
-                  </div>
-                ))}
+                          },
+                        )
+                    }}
+                    starredSet={starredSet}
+                    onVoteEntry={voteEntry}
+                    votedMap={votedMap}
+                    prefs={prefsFor(col)}
+                    onPrefsChange={(next) => setPrefsFor(col.name, next)}
+                    totalCount={col.totalCount}
+                    categoriesBySourceId={categoriesBySourceId}
+                    faviconBySourceId={faviconBySourceId}
+                    expandedSummaries={expandedSummaries}
+                    onToggleSummary={toggleSummary}
+                    sectionsCollapsed={sectionsCollapsedFor(col.name)}
+                    onToggleSection={(key) => setColumnSection(col.name, key)}
+                  />
+                </div>
+              ))}
             </main>
           )}
 
@@ -3058,69 +3187,86 @@ export function App() {
                 small screen. Horizontally scrollable — a source
                 list with 6+ categories won't fit every tab label on
                 a phone-width screen. */}
-            <div
-              role="tablist"
-              aria-label="dashboard sections"
-              data-hscroll
-              className="shrink-0 flex gap-1.5 overflow-x-auto pb-1 -mx-1 px-1"
-            >
-              {/* Each tab is a 44px button around a smaller pill, so the
-                  strip stays compact while every tab is easy to hit. */}
-              <button
-                type="button"
-                role="tab"
-                aria-selected={shownTab === BRIEF_KEY}
-                onClick={() => onPhoneTabTap(BRIEF_KEY)}
-                className="group shrink-0 min-h-[44px] flex items-center"
+            {/* The strip, and the Edit pill pinned at its trailing edge,
+                outside the tablist. */}
+            <div className="shrink-0 flex items-start gap-1.5 -mx-1">
+              <div
+                ref={stripRef}
+                role="tablist"
+                aria-label="dashboard sections"
+                data-hscroll
+                className="min-w-0 flex-1 flex gap-1.5 overflow-x-auto pb-1 px-1"
               >
-                <span
-                  className={`rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                    shownTab === BRIEF_KEY
-                      ? 'bg-accent text-white'
-                      : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
-                  }`}
+                {/* Each tab is a 44px button around a smaller pill, so the
+                    strip stays compact while every tab is easy to hit. */}
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={shownTab === BRIEF_KEY}
+                  onClick={() => onPhoneTabTap(BRIEF_KEY)}
+                  className="group shrink-0 min-h-[44px] flex items-center"
                 >
-                  Brief
+                  <span
+                    className={`rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
+                      shownTab === BRIEF_KEY
+                        ? 'bg-accent text-white'
+                        : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
+                    }`}
+                  >
+                    Brief
+                  </span>
+                </button>
+                {columns.map((c) => {
+                  const newCount = newCountByColumn.get(c.key)
+                  const shown = c.key === shownTab
+                  return (
+                    // Navigation, not mark-read. Merely peeking at a
+                    // column shouldn't drop its "+N new" chip — that
+                    // violates the universal-inbox rule. The column
+                    // header (desktop) and the per-card ✓ button are
+                    // the explicit mark-read affordances.
+                    <button
+                      type="button"
+                      key={c.key}
+                      role="tab"
+                      aria-selected={shown}
+                      onClick={() => onPhoneTabTap(c.key)}
+                      className="group shrink-0 min-h-[44px] flex items-center"
+                    >
+                      <span
+                        className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
+                          shown
+                            ? 'bg-accent text-white'
+                            : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
+                        }`}
+                      >
+                        {c.label}
+                        {!!newCount && (
+                          <span
+                            className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
+                              shown ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
+                            }`}
+                          >
+                            {newCount}
+                          </span>
+                        )}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+              <button
+                ref={editPillRef}
+                type="button"
+                aria-label="Edit tabs"
+                data-edit-tabs
+                onClick={() => openTabsEditor('pill')}
+                className="group shrink-0 min-h-[44px] flex items-center pr-1"
+              >
+                <span className="rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap bg-bg-surface text-accent group-active:bg-bg-elevated">
+                  Edit
                 </span>
               </button>
-              {columns.map((c) => {
-                const newCount = newCountByColumn.get(c.name)
-                const shown = c.key === shownTab
-                return (
-                  // Navigation, not mark-read. Merely peeking at a
-                  // column shouldn't drop its "+N new" chip — that
-                  // violates the universal-inbox rule. The column
-                  // header (desktop) and the per-card ✓ button are
-                  // the explicit mark-read affordances.
-                  <button
-                    type="button"
-                    key={c.key}
-                    role="tab"
-                    aria-selected={shown}
-                    onClick={() => onPhoneTabTap(c.key)}
-                    className="group shrink-0 min-h-[44px] flex items-center"
-                  >
-                    <span
-                      className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                        shown
-                          ? 'bg-accent text-white'
-                          : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
-                      }`}
-                    >
-                      {categoryLabel(c.name)}
-                      {!!newCount && (
-                        <span
-                          className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
-                            shown ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
-                          }`}
-                        >
-                          {newCount}
-                        </span>
-                      )}
-                    </span>
-                  </button>
-                )
-              })}
             </div>
 
             {/* Scrolls only the Brief tab: a Column fills it (h-full) and
@@ -3143,16 +3289,19 @@ export function App() {
                   // scroller hooks rebind to it.
                   key={phoneCol.key}
                   scrollerRef={setPhoneScroller}
-                  name={phoneCol.name}
-                  tabKey={phoneCol.key}
-                  sections={sectionsByColumn.get(phoneCol.name) ?? { new: [], history: [] }}
+                  columnKey={phoneCol.key}
+                  label={phoneCol.label}
+                  sourceName={phoneCol.sourceName}
+                  sections={sectionsByColumn.get(phoneCol.key) ?? { new: [], history: [] }}
                   sourcesById={sourcesById}
                   sourcesByName={sourcesByName}
-                  newCount={newCountByColumn.get(phoneCol.name)}
+                  noOwnFeeds={noOwnFeeds}
+                  onAddFeed={openFeeds}
+                  newCount={newCountByColumn.get(phoneCol.key)}
                   onRefresh={manualRefresh}
                   onSourceTap={onSourceTap}
                   selectedId={
-                    phoneColIndex === selectedColumnIndex ? selectedCardId ?? undefined : undefined
+                    phoneCol.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined
                   }
                   cardRefs={cardRefs}
                   onMarkRead={() => markColumnRead(phoneCol.name)}
@@ -3206,7 +3355,7 @@ export function App() {
       <Drawer
         open={drawerOpen}
         onClose={() => setDrawerOpen(false)}
-        categories={categories}
+        tabs={tabOrder.shown}
         sources={sources}
         onRefreshSources={() => refresh({ silent: true })}
         activeSources={activeSources}
@@ -3214,6 +3363,7 @@ export function App() {
         onClearAllFilters={clearSourceFilters}
         onCategoryJump={jumpToCategory}
         onOpenSettings={(tab) => openSettings(tab ?? 'feeds')}
+        onEditTabs={() => openTabsEditor('menu')}
         onEditSource={(id) => openSettings('feeds', id)}
         onSavePreset={(name) => {
           savePreset(name)
@@ -3293,6 +3443,14 @@ export function App() {
       <ShortcutsSheet
         open={shortcutsOpen}
         onClose={() => setShortcutsOpen(false)}
+      />
+      <TabsEditor
+        open={tabsEditorOpen}
+        onClose={closeTabsEditor}
+        tabs={tabOrder.all}
+        hidden={hiddenTabs}
+        onMove={moveTab}
+        onShow={showTab}
       />
 
       <ToastHost />

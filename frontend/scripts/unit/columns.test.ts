@@ -115,7 +115,9 @@ test('a fresh device opens on For You, skipping an empty Saved and Brief', () =>
   // For You empty: the first tab after Brief with stories, Saved included.
   assert.equal(freshTabIndex([tab(BRIEF_KEY, 0), tab(SAVED_KEY, 0), tab(FORYOU_KEY, 0), tab(NEWS)]), 3)
   assert.equal(freshTabIndex([tab(BRIEF_KEY, 0), tab(SAVED_KEY, 2), tab(NEWS)]), 1)
-  // Nothing anywhere: the first tab after Brief; only Brief: Brief.
+  // Nothing anywhere: For You, else the first tab after Brief; only
+  // Brief: Brief.
+  assert.equal(freshTabIndex([tab(BRIEF_KEY, 0), tab(SAVED_KEY, 0), tab(FORYOU_KEY, 0), tab(NEWS, 0)]), 2)
   assert.equal(freshTabIndex([tab(BRIEF_KEY, 0), tab(NEWS, 0)]), 1)
   assert.equal(freshTabIndex([tab(BRIEF_KEY, 0)]), 0)
 })
@@ -127,7 +129,7 @@ test('an empty strip shows nothing', () => {
 test('a fresh pick with nothing to show is not stored', () => {
   // A new install before its first stories: only Brief and empty tabs.
   const empty = [tab(BRIEF_KEY, 0), tab(SAVED_KEY, 0), tab(FORYOU_KEY, 0)]
-  assert.deepEqual(resolveTab(empty, null, null, LOADED), { key: SAVED_KEY, index: 1, store: null })
+  assert.deepEqual(resolveTab(empty, null, null, LOADED), { key: FORYOU_KEY, index: 2, store: null })
   assert.deepEqual(resolveTab([tab(BRIEF_KEY, 0)], null, null, LOADED), { key: BRIEF_KEY, index: 0, store: null })
   assert.equal(resolveTab([tab(BRIEF_KEY, 0)], { key: NHL }, null, LOADED).store, null)
   assert.equal(resolveTab([tab(BRIEF_KEY, 0)], { index: 2 }, null, LOADED).store, null)
@@ -196,4 +198,29 @@ test('a held stand-in gives way to the stored tab, to a settled list, and when i
   assert.deepEqual(resolveTab(strip(DEALS, VIDEO), { key: FORYOU_KEY }, 1, held(NEWS)), { key: DEALS, index: 1, store: null })
   // Brief is never held.
   assert.deepEqual(resolveTab(strip(DEALS, NEWS), null, null, held(BRIEF_KEY)), { key: DEALS, index: 1, store: null })
+})
+
+test('no migration before the first refresh while meta tabs are present', () => {
+  // From PR7a Saved and For You are always in the strip, empty until
+  // the preferences and For You arrive: the strip is never empty, so
+  // only the loaded flag (the first refresh and the preferences) keeps
+  // an old index or a fresh pick from being stored.
+  const early = [tab(BRIEF_KEY, 0), tab(SAVED_KEY, 0), tab(FORYOU_KEY, 0)]
+  assert.equal(resolveTab(early, { index: 0 }, null, LOADING).store, null)
+  assert.equal(resolveTab(early, { index: -1 }, null, LOADING).store, null)
+  assert.equal(resolveTab(early, null, null, LOADING).store, null)
+  assert.equal(resolveTab([...early, tab(NEWS)], { index: 0 }, null, LOADING).store, null)
+  assert.equal(resolveTab([...early, tab(NEWS)], null, null, LOADING).store, null)
+})
+
+test('an old index counts an empty Saved or For You out, as the strip it was stored on did', () => {
+  // Stored when the strip was For You, News, Video (nothing saved): 1 is News.
+  const tabs = [tab(BRIEF_KEY, 0), tab(SAVED_KEY, 0), tab(FORYOU_KEY, 4), tab(NEWS), tab(VIDEO)]
+  assert.deepEqual(resolveTab(tabs, { index: 1 }, null, LOADED), { key: NEWS, index: 3, store: NEWS })
+  // For You down too: 0 is News.
+  const down = [tab(BRIEF_KEY, 0), tab(SAVED_KEY, 0), tab(FORYOU_KEY, 0), tab(NEWS), tab(VIDEO)]
+  assert.deepEqual(resolveTab(down, { index: 0 }, null, { loaded: false, filterActive: false }), { key: NEWS, index: 3, store: null })
+  // With stories in Saved it counts, as it did.
+  const saved = [tab(BRIEF_KEY, 0), tab(SAVED_KEY, 1), tab(FORYOU_KEY, 4), tab(NEWS)]
+  assert.deepEqual(resolveTab(saved, { index: 0 }, null, LOADED), { key: SAVED_KEY, index: 1, store: SAVED_KEY })
 })

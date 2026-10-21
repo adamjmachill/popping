@@ -112,13 +112,16 @@ class _PreferenceKeyConvertor(Convertor[str]):
 register_url_convertor("preference_key", _PreferenceKeyConvertor())
 
 
-# Allowlist of the 10 known preference key namespaces the frontend
+# Allowlist of the 11 known preference key namespaces the frontend
 # uses (see ``PREFERENCE_KEYS`` in
 # ``frontend/src/lib/preferences.tsx``). Five of them take a
 # ``:<columnId>`` suffix (``read_entries``, ``last_viewed``,
-# ``column_prefs``, ``column_sections``, ``seen``). Five of them are
+# ``column_prefs``, ``column_sections``, ``seen``). Six of them are
 # global (no suffix: ``hidden_entries``, ``starred_entries``,
-# ``voted_entries``, ``filter_presets``, ``history_group_by``).
+# ``voted_entries``, ``filter_presets``, ``history_group_by``,
+# ``category_layout``). ``category_layout`` is the tab order and the
+# hidden tabs, one whole value written by PUT; the server never reads
+# it.
 # ``seen:<category>`` is the home for new seen marks, which clients
 # write only by PATCH (PUT of set keys is refused from PR2c on): old
 # bundles still PUT whole 200-id lists to ``read_entries:<col.name>``,
@@ -172,6 +175,7 @@ _PREFERENCE_KEY_RE = re.compile(
             "voted_entries",
             "filter_presets",
             "history_group_by",
+            "category_layout",
         )
     ) + r")$"
 )
@@ -215,11 +219,11 @@ def _validate_key(key: str) -> None:
             status_code=400,
             detail=(
                 f"preference key {key!r} is not on the allowlist; "
-                f"expected one of the 10 known namespaces "
+                f"expected one of the 11 known namespaces "
                 f"(read_entries:<id>, last_viewed:<id>, "
                 f"column_prefs:<id>, column_sections:<id>, seen:<id>, "
                 f"hidden_entries, starred_entries, voted_entries, "
-                f"filter_presets, history_group_by)"
+                f"filter_presets, history_group_by, category_layout)"
             ),
         )
 

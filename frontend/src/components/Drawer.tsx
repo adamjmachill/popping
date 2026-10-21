@@ -10,8 +10,8 @@
 //
 // The body is iOS-style grouped sections:
 //
-//   1. (no label)        — Settings, and Save current view
-//   2. JUMP TO COLUMN    — by-category navigation
+//   1. (no label)        — Settings, Edit tabs, and Save current view
+//   2. JUMP TO COLUMN    — every tab the strip shows, in its order
 //   3. SOURCES           — the multi-select filter; each row's › opens
 //                          that feed in Settings
 //
@@ -22,13 +22,16 @@ import { useEffect, useRef, useState } from 'react'
 import { flushSync } from 'react-dom'
 import type { Source } from '../api'
 import { SourceIcon } from './SourceIcon'
+import { ChevronRight, GroupedRow, GroupedSection } from './Grouped'
 import { categoryLabel, sourceLabel } from '../lib/labels'
 import type { SettingsTab } from './Settings'
 
 type Props = {
   open: boolean
   onClose: () => void
-  categories: string[]
+  // The tabs the strip shows after Brief, in strip order (App's
+  // ``orderColumns().shown``), so a hidden tab is never offered.
+  tabs: ReadonlyArray<{ key: string; label: string }>
   // Source list, owned by App (the same fetch that already feeds
   // FeedManager/Settings — see App.tsx's `refresh()`). The Drawer
   // used to fetch its own copy on every open, which meant an extra
@@ -46,12 +49,14 @@ type Props = {
   // …" header's clear-all button so the user doesn't have to untick
   // each row individually.
   onClearAllFilters?: () => void
-  // "Scroll to column" support. The Drawer's category list calls
-  // back with the category name; App owns the column refs and
-  // scrolls the right one into view.
-  onCategoryJump?: (category: string) => void
+  // "Scroll to column" support. The Jump to column list calls back
+  // with the tab's key; App owns the column refs and scrolls the
+  // right one into view.
+  onCategoryJump?: (key: string) => void
   // Open the Settings overlay (the Settings row).
   onOpenSettings?: (tab?: SettingsTab) => void
+  // Open the tab editor (the Edit tabs row). It takes focus itself.
+  onEditTabs?: () => void
   // Open one feed in Settings → Feeds (each source row's ›).
   onEditSource?: (id: number) => void
   // Save the current source filter + column prefs as a
@@ -67,7 +72,7 @@ type Props = {
 export function Drawer({
   open,
   onClose,
-  categories,
+  tabs,
   sources,
   onRefreshSources,
   activeSources,
@@ -75,6 +80,7 @@ export function Drawer({
   onClearAllFilters,
   onCategoryJump,
   onOpenSettings,
+  onEditTabs,
   onEditSource,
   // App wires this to ``savePreset`` and a name prompt, and toasts
   // the new preset's name.
@@ -335,6 +341,17 @@ export function Drawer({
               subtitle="Feeds, AI, history, saved"
               showChevron
             />
+            {onEditTabs && (
+              <GroupedRow
+                onClick={() => {
+                  handingOff.current = true
+                  onEditTabs()
+                  onClose()
+                }}
+                title="Edit tabs"
+                showChevron
+              />
+            )}
             {/* Saves the current source filter and column settings as
                 a named view; its chip appears above the dashboard. */}
             {onSavePreset &&
@@ -383,16 +400,16 @@ export function Drawer({
               ))}
           </GroupedSection>
 
-          {categories.length > 0 && (
+          {tabs.length > 0 && (
             <GroupedSection label="Jump to column">
-              {categories.map((c) => (
-                // Each category is its own row. Tap → close drawer
-                // and scroll the desktop grid to that column.
+              {tabs.map((t) => (
+                // Each tab is its own row. Tap → close drawer and select
+                // that tab (the phone's strip, the desktop grid's column).
                 <GroupedRow
-                  key={c}
-                  title={categoryLabel(c)}
+                  key={t.key}
+                  title={t.label}
                   onClick={() => {
-                    onCategoryJump?.(c)
+                    onCategoryJump?.(t.key)
                     onClose()
                   }}
                   showChevron
@@ -499,143 +516,3 @@ export function Drawer({
     </>
   )
 }
-
-// ---------------------------------------------------------------------------
-// iOS grouped-list primitives
-// ---------------------------------------------------------------------------
-
-// Section. The iOS convention is to render an uppercase label in
-// ``text-label-tertiary`` above a rounded card of rows (the first
-// section has none). The label has
-// generous left/right padding (``px-4``) and a small bottom margin.
-// The card is a single rounded ``bg-bg-surface`` block; rows inside
-// are separated by ``border-hairline`` so dividers extend to the
-// edges of the card (not full bleed). ``footnote`` sits below the
-// card in ``text-ios-caption text-label-secondary`` — useful for
-// explanatory copy (e.g. "filtering: reuters, hackernews").
-//
-// ``action`` (e.g. a "Clear" button) renders on the right side of
-// the label row, like the "Edit" button next to the "Reminders"
-// header in iOS Settings.
-function GroupedSection({
-  label,
-  footnote,
-  action,
-  children,
-}: {
-  label?: string
-  footnote?: string
-  action?: React.ReactNode
-  children: React.ReactNode
-}) {
-  return (
-    <div className="mt-6 first:mt-2">
-      {(label || action) && (
-        <div className="flex items-end justify-between px-4 mb-2">
-          {label && (
-            <h3 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
-              {label}
-            </h3>
-          )}
-          {action}
-        </div>
-      )}
-      {/* The rows go inside a single rounded card so the iOS grouped-
-          list visual works: rounded card on the page, hairline
-          dividers between rows, no outside border. ``overflow-hidden``
-          keeps the first/last row from poking past the card corners. */}
-      <div className="mx-4 rounded-ios bg-bg-surface overflow-hidden">
-        {children}
-      </div>
-      {footnote && (
-        <p className="px-4 mt-2 text-ios-caption text-label-secondary">
-          {footnote}
-        </p>
-      )}
-    </div>
-  )
-}
-
-// Single iOS-style row. ``title`` is the primary text, ``subtitle``
-// is the secondary line beneath it (font-300, ``label-secondary``).
-// Renders as a 44px-tall button when ``onClick`` is set — the entire
-// row is the tap target. When used as a static display (no
-// ``onClick``) it falls back to a non-button ``<div>``.
-//
-// ``tone`` recolors the chevron-area / title when there's a state to
-// surface (success / warning / destructive) — iOS uses these for
-// health-check rows in Settings → Battery, for example.
-function GroupedRow({
-  title,
-  subtitle,
-  onClick,
-  showChevron,
-  tone,
-}: {
-  title: React.ReactNode
-  subtitle?: React.ReactNode
-  onClick?: () => void
-  showChevron?: boolean
-  tone?: 'success' | 'warning' | 'destructive'
-}) {
-  const toneClass =
-    tone === 'success'
-      ? 'text-emerald-400'
-      : tone === 'warning'
-      ? 'text-amber-400'
-      : tone === 'destructive'
-      ? 'text-red-400'
-      : 'text-label-primary'
-  const content = (
-    <>
-      <div className="flex-1 min-w-0">
-        <div className={`text-ios-body ${toneClass} truncate`}>{title}</div>
-        {subtitle && (
-          <div className="text-ios-caption text-label-secondary truncate">
-            {subtitle}
-          </div>
-        )}
-      </div>
-      {showChevron && (
-        <ChevronRight className="shrink-0 w-4 h-4 text-label-tertiary" />
-      )}
-    </>
-  )
-  const baseClass =
-    'flex items-center gap-3 px-4 min-h-[44px] border-b border-hairline last:border-b-0'
-  if (onClick) {
-    return (
-      <button
-        type="button"
-        onClick={onClick}
-        className={`${baseClass} w-full text-left active:bg-bg-elevated`}
-      >
-        {content}
-      </button>
-    )
-  }
-  return <div className={baseClass}>{content}</div>
-}
-
-// iOS chevron — used for navigation rows. Right-pointing, single 1.5
-// stroke. Pulled inline (rather than into an icon library) because
-// the Drawer is the only consumer.
-function ChevronRight({ className }: { className?: string }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth={1.75}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-    >
-      <polyline points="9 6 15 12 9 18" />
-    </svg>
-  )
-}
-
-
-

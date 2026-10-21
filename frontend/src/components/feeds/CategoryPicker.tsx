@@ -24,6 +24,7 @@ export function CategoryPicker({
   disabled,
   defaultInSuggestions,
   onDraftChange,
+  order,
 }: {
   inputId: string
   value: string
@@ -35,14 +36,17 @@ export function CategoryPicker({
   defaultInSuggestions?: boolean
   // True while the new-category field holds text not yet added.
   onDraftChange?: (pending: boolean) => void
+  // The tab order (``category_layout``'s ``order``): "Yours" lists the
+  // categories in it, as the strip does. Label order without it.
+  order?: readonly string[]
 }) {
   const [mode, setMode] = useState<'pick' | 'new'>('pick')
   const [draft, setDraft] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
   const { yours, suggestions } = useMemo(
-    () => categoryOptions(sources, value, categoryLabel, { defaultInSuggestions }),
-    [sources, value, defaultInSuggestions],
+    () => categoryOptions(sources, value, categoryLabel, { defaultInSuggestions, order }),
+    [sources, value, defaultInSuggestions, order],
   )
   const existing = useMemo(() => Array.from(new Set(sources.map((s) => s.category))), [sources])
   const resolved = draft.trim() ? resolveNewCategory(draft, existing, CATEGORY_OPTIONS, categoryLabel) : null
