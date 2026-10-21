@@ -126,7 +126,9 @@ imports.
 - No new process, worker or port; IntersectionObserver on the main thread
   with no library.
 - Desktop: no tracking, no `view` events from cards any more (spec: the
-  on-mount view goes; desktop is open only).
+  on-mount view goes; desktop is open only). (Changed by the review
+  fixes: opening a story records its `view`, so the desktop's views come
+  from opens.)
 
 ## What changed
 
@@ -210,7 +212,8 @@ event moves from drawing a card to that moment.
   marked (`added`), not the partition's count a render old; with nothing
   left to mark it starts the tab over with no toast. Not in the spec;
   without it, a card seen on scroll just before Mark all was undone by
-  Mark all's Undo.
+  Mark all's Undo. Since the review fixes every other reset flushes it
+  too (below).
 - **PR3b's flows and smoke states that count unseen stories with cards
   or the marker on screen now hold the page's clock.** Found by building
   with `SEEN_DWELL_MS = 50` and running every flow and state: in real time
@@ -233,7 +236,7 @@ event moves from drawing a card to that moment.
 
 ## Tests
 
-- Unit `frontend/scripts/unit/seen.test.ts` (25 cases): the thresholds;
+- Unit `frontend/scripts/unit/seen.test.ts` (28 cases): the thresholds;
   qualify then off the top; a fling; an interrupted dwell; a card taller
   than the list (half of the list, not of itself); leaving through the
   bottom; zero rects (display:none, a zero-height list); a detached
@@ -248,17 +251,24 @@ event moves from drawing a card to that moment.
   timers and dwell gone, old entries dropped); a dwell under way when the
   observer goes; the hook case (register, tear the observer down, a card
   registered meanwhile, recreate it: both observed, and marks happen); a
-  late detach; `takeRecords`; the collector.
+  late detach; `takeRecords`; the collector; and (review fixes) the
+  marker's own dwell: it starts over when it ends behind a sheet or a
+  hidden page (26), a cover stops it and uncovering starts it over (27),
+  and it doesn't start while covered (28).
 - pytest `test_slice21_column_memo.py`: `[trackSeen]`.
 - New flows (390, the page's clock installed and held, moved with
   `runFor`): `flow-scroll-marks-seen`, `flow-view-on-seen`,
   `flow-seen-flush-on-hide`, `flow-saved-open-only`,
-  `flow-landscape-no-marks`. The README has each step.
+  `flow-landscape-no-marks`, and (review fixes) `flow-seen-tab-switch`.
+  The README has each step.
 - Changed flows: `flow-caught-up` (the flung-card case and the end rule),
   `flow-auto-append`, `flow-new-arrival-appends`,
   `flow-arrival-batch-edge` (clock held), `flow-h1-keepalive` (its view
   comes from a card seen on scroll). Smoke states `caught-up`,
   `not-seen-row`, `earlier-open`: clock held from the tap on the tab.
+  Review fixes: `flow-scroll-marks-seen` reads the badge before and after
+  the seen batch runs; `flow-view-on-seen` opens the top card first;
+  `flow-new-arrival-appends` waits for the hold with `observersSettled`.
 - Flow helpers: `holdClock`, `observersSettled` (a fresh
   IntersectionObserver's first report comes in the same task as every
   older one's, so the app's have run; no animation frame needed, which a
@@ -320,6 +330,60 @@ frontend's `node_modules` linked in, Postgres 16 database
   50 ms and retune runs). The unit's review agents run after this.
 - WebKit results come only from CI.
 
+### After the review fixes
+
+The same local loop on the fixed tree, still on PR3b at 45aac1e (PR3b's
+re-check, 76f31bd, is on its branch but not under this one yet; see the
+rebase check below), database `popping_test_f2`, preview on
+127.0.0.1:4174.
+
+- `npm run lint`: 0 errors (the same 4 warnings). `npm run build`:
+  clean. `package.json` and the lockfile: unchanged.
+- Unit tests: 221 of 221 (`seen.test.ts`: 28).
+- Backend pytest, the whole suite: 1713 passed, 13 failed, the same 13
+  as the DNS-only baseline (no backend file changed; the tests that read
+  frontend source pass).
+- Strict smoke, every state and flow: 0 failures, 0 warnings (177 runs,
+  635 s, load average 7 to 13 on 4 CPUs while the backend suite ran
+  beside it).
+- The PR3c flows and the read-model flows and states
+  (`flow-seen-tab-switch`, `flow-scroll-marks-seen`, `flow-view-on-seen`,
+  `flow-seen-flush-on-hide`, `flow-saved-open-only`,
+  `flow-landscape-no-marks`, `flow-caught-up`, `flow-auto-append`,
+  `flow-new-arrival-appends`, `flow-arrival-batch-edge`,
+  `flow-h1-keepalive`, `flow-open-marks-seen`,
+  `flow-return-after-10-min`, `flow-mark-all-read`, `flow-badge-cap`,
+  `flow-scroller-rotate`, `flow-sort-best`, `flow-refresh-resets`,
+  `flow-next-tab`, and `caught-up`, `not-seen-row`, `earlier-open` at
+  390 and 320): looped 5 times, 0 failures each time (112 to 134 s a
+  loop).
+- `flow-new-arrival-appends` alone, 10 more times: 0 failures (load
+  average 3.8 to 5).
+  The reviewer's failures came at a load average of 13 to 23 (other
+  sessions' CPU burners); this container ran at 1.5 to 5 here, so these
+  runs show the flow still passes, not that the old race is gone. That
+  rests on the wait itself: `observersSettled` resolves after Column's
+  observer has set the hold, where `sleep(400)` only hoped it had.
+- The four flows this commit adds or edits (`flow-seen-tab-switch`,
+  `flow-view-on-seen`, `flow-scroll-marks-seen`,
+  `flow-new-arrival-appends`) on builds with `SEEN_DWELL_MS` 50, 700 and
+  1500: 0 failures each.
+- Mutation checks: 10 more mutants (the rows marked "review fixes" in the
+  table below), each a scratch edit, a rebuild where it is app code, an
+  `--only` run (or the unit file), and a restore compared byte for byte:
+  all 10 fail where expected.
+- Rebase onto PR3b's re-check: `git merge-tree --merge-base 45aac1e
+  76f31bd <this tree>` merges `flows.cjs` (with the
+  `flow-new-arrival-appends` change) and `App.tsx` cleanly. It reports
+  two conflicts, `frontend/scripts/iphone-audit/README.md` (the flow
+  table, where 76f31bd adds `flow-return-from-earlier` beside PR3c's
+  rows) and `frontend/src/components/Column.tsx`, and the first PR3c
+  commit alone reports the same two: they are the rebase's to resolve.
+  This commit adds one README row to that same table block and doesn't
+  touch Column.tsx.
+- Security checklist: unchanged. No route, fetch or server-side read; the
+  `view` an open now records goes through the existing interaction batch.
+
 ### Mutation checks (test → broken line → failing rule)
 
 Each was a scratch edit, then a rebuild, `--only` on the flows (or the
@@ -362,6 +426,16 @@ Unit cases are by their place in `seen.test.ts`.
 | `flow-saved-open-only` | `trackSeen` on Saved, alone | **survives**: `markSeen` looks ids up in the phone tab's partition and Saved has none, a second guard |
 | `flow-saved-open-only` | `trackSeen` on Saved, and a lookup that finds Saved's stories | SAVED-OPEN-ONLY: "scrolling Saved marked stories: … add [7001,7002] …"; "scrolling Saved sent views" |
 | pytest | the comparator ignores `trackSeen` | `test_column_comparator_checks_prop[trackSeen]` |
+| unit (review fixes) | no pause check when the marker's dwell fires | 26 ("modal: the end rule ran behind it"); pausing for only one of the two flags fails it on the other ("hidden: …") |
+| unit (review fixes) | `setCovered(true)` keeps the marker's timer | 27 ("the marker's dwell stopped") |
+| unit (review fixes) | the marker's dwell starts while covered (`!covered` gone from `onMarker`) | 28 ("a dwell started under the cover") |
+| unit (review fixes) | uncovering restarts no marker dwell | 12, 27, 28 |
+| unit (review fixes) | the three above at once (the reviewer's mutant, which passed all 25 cases before) | 26, 27, 28 |
+| `flow-seen-tab-switch` (review fixes) | `selectTab` doesn't flush the collector | SEEN-SWITCH: "story 101, seen on scroll just before the tab switch, is above the marker" |
+| `flow-seen-tab-switch` (review fixes) | `startTabsOver` doesn't flush (a Refresh that lands inside the window) | SEEN-SWITCH: "story 102, seen on scroll just before a Refresh, is above the marker" |
+| `flow-seen-tab-switch` (review fixes) | `setPrefsFor` doesn't flush (a new Sort) | SEEN-SWITCH: "story 104, seen on scroll just before a new Sort, is above the marker" |
+| `flow-view-on-seen` (review fixes) | `openEntry` records no `view` | VIEW-ON-SEEN: "story 601 was opened and no view was sent" |
+| `flow-scroll-marks-seen` (review fixes) | `markSeen` calls `addSeenMarksRef.current(stories)` instead of `seenBatch.add(stories)` (it skips the batch) | SCROLL-SEEN: "the badge dropped before the seen batch ran: it reads "36", expected "40"" |
 
 ### Flow determinism
 
@@ -375,6 +449,90 @@ tied to 1000 and are fixed: the 50 ms run failed the cut-in-two step
 (600 / 500 ms, now scaled from the constant), and the 1500 run failed the
 fling (it counted on `writeSeen`'s 1.45 s as a dwell; it now runs an
 explicit `dwell` first).
+
+## Review fixes (second commit)
+
+The unit's review agents (observer lifecycle; visibility and flush
+order; flow determinism) confirmed five findings. All five are fixed;
+none was skipped.
+
+1. **A reset inside the collector's 300 ms put a story just read above
+   the marker of the tab it started.** A tab switch starts both tabs over
+   (PR3b), and the destination's new snapshot was built in the render the
+   tap caused, while the story read off the top a moment before was still
+   in the collector: it went into unseen and, once its mark landed, stayed
+   there (ids in a snapshot keep their group), drawn as new but counted
+   out of the badge and the end row. Nothing was lost or written twice.
+   Now everything that starts a snapshot over writes the collector first,
+   so the marks and the reset land in one render:
+   - `selectTab` (the strip, the Menu's Jump to and C8's row through
+     `jumpToCategory`, and the resolve effect) calls `seenBatch.flush()`
+     first. The collector and `addSeenMarksRef` moved up beside the
+     phone's tab, so `selectTab` can reach it; it still drains into the
+     latest `addSeenMarks` (the ref is set where that is declared).
+   - `startTabsOver(key?)`, a small App-side wrapper: flush, then PR3b's
+     `resetSnapshot`, which is unchanged. Every reset App asks for goes
+     through it: Refresh / `r` when its stories land (a fetch that returns
+     inside 300 ms), Mark all and its Undo, C1's return (already flushed
+     by the hide; harmless).
+   - `setPrefsFor` flushes before a Sort or age-window change: the tab's
+     `order` starts its new snapshot in the next render.
+   - Left alone: a tab that disappears (the render that shows the tab
+     taking its place comes before the resolve effect's `selectTab`) and a
+     change of the source filter (PR8b removes it). Both start from a sheet
+     (Settings or the Menu), and the collector drains 300 ms after its
+     first story, long before a change made there.
+   - Test: `flow-seen-tab-switch` (new): For You's top story read and
+     scrolled off, its category's tab tapped before the collector's timer
+     (clock held): it is under the marker, in Earlier, and `seen:news`
+     adds it once. The same for a card read off just before a Refresh lands
+     and just before ⋯ → Best. Mutants: each of the three flushes removed
+     alone fails its own step (table above).
+2. **An opened story recorded no `view`** (and the desktop none at all),
+   against D3's "recorded at that moment". `openEntry` now records it
+   (`recordBatched`, next to `addSeenMarks`), on every layout and from
+   every way out (tabs, Saved, search, the desktop For You row).
+   `recordBatched` keeps one view per story per session, so an open and a
+   scroll past, in either order, send one. `markSeen` keeps its skip of a
+   story already seen: opened ones recorded their view when opened, one
+   marked on another device recorded it there, and Mark all isn't a read.
+   Brief draws no story cards or links (its text is the AI's), so
+   nothing there opens a story. Test: `flow-view-on-seen` opens the top card with
+   nothing scrolled (its `click` and exactly one `view`), then scrolls it
+   and the next card off the top (one `view` for the next, none more for
+   the opened one). Mutant: no `view` in `openEntry`. The "desktop records
+   no view" line under Open items now reads "the desktop's views come from
+   opens".
+3. **No test covered the end rule's own pause.** The marker's dwell timer
+   restarts when it fires behind a sheet or a hidden page, a cover stops
+   it, and it doesn't start while covered; the reviewer's mutant removing
+   all three passed every case and flow. Unit cases 26-28 pin each one
+   (table above: each alone, and the three together, fail). The optional
+   `flow-caught-up` step (the Menu held open with the marker on screen) is
+   not added: with the cards and the marker coming on screen together it
+   passes against that mutant too (the cards' own dwells stop under the
+   cover, so nothing is qualified when the marker's timer fires), and a
+   step that qualifies the cards first depends on where the end row falls
+   at 390×844. The unit cases test the rule directly.
+4. **App's use of the 300 ms collector had no test.** In
+   `flow-scroll-marks-seen`'s "read, then scrolled off the top" step the
+   badge is read after a 200 ms real-time wait with the clock held (React
+   renders through MessageChannel, which the clock doesn't hold; a frame
+   wait wouldn't do, rAF is held): it still reads 40. Then the seen batch
+   runs (`SEEN_BATCH_MS + 50`) and the badge drops before prefSync's 1 s
+   PATCH batch has gone; the existing PATCH checks follow. Mutant:
+   `markSeen` writing straight to `addSeenMarks` fails with "the badge
+   dropped before the seen batch ran".
+5. **`flow-new-arrival-appends` waited for the hold with real-time
+   sleeps.** The three `sleep(400)` after a scroll meant to put the marker
+   above the screen are now `observersSettled(page)`: it resolves in the
+   notification task in which Column's marker observer has already called
+   `setHold`, so the hold is set before `poll()` brings the arrival in
+   (Column's `held` state isn't in the DOM, so this is the thing to wait
+   on). The `sleep(400)` inside `poll()` waits for something else and
+   stays. PR3b's re-check (76f31bd) doesn't touch this flow's lines, so
+   the change carries over unchanged when PR3c is rebased onto it
+   (checked with `git merge-tree`, below).
 
 ## Open items for later units
 
@@ -393,8 +551,9 @@ explicit `dwell` first).
   interaction queue until the page is back (the interaction module's own
   hide handler runs before the preferences' leave flush). Views are
   advisory; the seen mark itself goes in the keepalive PATCH.
-- The desktop records no `view` from cards any more (open only, C2): the
-  ranking's viewed signal comes from the phone.
+- The desktop's views come from opens (`openEntry` records the `view`,
+  on every layout); the phone's from opens and scrolling past. Drawing a
+  card records none.
 - `ARCHITECTURE.md`: no change. The tracker, the registry and the
   collector are browser memory; nothing server-side.
 

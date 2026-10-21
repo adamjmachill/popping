@@ -509,3 +509,69 @@ test('the batch collects for SEEN_BATCH_MS from the first story, then hands them
   batch.flush()
   assert.equal(drained.length, 2, 'nothing to hand on: no call')
 })
+
+// The end rule's own dwell (the marker's) pauses like a card's: a short
+// tab's last cards are on screen with the marker, and must not be used up
+// behind the Menu or while the app is in the background.
+
+test('the marker\'s dwell that ends while a sheet is open or the page is hidden starts over', () => {
+  for (const flag of ['modal', 'hidden'] as const) {
+    const t = setup()
+    const [a, m] = [el('a'), el('marker')]
+    t.tracker.registry.card(1, a)
+    t.tracker.registry.marker(m)
+    // Card 1 qualifies with no marker on screen.
+    t.send(at(a, 100))
+    t.advance(SEEN_DWELL_MS)
+    assert.deepEqual(t.all(), [], `${flag}: qualified, not seen`)
+    // The marker comes on screen, then the sheet opens (or the page
+    // hides) with no setCovered: only the pause check stands.
+    t.send(at(m, 700, 44))
+    t.state[flag] = true
+    t.advance(3 * SEEN_DWELL_MS)
+    assert.deepEqual(t.all(), [], `${flag}: the end rule ran behind it`)
+    t.state[flag] = false
+    t.advance(SEEN_DWELL_MS - 1)
+    assert.deepEqual(t.all(), [], `${flag}: seen before a full dwell after`)
+    t.advance(1)
+    assert.deepEqual(t.seen, [[1]], `${flag}: the end rule, a dwell after it closed`)
+  }
+})
+
+test('covered, the marker\'s dwell stops, and starts over once uncovered', () => {
+  const t = setup()
+  const [a, m] = [el('a'), el('marker')]
+  t.tracker.registry.card(1, a)
+  t.tracker.registry.marker(m)
+  t.send(at(a, 100))
+  t.advance(SEEN_DWELL_MS)
+  t.send(at(m, 700, 44))
+  t.advance(SEEN_DWELL_MS / 2)
+  t.tracker.setCovered(true)
+  assert.equal(t.timers.size, 0, 'the marker\'s dwell stopped')
+  t.advance(3 * SEEN_DWELL_MS)
+  assert.deepEqual(t.all(), [])
+  t.tracker.setCovered(false)
+  t.advance(SEEN_DWELL_MS - 1)
+  assert.deepEqual(t.all(), [], 'a full dwell after uncovering, not the half left before the cover')
+  t.advance(1)
+  assert.deepEqual(t.seen, [[1]])
+})
+
+test('the marker coming on screen while covered starts no dwell', () => {
+  const t = setup()
+  const [a, m] = [el('a'), el('marker')]
+  t.tracker.registry.card(1, a)
+  t.tracker.registry.marker(m)
+  // Card 1 qualified before the cover.
+  t.send(at(a, 100))
+  t.advance(SEEN_DWELL_MS)
+  t.tracker.setCovered(true)
+  t.send(at(m, 700, 44))
+  assert.equal(t.timers.size, 0, 'a dwell started under the cover')
+  t.advance(3 * SEEN_DWELL_MS)
+  assert.deepEqual(t.all(), [])
+  t.tracker.setCovered(false)
+  t.advance(SEEN_DWELL_MS)
+  assert.deepEqual(t.seen, [[1]], 'uncovered, the marker\'s dwell runs')
+})
