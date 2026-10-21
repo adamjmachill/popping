@@ -56,12 +56,15 @@ work", finished the flows, and ran the local loop and the mutation checks.
     (ids outside `keep` first, then the smallest; returns `dropped`),
     `applyWrites`, `mergeIncoming(prev, rows, pending, {full})`,
     `stampMicros` / `laterStamp` (the `updated_at` string compared in
-    microseconds), `classifyWriteError`, `legacySeedPlan`, and from the
-    review fixes `foldWrite`, `splitDelta` (one PATCH's worth) and
-    `overridden` (what an earlier request that landed late undid).
+    microseconds), `classifyWriteError`, `legacySeedPlan`, from the
+    review fixes `foldWrite` and `splitDelta` (one PATCH's worth), and
+    from the final round `withoutOps` (a write without what others carry)
+    and `isRolledBack` (a 404 or 405). (`overridden`, which the review
+    fixes added for the leave flush's stale check, went with that check in
+    the final round.)
   - `createPrefSync(deps)`: `addIds(key, ids, keep?)`, `removeIds`,
     `setVotes`, `put` and `delete` (both throw for a set key), `resync`,
-    `leave`, `resume`, `flushPending`, `discardPending`,
+    `leave`, `resume`, `flushPending`, `discardPending(drop)`,
     `registerBeforeFlush`, `rows()`.
 - `frontend/src/lib/preferences.tsx`:
   - The provider holds one engine. `state` is decoded from its rows by
@@ -102,7 +105,8 @@ work", finished the flows, and ran the local loop and the mutation checks.
     `MAX_PER_COLUMN` and every App-side slice are gone.
   - `refresh()` calls `prefs.resync()`; the visibility handler calls
     `prefs.resync({ full: true })` on return; `resetLocalState` awaits
-    `prefs.discardPending()` before its DELETEs, then reloads.
+    `prefs.discardPending(resetDeletes)` (the keys it deletes) before its
+    DELETEs, then reloads.
 - `frontend/scripts/iphone-audit/capture.cjs`: PATCH on the preference
   store in the server's order (the body's shape as
   `UserPreferencePatchIn` checks it, 422; a key that isn't a set key, 400;
@@ -130,7 +134,7 @@ work", finished the flows, and ran the local loop and the mutation checks.
 1. At most one write in flight per key, PATCH and PUT alike. A queued
    write for a busy key goes in the first batch after the ack. Leaving the
    page is the exception (see Leaving): the earlier request is then kept
-   as stale and its answer checked.
+   as stale, and its answer sets nothing and sends nothing.
 2. No answer, a 5xx, 404, 405, 408 or 429: the write is folded back ahead
    of the queued one (`foldDelta`; a PUT is dropped when a newer value is
    queued) and stays on screen. Retries go 2, 4 and 8 s after each
@@ -139,6 +143,9 @@ work", finished the flows, and ran the local loop and the mutation checks.
    a later batch for the key, a return to the front, the reload flush or
    the leave flush sends it again (a return starts a new round of
    retries). Failures after the toast don't toast again until a new round.
+   A write whose last failure was a 404 or 405 doesn't hold back PR1r's
+   reload (`flushPending`): the server has no route for it, and only the
+   reload onto the build it serves can cure that.
 3. 400, 409, 422 and any other 4xx: the write is dropped, the screen falls
    back to the server's value plus what is still pending, the next resync
    is full, and a toast says so. The key's round of retries ends.
@@ -169,16 +176,23 @@ work", finished the flows, and ran the local loop and the mutation checks.
    never in PATCH or PUT answers. Polls send `since = watermark − 60 s`.
    No watermark yet, no successful full GET yet, or a refused write makes
    the resync full.
-9. `discardPending()` clears the queue, the batch and retry timers and the
-   GET, ignores what the writes on the way answer, waits for them for at
-   most 3 s (`DISCARD_WAIT_MS`, like PR1r's `FLUSH_CAP_MS`; one rule 4
-   has given up on isn't waited for), and from then on sends nothing, not
-   even from the leave flush or a write made meanwhile. Reset calls it
-   before its DELETEs and reloads after. The wait is capped because an
-   iOS fetch may never settle: uncapped, one stuck write left Reset doing
-   nothing while every later change stayed unsent. A write that lands
-   after the DELETEs can at worst put back a few read marks or one tab's
-   setting.
+9. `discardPending(drop)` takes the keys Reset deletes (`read_entries:*`,
+   `last_viewed:*`, `column_prefs:*`, `column_sections:*`,
+   `history_group_by`; PR3b adds `seen:*`). For those it clears the queue
+   and the retry timers, ignores what their writes on the way answer, and
+   from then on queues and sends nothing, not a write made meanwhile, nor
+   the leave flush's. Every other key (saves, hides, votes, saved views)
+   goes on: what is queued for it, or waiting on a retry, is sent at once
+   with `keepalive`, and one that fails meanwhile is sent once more. It
+   waits for all of that and for the writes on the way, at most 3 s
+   (`DISCARD_WAIT_MS`, like PR1r's `FLUSH_CAP_MS`; one rule 4 has given up
+   on isn't waited for), stops the GET, and no GET goes after it. Reset
+   calls it before its DELETEs and reloads after; the reload's leave flush
+   sends what is still queued for the kept keys. The wait is capped
+   because an iOS fetch may never settle: uncapped, one stuck write left
+   Reset doing nothing while every later change stayed unsent. A write
+   that lands after the DELETEs can at worst put back a few read marks or
+   one tab's setting.
 
 - Batches: set keys in a fixed 1 s batch, the others (PUT or DELETE) in a
   fixed 250 ms batch; neither is a debounce.
@@ -197,19 +211,23 @@ work", finished the flows, and ran the local loop and the mutation checks.
   first part; the rest goes on the return). A key with a write still on
   the way sends that change again folded with the queued one: the page may
   not come back to send it after the answer. The earlier request is kept
-  as stale: its answer never sets base, and if it comes after the
-  keepalive request's answer and its row shows it undid part of that
-  request (an Undo just before the hide), that part goes again, at once
-  with `keepalive` while the page is hidden. When it answers first, it
-  most likely landed first, and nothing more goes. (Not by `updated_at`,
-  which is the transaction start, not the lock order.)
+  as stale (`by`; the keepalive request lists it in `carries`): its answer
+  never sets base and never sends anything (final round: which of the two
+  landed last can't be told, see Deviations). When the keepalive request
+  fails and is tried again, only what isn't known to have landed goes back
+  in the queue: an earlier request that answered OK landed, and its row
+  becomes base; one still on the way is waited for again like any request
+  (rule 1); one given up on (rule 4) stays shown and isn't sent again;
+  only one that failed too has its change sent again, with the queued
+  change.
 - Back in front: the provider's `resume()` gives up on writes sent before
   or during the hide (rule 4) and sends everything queued; App asks for
   the full resync.
 - `flushPending()` (PR1r's reload): runs the before-flush functions, sends
   each queued key (a busy key after its ack, a change over the cap part by
   part), waits, doesn't send again a write it sent that failed, and
-  returns whether nothing is left to retry.
+  returns whether nothing is left to retry. A write it sent that got a 404
+  or 405 doesn't count as left (final round).
 - Pruning: `addIds` prunes against what is shown with `pruneIds` (the
   added ids and `keep` are kept unless they alone pass the cap) and sends
   the dropped ids it held in the same PATCH's `remove`. `setVotes` clears
@@ -274,7 +292,9 @@ and kept it. Fixed:
 - Flows (390): `flow-prefs-resync`, `flow-visibility-flush`,
   `flow-prefs-retry`, `flow-prefs-405`, `flow-prefs-fail-save-keeps-list`
   (new); `flow-reset-keeps-saves` extended (a save and a read mark queued
-  when Reset is tapped: no PATCH or PUT after the DELETEs);
+  when Reset is tapped: no PATCH or PUT after the DELETEs; since the final
+  round, the save goes before the DELETEs and is kept, and nothing for a
+  key Reset deletes goes at all);
   `flow-h1-pref-store` covers PATCH and its 400s and 422s;
   `flow-reload-on-new-build` steps 6-8 follow the PATCH and the leave
   flush (the pending save now goes when the page hides, not on return);
@@ -399,7 +419,8 @@ same problem from two angles.
   keepalive request reversed (`overridden`), that part is queued again,
   ahead of anything newer, and sent at once with `keepalive` while the
   page is hidden. When the earlier request answers first, nothing more
-  goes. Order is not read from `updated_at`.
+  goes. Order is not read from `updated_at`. (The final round found the
+  row test vacuous, and removed the check and its resend.)
 - **Reset waited with no limit** (minor). `discardPending` now waits at
   most `DISCARD_WAIT_MS` (3 s), and not at all for a write rule 4 has
   given up on, so Reset always goes on to its DELETEs and the reload.
@@ -512,7 +533,205 @@ One survivor, equivalent: checking a stale answer before the keepalive
 request's answer is in. The fix it queues is then dropped by the filter
 once that answer sets base (the id is in neither base nor the adds sent),
 or folds into the same change when that request failed, so nothing
-observable differs.
+observable differs. (The final round removed the check and its resend
+altogether; see its section.)
+
+## Review fixes (final round)
+
+The re-check of the second commit confirmed seven findings: two major and
+five minor (three of them about tests). A fixer started on them and was
+stopped partway (a WIP commit); this round reviewed that work, kept most
+of it, replaced its fix for the stale check, and folded it into one
+commit. All seven are fixed; none was skipped. No server change.
+
+- **A failed leave-flush request sent again what an earlier request had
+  already saved** (major). With a save on the way when the page hid,
+  `leave()` sends its change again folded with what is queued. When that
+  keepalive request failed with something worth retrying (a 503 during a
+  backend restart, a network error), `settle()` put back the whole fold,
+  so the retry sent the earlier request's change again even when its OK
+  answer had shown it landed, and a laptop's unsave made meanwhile was
+  undone. Now the keepalive request lists what it carries (`carries`),
+  each earlier request keeps how it settled, and a retryable failure of
+  the keepalive request goes through `unfold()`, which puts back only what
+  isn't known to have landed: an earlier request that answered OK landed,
+  and its row becomes base; one still on the way goes back on the list and
+  is waited for like any request (rule 1), so its own answer decides; one
+  given up on (rule 4) stays shown in limbo and isn't sent again (the next
+  resync is full); only one that failed too has its change sent again.
+  What goes back in the queue is the keepalive request's change without
+  what those carry (`withoutOps`). This holds for a second leave flush too
+  (`visibilitychange` then `pagehide`): an earlier request that answered OK
+  while folded into the first stays on the second's list.
+- **The stale check decided by answer order alone** (minor). `overridden()`
+  kept only the ids where the earlier request's row "still shows its
+  side", but that row always does (the server applies the request's own
+  change before it answers), so the check sent the Undo again whenever the
+  keepalive request's answer came first. When the earlier request had in
+  fact landed first and only answered late, that resend undid a change
+  another device made in between. Neither row's value can tell the two
+  landing orders apart, so the resend is gone: a stale request's answer
+  sets nothing and sends nothing, whichever order the answers come in.
+  `overridden()` went with it. The WIP had instead made the server stamp
+  `updated_at` with `greatest(now(), updated_at + 1 µs)` under the row
+  lock and compared the stamps; that was reverted (`routes/preferences.py`
+  and `test_preferences_delta.py` are as on the second commit). It changed
+  how every PUT and PATCH stamps its row, in a frontend unit whose plan
+  keeps the server on `now()`, and a guess-free fix is simpler. What this
+  leaves open (the earlier request overtaken and landing last) is listed
+  under Deviations. The "adds sent kept while a stale request is out"
+  clause in `adopted()` only served the resend's remove, and is gone too.
+- **Reset dropped unsent saves, hides, votes and saved views** (major).
+  `discardPending()` cleared every key and closed the engine, so a save
+  still in its batch, on a retry, queued after the retries, or failing
+  during Reset's wait never reached the server, although Settings says
+  saves, hides, votes and saved views stay. It is now
+  `discardPending(drop)`: App passes `resetDeletes` (the History grouping
+  and the four per-column kinds it deletes). Only those keys are dropped
+  and closed (`enqueue` ignores them from then on, so neither a write made
+  meanwhile nor the reload's leave flush sends them). Every other key is
+  sent at once with `keepalive` (`flush(true)`, the loop `flushPending`
+  uses, so one that fails meanwhile is tried once more), and Reset waits
+  for that and for the writes on the way, at most 3 s, as before. What is
+  still queued goes with the reload's leave flush. No GET goes after it,
+  as before.
+- **After a rollback, a 405 stopped PR1r's reload on every return**
+  (minor). Rule 2 keeps a write that gets 404 or 405 queued, and
+  `flushPending` answered false while anything was queued, so a resumed
+  page on this bundle never reloaded onto the reverted build. A write's
+  404 or 405 now marks it `rolledBack`, and `flushPending` answers true
+  when everything left failed that way: only that reload can cure it.
+  (The reload's leave flush sends it once more.) Rule 2 is unchanged.
+- **The limbo layer was untested** (minor, tests). The "still shown"
+  asserts in the deadline test and the "coming back after a hide" test
+  read the last emission, which `expire()` doesn't change. Both tests now
+  save and unsave another story before the full GET answers, which
+  recomputes the key and sends nothing, and assert the given-up change is
+  still shown. Removing limbo fails both.
+- **No flow failed with the review fixes reverted** (minor, tests). New
+  `flow-prefs-return-before-answer` holds the hide's keepalive PATCH
+  across the return, lets it through after, and counts PATCHes; new
+  `flow-prefs-landed-unread` lets it land, holds its answer, has another
+  device unsave the story, then comes back. Both fail with rule 4 putting
+  the write back in the queue, as 979dc6f's `expire` did.
+  `flow-reload-on-new-build` gained step 8d for the rollback fix, and
+  `flow-reset-keeps-saves` checks the Reset fix.
+- **Two more fix hunks survived every unit test** (minor, tests). Reset
+  waiting for a request the leave flush folded into a later one now has a
+  test. The other hunk (`expire()` giving up on a folded request, at the
+  return or at its deadline) was caught by a probe whose late answer
+  queued the stale check's resend;
+  with the resend gone, no answer of a folded request queues anything, so
+  that probe can't fail any more. It stays as a test ("given up on at the
+  return: its late answer queues nothing"). What the hunk still decides is
+  that such a late answer is ignored (rule 4) rather than taken as the
+  server's row when the keepalive request then fails; a new test covers
+  that (the next resync is full), and fails without the hunk.
+
+### Tests added or changed (final round)
+
+`prefSync.test.ts`, now 57 tests (154 unit tests in all).
+
+- New, leave flush: the earlier request landed first but answers last,
+  for ids and for votes (nothing more goes, and a laptop's later change
+  stands); the keepalive request fails after the earlier one landed,
+  fails before its OK answer, and fails on a desktop tab left hidden whose
+  2 s retry runs while hidden (each time only the queued change goes
+  again, and the other device's unsave stands); it fails while the earlier
+  one is still on the way (the retry waits for it, and when it fails too
+  both changes go); an earlier request given up on at its deadline while
+  folded, then the keepalive request fails (still shown, not sent again,
+  the next resync full), and the same with the given-up request's late
+  answer arriving first (ignored); two leave flushes in a row with both
+  later requests failing; a folded request given up on at the return whose
+  late answer queues nothing.
+- Rewritten: "lands after the leave flush and undoes an Undo, the Undo
+  goes again" is now "the earlier request's answer sends nothing more",
+  for both answer orders, and checks that the full GET then shows what the
+  server holds. The `overridden` test is gone with the function.
+- New, Reset: `discardPending(resetDeletes)` sends the hide at once with
+  `keepalive` and drops the read mark and the tab setting, and afterwards
+  sends a new save but nothing for the dropped keys; it waits for a
+  request the leave flush folded; a vote whose retries were used up, a
+  hide waiting on its retry and a save in its batch all reach the server;
+  a save whose PATCH answers 503 during the wait is sent again at once,
+  and what still fails goes with the reload's leave flush. The two old
+  `discardPending` tests were rewritten for the key filter.
+- New: `flushPending` answers true when what is left got 405 or 404, false
+  with a 503 on another key; the reload's leave flush still sends both.
+  `withoutOps`; `isRolledBack` (in the `classifyWriteError` test).
+- Changed: the deadline and "coming back" tests (limbo). The two
+  "given up on while folded" tests seed a row first, so the page has a
+  watermark and "the next resync is full" can fail (with an empty server
+  every resync is full).
+- Flows: `flow-reset-keeps-saves` now asserts the queued save goes before
+  the DELETEs and is stored next to 103, and that no write for a key Reset
+  deletes goes at all; `flow-prefs-return-before-answer` and
+  `flow-prefs-landed-unread` (new); `flow-reload-on-new-build` step 8d
+  (every PATCH answers 405 and the return still reloads; step 9 now counts
+  4 reloads). README rows for all four.
+
+### Verification (final round)
+
+- `npm run lint`: 0 errors, 5 warnings (as before). `npm run build`
+  clean. Unit tests 154 of 154 (57 in `prefSync.test.ts`). `git diff
+  --exit-code` on `package.json` and the lockfile: clean. The
+  `node_modules` symlink was made for the loop and removed before the
+  commit.
+- Full strict smoke (`--csp --strict`, fonts-ci.conf, preview on 4173):
+  0 failures, 0 warnings, 851 s (other units were running on the
+  container).
+- The PR2b flows, `flow-prefs-return-before-answer`,
+  `flow-prefs-landed-unread`, `flow-reset-keeps-saves`,
+  `flow-h1-pref-store`, `flow-h1-keepalive`, `flow-reload-on-new-build`,
+  `flow-tab-stays-on-star` and `flow-unsave-last-saved`: one run, then 3
+  more in a row, 0 failures and 0 warnings each time (132 to 138 s).
+- Backend `test_preferences_delta.py` and `test_preferences_anonymous.py`
+  (`popping_test_f`, they pin `prefSync.ts`): 89 passed. The backend is
+  as on the second commit.
+
+### Mutation checks (final round)
+
+Each reverts one hunk of these fixes. Unit mutations ran on a scratch copy
+of `prefSync.ts` with this test file. Flow mutations were built from a
+scratch copy of `frontend/` into the worktree's `dist`, served on 4173 and
+run alone; the worktree's sources were not touched, and `dist` was rebuilt
+clean after.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `prefSync.test.ts` | a failed keepalive request puts back its whole fold (the old `settle`) | the three "fails after / before the earlier one landed" tests, "still on the way", both "given up on while folded" tests, "leaving twice" |
+| `prefSync.test.ts` | an earlier request still on the way isn't put back on the list | "fails first, then the earlier one answers OK", "still on the way" |
+| `prefSync.test.ts` | a landed earlier request's row doesn't become base | "fails after that one landed" (5 vanishes from screen), "leaving twice" |
+| `prefSync.test.ts` | one given up on while folded isn't put in limbo | both "given up on while folded" tests |
+| `prefSync.test.ts` | an earlier request that answered OK isn't carried by a second leave flush | "leaving twice" |
+| `prefSync.test.ts` | the stale answer checked as the second commit did (answer order, row test) | "the earlier request's answer sends nothing more", both "landed first but answers last" |
+| `prefSync.test.ts` | a folded request isn't given up on (`expire`'s stale loop gone) | "the late answer ... is ignored" |
+| `prefSync.test.ts` | `discardPending` drops every key (the old one) | the four Reset tests |
+| `prefSync.test.ts` | `discardPending` doesn't send the kept keys | the same |
+| `prefSync.test.ts` | it sends them without `keepalive` | three Reset tests |
+| `prefSync.test.ts` | `enqueue` ignores the dropped keys | the two `discardPending` tests |
+| `prefSync.test.ts` | `discardPending` doesn't wait for stale requests | "waits for a write the leave flush folded" |
+| `prefSync.test.ts` | `flushPending` answers false while anything is queued (the old one) | the 404 / 405 `flushPending` test |
+| `prefSync.test.ts` | every retry counts as rolled back | both `flushPending` tests |
+| `prefSync.test.ts` | no limbo (the given-up write isn't kept on screen) | the deadline test, "coming back" |
+| `prefSync.test.ts` | rule 4 puts the write back in the queue (as 979dc6f's `expire` did) | the deadline test, "coming back", the hidden-send test, the other-device test |
+| `flow-reset-keeps-saves` | `discardPending` drops every key | RESET: the queued save was never sent; the store's saves are [103] |
+| `flow-reset-keeps-saves` | `discardPending` drops no key | RESET: a write for a key Reset deletes went (PATCH read_entries:news) |
+| `flow-prefs-return-before-answer` | rule 4 puts the write back in the queue | PREFS-RETURN: 2 PATCHes of one save (2 by the return) |
+| `flow-prefs-landed-unread` | the same | PREFS-LANDED: the other device's unsave was undone (the store holds [101]); 2 PATCHes; the story still shows as saved |
+| `flow-reload-on-new-build` | `flushPending` answers false while anything is queued | RELOAD-ROLLBACK: saves answered 405 kept the page from reloading |
+
+No survivors. The two-device fuzz from the re-check (2000 seeds of 300
+steps, strict landing order, so it can't produce the overtaken case) flags
+3 seeds on the second commit (1363, 1385, 1742) and 1 on this one (1363:
+the fold window under Deviations).
+
+Device checks: unchanged. The #38 Reset line (save, then Reset reading
+state) and the #40 lines already cover what these fixes touch on a real
+device; the failure cases (a backend restart during Reset, a rollback to
+before PATCH, two requests reordered on the network) can't be staged from
+the phone.
 
 ## Deviations from the spec
 
@@ -526,12 +745,27 @@ observable differs.
   goes at once, folded with the change still on the way, because the page
   may never come back to send it after the answer; holding it back would
   lose it outright when the page doesn't come back. The earlier request is
-  kept as stale (review fix). If the keepalive request overtakes it and it
-  then undoes part of it (an Undo made just before the hide), its answer,
-  read after the keepalive request's answer, shows that, and that part
-  goes again. Still uncovered: both answers unread when the page comes
-  back (rule 4 gives both up and the full GET decides), and the earlier
-  request landing last but answering first.
+  kept as stale (review fix); its answer sets nothing and sends nothing.
+  Two windows stay open, both needing the two requests for one key on the
+  way together at the moment the page hides:
+  - The earlier request is overtaken: the keepalive request lands first
+    and the earlier one after it, so what the keepalive request reversed
+    of it (an Undo, or a changed vote, made within about a second before
+    the hide) is undone on the server, and the next GET shows it (the
+    story comes back saved or hidden). Neither row's value can show which
+    of the two landed last (each shows its own change), the answers can
+    arrive in either order, and `updated_at` is the transaction's start,
+    not the lock order. The second commit sent the reversal again when the
+    keepalive request's answer came first; that was a guess, and when it
+    was wrong it undid another device's change made in between, so the
+    final round removed it. Covering this properly needs the server to say
+    which write took the row last (a per-row version bumped under the row
+    lock); that is a server change for its own unit.
+  - The fold: the keepalive request carries the earlier request's change
+    again, so another device's change to the same story that lands
+    between the two (about one round trip) is undone. Not carrying it
+    would lose the change whenever the earlier request fails as the page
+    goes. (The two-device fuzz flags this one, seed 1363.)
 - Rule 2 also retries 408 and 429, which are transient. After the third
   retry the change stays queued and on screen (one toast) instead of
   waiting only for a return: a later batch for the key, the reload flush
@@ -546,6 +780,17 @@ observable differs.
   given up on at the return too, since it is as likely to have been
   suspended. The cost, which the spec accepts: a keepalive that iOS never
   delivered is lost.
+- Rule 9 (final round): `discardPending` clears only the keys Reset
+  deletes, not the whole queue the spec names. The rest (saves, hides,
+  votes, saved views, which Reset keeps) is sent before the DELETEs and
+  the reload: clearing it lost any of them still queued, on a retry or on
+  the way when Reset was tapped.
+- Rule 2 and PR1r (final round): a write answered with 404 or 405 is
+  still retried and kept on screen, but no longer holds back PR1r's
+  reload (`flushPending` answers true for it). After a revert to before
+  PATCH, a resumed page would otherwise never reload onto the reverted
+  build by itself. The reload's leave flush sends the write once more;
+  then it is lost, as the reverted build can't take it.
 - Rule 5: a queued (unsent) write doesn't make a GET's row ignored; the
   write is re-applied on top of it. The row is newer than anything the
   queue has sent, so it is the right base. Writes on the way and writes
@@ -585,6 +830,11 @@ observable differs.
   the old bundle PUTs again. After PR2c merges, revert PR2c first (it
   would refuse the reverted bundle's PUTs with 409). After PR7a merges,
   PR2b no longer reverts alone.
+- After a PR2a and PR2b revert, a resumed page still on this bundle gets
+  405 for its PATCHes. They stay queued and shown, and on the next return
+  after 10 min away PR1r reloads onto the reverted build (a 405 doesn't
+  hold the reload back); the reload's leave flush sends them once more,
+  and then they are lost.
 
 ## Open items for later units
 
@@ -604,6 +854,11 @@ observable differs.
   never landed is lost. Resending it safely needs the server to say
   whether it landed, for example a client write id that the PATCH stores
   and the row echoes. A blind resend undoes other devices' changes.
+- For the owner, next to that: the leave flush's overtaken case (under
+  Deviations: an Undo made just before the hide, overtaken by its own
+  keepalive request) needs the server to say which of two writes took the
+  row last, for example a per-row version bumped under the row lock and
+  echoed in the answer. One additive server change could serve both items.
 - Not in this unit: a save made offline while staying in the app goes out
   only with a later write's batch, a hide and return, or a flush. Nothing
   listens for `online`. Sending on `online` would be new behaviour for its

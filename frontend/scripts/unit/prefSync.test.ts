@@ -17,14 +17,15 @@ import {
   createPrefSync,
   diffIds,
   foldDelta,
+  isRolledBack,
   isSetKey,
   laterStamp,
   legacySeedPlan,
   mergeIncoming,
-  overridden,
   pruneIds,
   splitDelta,
   stampMicros,
+  withoutOps,
 } from '../../src/lib/prefSync.ts'
 import type { Delta, PrefRow, Rows, Write } from '../../src/lib/prefSync.ts'
 
@@ -294,19 +295,16 @@ test('splitDelta: one PATCH carries at most the cap per list; removes and cleare
   assert.equal(splitDelta(small, 3).now, small)
 })
 
-test('overridden: the part of a later write that an earlier one, landing after it, undid', () => {
+test('withoutOps: what the covering writes carry themselves is taken out; a reversal stays', () => {
   const add5: Write = { op: 'patch', delta: { add: [5], remove: [] } }
-  const net: Write = { op: 'patch', delta: { add: [6], remove: [5] } }
-  assert.deepEqual(overridden(add5, net, [5, 6]), { op: 'patch', delta: { add: [], remove: [5] } })
-  assert.equal(overridden(add5, net, [6]), null, 'the row shows the later write: nothing undone')
-  const rm7: Write = { op: 'patch', delta: { add: [], remove: [7] } }
-  assert.deepEqual(overridden(rm7, { op: 'patch', delta: { add: [7], remove: [] } }, []), { op: 'patch', delta: { add: [7], remove: [] } })
-  const up: Write = { op: 'patch', delta: { set: { 1: 'up', 2: 'down' } } }
-  assert.deepEqual(overridden(up, { op: 'patch', delta: { set: { 1: null, 2: 'down' } } }, { 1: 'up', 2: 'down' }), { op: 'patch', delta: { set: { 1: null } } })
-  const v1: Write = { op: 'put', value: { sort: 'newest' } }
-  const v2: Write = { op: 'put', value: { sort: 'best' } }
-  assert.equal(overridden(v1, v2, { sort: 'newest' }), v2)
-  assert.equal(overridden(v1, v2, { sort: 'best' }), null)
+  assert.deepEqual(withoutOps({ op: 'patch', delta: { add: [5, 6], remove: [7] } }, [add5]), { op: 'patch', delta: { add: [6], remove: [7] } })
+  assert.deepEqual(withoutOps({ op: 'patch', delta: { add: [], remove: [5] } }, [add5]), { op: 'patch', delta: { add: [], remove: [5] } })
+  assert.equal(withoutOps({ op: 'patch', delta: { add: [5], remove: [] } }, [add5]), null)
+  const up1: Write = { op: 'patch', delta: { set: { 1: 'up' } } }
+  assert.deepEqual(withoutOps({ op: 'patch', delta: { set: { 1: 'up', 2: 'down' } } }, [up1]), { op: 'patch', delta: { set: { 2: 'down' } } })
+  assert.deepEqual(withoutOps({ op: 'patch', delta: { set: { 1: null } } }, [up1]), { op: 'patch', delta: { set: { 1: null } } })
+  const put: Write = { op: 'put', value: 1 }
+  assert.equal(withoutOps(put, [put]), put)
 })
 
 test('stamps keep microseconds: the later of two, and a poll overlap from the string', () => {
@@ -322,6 +320,8 @@ test('classifyWriteError: no answer, 5xx, 404, 405, 408, 429 retry; other 4xx ar
     assert.equal(classifyWriteError(e), 'retry', JSON.stringify(e))
   }
   for (const s of [400, 401, 409, 413, 422]) assert.equal(classifyWriteError({ status: s }), 'refuse', String(s))
+  for (const s of [404, 405]) assert.equal(isRolledBack({ status: s }), true, String(s))
+  for (const e of [new TypeError('Failed to fetch'), { status: 503 }, { status: 408 }, { status: 400 }]) assert.equal(isRolledBack(e), false, JSON.stringify(e))
 })
 
 // ---------------------------------------------------------------------------
@@ -738,11 +738,16 @@ test('an in-flight record is cleared by its deadline: not sent again, its late a
   await s.advance(INFLIGHT_DEADLINE_MS + 60_000)
   assert.equal(s.writes().length, 1, 'never sent again')
   // Past the deadline the next resync is full, and its GET is taken in
-  // for the key: the change still shows until then.
+  // for the key: the change still shows until then, also when something
+  // else changes the key meanwhile (a save made and taken back, which
+  // shows the key again from base and what is pending, and sends nothing).
   const poll2 = s.sync.resync()
   const get2 = s.gets().at(-1)!
   assert.equal(get2.since, null, 'the next resync is full')
-  assert.deepEqual(s.rows().starred_entries, [1, 2])
+  s.sync.addIds('starred_entries', [7])
+  assert.deepEqual(s.rows().starred_entries, [1, 2, 7], 'the change given up on still shows')
+  s.sync.removeIds('starred_entries', [7])
+  assert.deepEqual(s.rows().starred_entries, [1, 2], 'the change given up on still shows')
   get2.respond()
   await poll2
   assert.deepEqual(s.rows().starred_entries, [1], 'the server never got 2')
@@ -788,6 +793,11 @@ test('coming back after a hide: a write sent before it with no answer is given u
   front = true
   s.sync.resume()
   assert.equal(s.writes().length, 1, 'not sent again')
+  // Still shown, also once the key is shown again from base and what is
+  // pending (a hide made and taken back, which sends nothing).
+  s.sync.addIds('hidden_entries', [9])
+  assert.deepEqual(s.rows().hidden_entries, [4, 9], 'still shown')
+  s.sync.removeIds('hidden_entries', [9])
   assert.deepEqual(s.rows().hidden_entries, [4], 'still shown')
   // The full GET on the return (the caller's) is taken in for the key.
   const full = s.sync.resync({ full: true })
@@ -812,6 +822,8 @@ test('coming back after a hide: a write sent before it with no answer is given u
   const lost = s.writes()[2]
   front = true
   s.sync.resume()
+  s.sync.addIds('hidden_entries', [9])
+  s.sync.removeIds('hidden_entries', [9])
   assert.deepEqual(s.rows().hidden_entries, [4, 5, 6])
   const full2 = s.sync.resync({ full: true })
   s.gets().at(-1)!.respond()
@@ -921,35 +933,39 @@ test('back in front once the retries were used up: no second toast before anythi
   assert.deepEqual(s.errors, ['unsaved', 'unsaved'])
 })
 
-test('leaving with a write on the way: when that earlier request lands after the leave flush and undoes an Undo, the Undo goes again', async () => {
-  const s = await loaded({ visible: () => false })
-  s.auto.on = false
-  s.sync.addIds('hidden_entries', [5])
-  await s.advance(PATCH_BATCH_MS)
-  const f1 = s.writes()[0]
-  s.sync.removeIds('hidden_entries', [5])
-  s.sync.leave()
-  assert.equal(s.writes().length, 2)
-  const f2 = s.writes()[1]
-  assert.ok(f2.keepalive)
-  assert.deepEqual(patchBody(f2), { add: [], remove: [5] })
-  // The keepalive request reaches the server first, then the earlier one.
-  f2.respond()
-  await s.settle()
-  assert.deepEqual(s.rows().hidden_entries, [])
-  f1.respond()
-  await s.settle()
-  assert.deepEqual(s.server.value('hidden_entries'), [5], 'the earlier request hid 5 again')
-  assert.equal(s.writes().length, 3, 'the Undo goes again')
-  const f3 = s.writes()[2]
-  assert.ok(f3.keepalive, 'at once, with keepalive: the page is hidden')
-  assert.deepEqual(patchBody(f3), { add: [], remove: [5] })
-  f3.respond()
-  await s.settle()
-  assert.deepEqual(s.server.value('hidden_entries'), [])
-  assert.deepEqual(s.rows().hidden_entries, [])
-  await s.advance(60_000)
-  assert.equal(s.writes().length, 3)
+test('leaving with a write on the way: the earlier request\'s answer sends nothing more, also when it landed after the leave flush and undid an Undo', async () => {
+  // Neither row can show which of the two landed last (each shows its own
+  // change whichever went first), and the answers can come in any order,
+  // so nothing is sent on a guess. The cost, under Deviations: an Undo
+  // made just before the hide, overtaken this way, is lost; the next GET
+  // shows it.
+  for (const answers of ['landing order', 'reversed'] as const) {
+    const s = await loaded({ visible: () => false })
+    s.auto.on = false
+    s.sync.addIds('hidden_entries', [5])
+    await s.advance(PATCH_BATCH_MS)
+    const f1 = s.writes()[0]
+    s.sync.removeIds('hidden_entries', [5])
+    s.sync.leave()
+    assert.equal(s.writes().length, 2)
+    const f2 = s.writes()[1]
+    assert.ok(f2.keepalive)
+    assert.deepEqual(patchBody(f2), { add: [], remove: [5] })
+    // The keepalive request reaches the server first, then the earlier one.
+    f2.serve()
+    f1.serve()
+    assert.deepEqual(s.server.value('hidden_entries'), [5], 'the earlier request hid 5 again')
+    for (const r of answers === 'landing order' ? [f2, f1] : [f1, f2]) {
+      r.respond()
+      await s.settle()
+    }
+    assert.deepEqual(s.rows().hidden_entries, [], answers)
+    s.auto.on = true
+    await s.advance(60_000)
+    assert.equal(s.writes().length, 2, `${answers}: nothing more goes`)
+    await s.sync.resync({ full: true })
+    assert.deepEqual(s.rows().hidden_entries, [5], `${answers}: the full GET shows what the server holds`)
+  }
 })
 
 test('leaving with a write on the way: when the earlier request answers first, nothing more goes', async () => {
@@ -970,6 +986,313 @@ test('leaving with a write on the way: when the earlier request answers first, n
   assert.equal(s.writes().length, 2)
   assert.deepEqual(s.server.value('hidden_entries'), [])
   assert.deepEqual(s.rows().hidden_entries, [])
+})
+
+// The earlier request lands first, its answer comes last, and another
+// device saves the story (votes it up) in between. A check that took the
+// answer order for the landing order sent the Undo again here and undid
+// the other device's change.
+for (const kind of ['ids', 'votes'] as const) {
+  test(`leaving with a write on the way (${kind}): when the earlier request landed first but answers last, nothing more goes, and another device's later change stands`, async () => {
+    const server = new FakeServer()
+    const key = kind === 'ids' ? 'starred_entries' : 'voted_entries'
+    server.write(key, kind === 'ids' ? [] : {})
+    const phone = await loaded({ server, visible: () => false })
+    const laptop = await loaded({ server })
+    phone.auto.on = false
+    if (kind === 'ids') phone.sync.addIds(key, [5])
+    else phone.sync.setVotes({ 5: 'up' })
+    await phone.advance(PATCH_BATCH_MS)
+    const f1 = phone.writes()[0]
+    // The Undo (or the other vote), then the page hides.
+    if (kind === 'ids') phone.sync.removeIds(key, [5])
+    else phone.sync.setVotes({ 5: 'down' })
+    phone.sync.leave()
+    const c = phone.writes()[1]
+    f1.serve()
+    c.serve()
+    c.respond()
+    await phone.settle()
+    // The laptop sees that and saves the story (votes it up).
+    await laptop.sync.resync({ full: true })
+    if (kind === 'ids') laptop.sync.addIds(key, [5])
+    else laptop.sync.setVotes({ 5: 'up' })
+    await laptop.advance(PATCH_BATCH_MS)
+    const want = kind === 'ids' ? [5] : { 5: 'up' }
+    assert.deepEqual(server.value(key), want)
+    f1.respond()
+    await phone.settle()
+    phone.auto.on = true
+    await phone.advance(60_000)
+    assert.equal(phone.writes().length, 2, 'no third PATCH')
+    assert.deepEqual(server.value(key), want, "the laptop's later change stands")
+  })
+}
+
+test("leaving: the request that carries an earlier one fails after that one landed: only the queued change goes again, and another device's unsave stands", async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  let front = true
+  const phone = await loaded({ server, visible: () => front })
+  const laptop = await loaded({ server })
+  phone.auto.on = false
+  phone.sync.addIds('starred_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  const f1 = phone.writes()[0]
+  phone.sync.addIds('starred_entries', [6])
+  front = false
+  phone.sync.leave()
+  const c = phone.writes()[1]
+  assert.deepEqual(patchBody(c), { add: [5, 6], remove: [] })
+  f1.respond()
+  await phone.settle()
+  assert.deepEqual(server.value('starred_entries'), [5])
+  // The backend restarts (popping-update): the keepalive request gets a 503.
+  c.fail(503)
+  await phone.settle()
+  assert.deepEqual(phone.rows().starred_entries, [5, 6], 'both still shown')
+  // The laptop sees 5 and unsaves it.
+  await laptop.sync.resync({ full: true })
+  laptop.sync.removeIds('starred_entries', [5])
+  await laptop.advance(PATCH_BATCH_MS)
+  assert.deepEqual(server.value('starred_entries'), [])
+  // The phone comes back.
+  phone.auto.on = true
+  front = true
+  phone.sync.resume()
+  await phone.sync.resync({ full: true })
+  await phone.advance(60_000)
+  assert.deepEqual(patchBody(phone.writes()[2]), { add: [6], remove: [] }, 'only the queued change goes again')
+  assert.equal(phone.writes().length, 3)
+  assert.deepEqual(server.value('starred_entries'), [6], "the laptop's unsave stands")
+  assert.deepEqual(phone.rows().starred_entries, [6])
+})
+
+test("leaving: the carrying request fails first, then the earlier one answers OK: only the queued change goes again", async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  let front = true
+  const phone = await loaded({ server, visible: () => front })
+  const laptop = await loaded({ server })
+  phone.auto.on = false
+  phone.sync.addIds('starred_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  const f1 = phone.writes()[0]
+  phone.sync.addIds('starred_entries', [6])
+  front = false
+  phone.sync.leave()
+  phone.writes()[1].fail(502)
+  await phone.settle()
+  // Hidden on the phone: its retry waits for the earlier request (rule 1).
+  await phone.advance(RETRY_MS[0])
+  assert.equal(phone.writes().length, 2, 'the retry waits for the earlier request')
+  f1.respond()
+  await phone.settle()
+  assert.deepEqual(phone.rows().starred_entries, [5, 6])
+  await laptop.sync.resync({ full: true })
+  laptop.sync.removeIds('starred_entries', [5])
+  await laptop.advance(PATCH_BATCH_MS)
+  phone.auto.on = true
+  front = true
+  phone.sync.resume()
+  await phone.sync.resync({ full: true })
+  await phone.advance(60_000)
+  assert.deepEqual(phone.writes().slice(2).map(patchBody), [{ add: [6], remove: [] }])
+  assert.deepEqual(server.value('starred_entries'), [6], "the laptop's unsave stands")
+})
+
+test('leaving, on a desktop tab left hidden: the carrying request fails after the earlier one landed; the retry, sent while hidden, holds only the queued change', async () => {
+  const server = new FakeServer()
+  server.write('hidden_entries', [])
+  const desk = await loaded({ server, visible: () => false })
+  const phone = await loaded({ server })
+  desk.auto.on = false
+  desk.sync.addIds('hidden_entries', [5])
+  await desk.advance(PATCH_BATCH_MS)
+  const f1 = desk.writes()[0]
+  desk.sync.addIds('hidden_entries', [6])
+  desk.sync.leave()
+  const c = desk.writes()[1]
+  f1.respond()
+  await desk.settle()
+  c.fail(503)
+  await desk.settle()
+  // The phone unhides 5 within the next second.
+  await phone.sync.resync({ full: true })
+  phone.sync.removeIds('hidden_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  assert.deepEqual(server.value('hidden_entries'), [])
+  desk.auto.on = true
+  await desk.advance(RETRY_MS[0])
+  assert.deepEqual(desk.writes().slice(2).map(patchBody), [{ add: [6], remove: [] }])
+  assert.deepEqual(server.value('hidden_entries'), [6], "the phone's unhide stands")
+})
+
+test('leaving: the carrying request fails while the earlier one is still on the way; when that one fails too, both changes go again', async () => {
+  const server = new FakeServer()
+  const s = await loaded({ server, visible: () => false })
+  s.auto.on = false
+  s.sync.addIds('starred_entries', [5])
+  await s.advance(PATCH_BATCH_MS)
+  const f1 = s.writes()[0]
+  s.sync.addIds('starred_entries', [6])
+  s.sync.leave()
+  s.writes()[1].fail(503)
+  await s.settle()
+  await s.advance(RETRY_MS[0])
+  assert.equal(s.writes().length, 2, 'the queued change waits for the earlier request')
+  assert.deepEqual(s.rows().starred_entries, [5, 6])
+  f1.fail(503)
+  await s.settle()
+  assert.deepEqual(s.rows().starred_entries, [5, 6])
+  // The key's second failure in this round: the next retry is 4 s on.
+  await s.advance(RETRY_MS[1])
+  assert.equal(s.writes().length, 3)
+  assert.deepEqual(patchBody(s.writes()[2]), { add: [5, 6], remove: [] })
+  s.writes()[2].respond()
+  await s.settle()
+  assert.deepEqual(server.value('starred_entries'), [5, 6])
+  assert.deepEqual(s.rows().starred_entries, [5, 6])
+})
+
+test('leaving: an earlier request given up on (rule 4) while folded, then the carrying request fails: its change stays shown, is not sent again, and the next resync is full', async () => {
+  // A desktop tab left hidden: only the 30 s deadline gives requests up.
+  // (A row on the server, so the page has a watermark: a since poll is
+  // possible.)
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  const s = await loaded({ server, visible: () => false })
+  s.auto.on = false
+  s.sync.addIds('starred_entries', [5])
+  await s.advance(PATCH_BATCH_MS)
+  const f1 = s.writes()[0]
+  await s.advance(10_000)
+  s.sync.addIds('starred_entries', [6])
+  s.sync.leave()
+  const c = s.writes()[1]
+  assert.deepEqual(patchBody(c), { add: [5, 6], remove: [] })
+  // The earlier request passes its deadline; the next batch gives it up.
+  await s.advance(INFLIGHT_DEADLINE_MS - 10_000)
+  s.sync.addIds('hidden_entries', [1])
+  await s.advance(PATCH_BATCH_MS)
+  c.fail(503)
+  await s.settle()
+  assert.deepEqual(s.rows().starred_entries, [5, 6], 'both still shown')
+  await s.advance(RETRY_MS[0])
+  const again = s.writes().filter((r) => r.key === 'starred_entries').slice(2)
+  assert.deepEqual(again.map(patchBody), [{ add: [6], remove: [] }], 'the given-up change is not sent again')
+  again[0].respond()
+  f1.respond()
+  await s.settle()
+  assert.equal(s.gets().length, 1)
+  const poll = s.sync.resync()
+  assert.equal(s.gets().at(-1)!.since, null, 'the next resync is full')
+  s.gets().at(-1)!.respond()
+  await poll
+  assert.deepEqual(s.rows().starred_entries, [6, 5], 'the full GET shows what the server holds: the given-up request did land, last')
+})
+
+test('leaving: the late answer of an earlier request given up on while folded is ignored (rule 4), also when the carrying request then fails', async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  const s = await loaded({ server, visible: () => false })
+  s.auto.on = false
+  s.sync.addIds('starred_entries', [5])
+  await s.advance(PATCH_BATCH_MS)
+  const f1 = s.writes()[0]
+  await s.advance(10_000)
+  s.sync.addIds('starred_entries', [6])
+  s.sync.leave()
+  const c = s.writes()[1]
+  await s.advance(INFLIGHT_DEADLINE_MS - 10_000)
+  s.sync.addIds('hidden_entries', [1])
+  await s.advance(PATCH_BATCH_MS)
+  // Given up on; its answer comes after that, then the carrying request fails.
+  f1.respond()
+  await s.settle()
+  c.fail(503)
+  await s.settle()
+  assert.deepEqual(s.rows().starred_entries, [5, 6], 'both still shown')
+  await s.advance(RETRY_MS[0])
+  const again = s.writes().filter((r) => r.key === 'starred_entries').slice(2)
+  assert.deepEqual(again.map(patchBody), [{ add: [6], remove: [] }], 'the given-up change is not sent again')
+  again[0].respond()
+  await s.settle()
+  const poll = s.sync.resync()
+  assert.equal(s.gets().at(-1)!.since, null, 'its late row was not taken as the server\'s: the next resync is full')
+  s.gets().at(-1)!.respond()
+  await poll
+  assert.deepEqual(s.rows().starred_entries, [5, 6])
+})
+
+test('leaving twice (visibilitychange, then pagehide) with requests on the way: one that landed is not sent again when both later ones fail', async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  const phone = await loaded({ server, visible: () => false })
+  const laptop = await loaded({ server })
+  phone.auto.on = false
+  phone.sync.addIds('starred_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  const f1 = phone.writes()[0]
+  phone.sync.addIds('starred_entries', [6])
+  phone.sync.leave()
+  const c1 = phone.writes()[1]
+  f1.respond()
+  await phone.settle()
+  assert.deepEqual(server.value('starred_entries'), [5])
+  // Another change before the page goes (pagehide's leave flush).
+  phone.sync.addIds('starred_entries', [7])
+  phone.sync.leave()
+  const c2 = phone.writes()[2]
+  assert.deepEqual(patchBody(c2), { add: [5, 6, 7], remove: [] })
+  c1.fail(503)
+  c2.fail(503)
+  await phone.settle()
+  assert.deepEqual(phone.rows().starred_entries, [5, 6, 7])
+  await laptop.sync.resync({ full: true })
+  laptop.sync.removeIds('starred_entries', [5])
+  await laptop.advance(PATCH_BATCH_MS)
+  phone.auto.on = true
+  await phone.advance(RETRY_MS[0])
+  assert.deepEqual(phone.writes().slice(3).map(patchBody), [{ add: [6, 7], remove: [] }])
+  assert.deepEqual(server.value('starred_entries'), [6, 7], "the laptop's unsave stands")
+})
+
+test('a request folded by the leave flush and given up on at the return: its late answer queues nothing, even when it landed last', async () => {
+  const server = new FakeServer()
+  server.write('hidden_entries', [])
+  let front = true
+  const phone = await loaded({ server, visible: () => front })
+  const laptop = await loaded({ server })
+  phone.auto.on = false
+  phone.sync.addIds('hidden_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  const f1 = phone.writes()[0]
+  phone.sync.removeIds('hidden_entries', [5])
+  front = false
+  phone.sync.leave()
+  const c = phone.writes()[1]
+  // The keepalive request lands first, the earlier one after it (5 is
+  // hidden again); only the keepalive request's answer is read.
+  c.serve()
+  f1.serve()
+  c.respond()
+  await phone.settle()
+  front = true
+  phone.sync.resume()
+  const full = phone.sync.resync({ full: true })
+  phone.gets().at(-1)!.respond()
+  await full
+  assert.deepEqual(phone.rows().hidden_entries, [5], 'the full GET shows what the server holds')
+  // The laptop hides 5 on purpose; then the earlier request's answer comes.
+  laptop.sync.addIds('hidden_entries', [5])
+  await laptop.advance(PATCH_BATCH_MS)
+  f1.respond()
+  await phone.settle()
+  phone.auto.on = true
+  await phone.advance(60_000)
+  assert.equal(phone.writes().length, 2, 'nothing more goes')
+  assert.deepEqual(server.value('hidden_entries'), [5], "the laptop's hide stands")
 })
 
 test('leaving: before-flush collectors run first; a key still on the way resends its change folded with the queued one', async () => {
@@ -1015,61 +1338,198 @@ test('flushPending: sends everything once and says whether anything is left to r
   assert.equal(await again, true, 'refused for good is not left to retry')
 })
 
-test('discardPending: drops the queue and retries, waits for writes on the way, then sends nothing', async () => {
-  const s = await loaded({ visible: () => false })
+test('flushPending: a write the server answers with 404 or 405 (rolled back) does not hold the reload back; a 503 does', async () => {
+  const s = await loaded()
   s.auto.on = false
   s.sync.addIds('starred_entries', [1])
+  let flushing = s.sync.flushPending()
+  await s.settle()
+  s.writes().at(-1)!.fail(405)
+  assert.equal(await flushing, true, 'only the reload onto the served build can save it')
+  assert.deepEqual(s.rows().starred_entries, [1], 'still queued and shown')
+  // The next returns, each answered 405 or 404: the same.
+  for (const status of [405, 404]) {
+    flushing = s.sync.flushPending()
+    await s.settle()
+    s.writes().at(-1)!.fail(status)
+    assert.equal(await flushing, true, String(status))
+  }
+  // With another key failing with a 503, there is something to retry.
+  s.sync.addIds('hidden_entries', [2])
+  flushing = s.sync.flushPending()
+  await s.settle()
+  for (const r of s.writes().filter((x) => !x.settled)) r.fail(r.key === 'hidden_entries' ? 503 : 405)
+  assert.equal(await flushing, false)
+  // The reload's leave flush still sends what is queued.
+  const n = s.writes().length
+  s.sync.leave()
+  assert.deepEqual(s.writes().slice(n).map((r) => [r.key, r.keepalive]).sort(), [['hidden_entries', true], ['starred_entries', true]])
+})
+
+// What Reset deletes (App's ``resetDeletes``): read marks and tab settings.
+const resetDeletes = (key: string) => key === 'history_group_by' || /^(read_entries|last_viewed|column_prefs|column_sections):/.test(key)
+const NEWEST = { sort: 'newest', minScore: 0, maxAgeHours: null }
+
+test('discardPending: drops what Reset deletes, sends the rest at once with keepalive, waits for writes on the way; then nothing for the dropped keys', async () => {
+  const s = await loaded()
+  s.auto.on = false
+  s.sync.addIds('read_entries:news', [1])
   await s.advance(PATCH_BATCH_MS)
   const onWay = s.writes()[0]
+  s.sync.addIds('read_entries:news', [3])
+  s.sync.put('column_prefs:news', NEWEST)
   s.sync.addIds('hidden_entries', [2])
-  s.sync.put('column_prefs:news', { sort: 'best', minScore: 0, maxAgeHours: null })
   let done = false
-  const discarding = s.sync.discardPending().then(() => (done = true))
+  const discarding = s.sync.discardPending(resetDeletes).then(() => (done = true))
   await s.settle()
-  assert.equal(done, false, 'waits for the PATCH on the way')
+  assert.deepEqual(
+    s.writes().slice(1).map((r) => [r.method, r.key, r.keepalive]),
+    [['PATCH', 'hidden_entries', true]],
+    'the hide goes at once; the read mark and the tab setting are dropped',
+  )
+  s.writes()[1].respond()
+  await s.settle()
+  assert.deepEqual(s.server.value('hidden_entries'), [2])
+  assert.equal(done, false, 'waits for the read mark on the way')
   onWay.fail(503)
   await discarding
-  // Reset's DELETEs and the reload follow: a write made meanwhile (a
-  // handler still running) isn't sent either, and no GET goes.
-  s.sync.addIds('starred_entries', [3])
-  s.sync.put('history_group_by', 'none')
+  // Reset's DELETEs and the reload follow. Written meanwhile (a handler
+  // still running): the read mark and the tab setting aren't sent, not by
+  // a retry, a batch or the leave flush; the save is. No GET goes.
+  s.sync.addIds('read_entries:news', [4])
+  s.sync.put('column_prefs:news', NEWEST)
+  s.sync.addIds('starred_entries', [5])
+  assert.deepEqual(s.rows()['read_entries:news'], undefined, 'nothing queued for a key Reset deletes')
   const gets = s.gets().length
   await s.sync.resync({ full: true })
   await s.advance(60_000)
   s.sync.leave()
-  assert.equal(s.writes().length, 1, 'no retry, no batch, no leave flush')
+  assert.deepEqual(s.writes().slice(2).map((r) => [r.method, r.key]), [['PATCH', 'starred_entries']])
   assert.equal(s.gets().length, gets, 'no GET after the discard')
 })
 
 test('discardPending: a write that never answers holds Reset up at most DISCARD_WAIT_MS, and one given up on not at all', async () => {
   const s = await loaded()
   s.auto.on = false
-  s.sync.addIds('starred_entries', [1])
-  await s.advance(PATCH_BATCH_MS)
-  let done = false
-  const discarding = s.sync.discardPending().then(() => (done = true))
-  await s.advance(DISCARD_WAIT_MS - 1)
-  assert.equal(done, false, 'it waits for the write on the way')
-  await s.advance(1)
-  assert.equal(done, true, 'then goes on without it')
-  await discarding
+  s.sync.addIds('read_entries:news', [1])
   s.sync.addIds('starred_entries', [2])
+  await s.advance(PATCH_BATCH_MS)
+  assert.equal(s.writes().length, 2)
+  s.sync.addIds('hidden_entries', [3])
+  let done = false
+  const discarding = s.sync.discardPending(resetDeletes).then(() => (done = true))
+  await s.settle()
+  assert.equal(s.writes().length, 3, 'the hide goes at once')
+  await s.advance(DISCARD_WAIT_MS - 1)
+  assert.equal(done, false, 'it waits for the writes on the way')
+  await s.advance(1)
+  assert.equal(done, true, 'then goes on without them')
+  await discarding
+  s.sync.addIds('read_entries:news', [4])
   s.sync.leave()
-  assert.equal(s.writes().length, 1, 'and sends nothing after')
+  assert.equal(s.writes().length, 3, 'and sends nothing after for a key Reset deletes')
 
   // Sent before the last hide, with the page back in front.
   let front = true
   const t = await loaded({ visible: () => front })
   t.auto.on = false
-  t.sync.addIds('starred_entries', [1])
+  t.sync.addIds('read_entries:news', [1])
   front = false
   t.sync.leave()
   front = true
   let done2 = false
-  const discarding2 = t.sync.discardPending().then(() => (done2 = true))
+  const discarding2 = t.sync.discardPending(resetDeletes).then(() => (done2 = true))
   await t.settle()
   assert.equal(done2, true)
   await discarding2
+})
+
+test('discardPending waits for a write the leave flush folded into a later one, too', async () => {
+  // beforeunload while the page is in front: the earlier request is kept
+  // as stale, and isn't given up on.
+  const s = await loaded()
+  s.auto.on = false
+  s.sync.addIds('read_entries:news', [1])
+  await s.advance(PATCH_BATCH_MS)
+  const first = s.writes()[0]
+  s.sync.addIds('read_entries:news', [2])
+  s.sync.leave()
+  const carrier = s.writes()[1]
+  assert.deepEqual(patchBody(carrier), { add: [1, 2], remove: [] })
+  carrier.respond()
+  await s.settle()
+  let done = false
+  const discarding = s.sync.discardPending(resetDeletes).then(() => (done = true))
+  await s.settle()
+  assert.equal(done, false, 'it waits for the earlier request: it could land after the DELETEs')
+  first.respond()
+  await discarding
+  assert.equal(s.writes().length, 2)
+})
+
+test('Reset keeps every save: one whose retries were used up, one waiting on a retry, one still in its batch', async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [7])
+  const s = await loaded({ server })
+  // A vote whose retries were used up while offline (after the toast it
+  // stays queued).
+  s.auto.offline = true
+  s.sync.setVotes({ 2: 'up' })
+  await s.advance(PATCH_BATCH_MS + RETRY_MS.reduce((a, b) => a + b) + 100)
+  assert.deepEqual(s.errors, ['unsaved'])
+  s.auto.offline = false
+  s.auto.on = false
+  // A hide whose PATCH answered 503 and waits on its 2 s retry, and the
+  // vote sent again with it (its retries are used up, so a batch takes it).
+  s.sync.addIds('hidden_entries', [1])
+  await s.advance(PATCH_BATCH_MS)
+  for (const r of s.writes().filter((x) => !x.settled)) r.fail(503)
+  await s.settle()
+  // A save still in its batch, and a read mark (Reset deletes those).
+  s.sync.addIds('starred_entries', [8])
+  s.sync.addIds('read_entries:news', [9])
+  const before = s.writes().length
+  s.auto.on = true
+  await s.sync.discardPending(resetDeletes)
+  const sent = s.writes().slice(before)
+  assert.deepEqual(sent.map((r) => [r.key, r.keepalive]).sort(), [
+    ['hidden_entries', true],
+    ['starred_entries', true],
+    ['voted_entries', true],
+  ])
+  assert.deepEqual(server.value('starred_entries'), [7, 8])
+  assert.deepEqual(server.value('hidden_entries'), [1])
+  assert.deepEqual(server.value('voted_entries'), { 2: 'up' })
+  assert.equal(server.value('read_entries:news'), undefined)
+  s.sync.leave()
+  await s.advance(60_000)
+  assert.equal(s.writes().length, before + 3, 'nothing more goes')
+})
+
+test("Reset: a save whose PATCH fails during the wait is tried again, and what still fails goes with the reload's leave flush", async () => {
+  const server = new FakeServer()
+  const s = await loaded({ server })
+  s.auto.on = false
+  s.sync.addIds('starred_entries', [8])
+  await s.advance(PATCH_BATCH_MS)
+  const onWay = s.writes()[0]
+  const discarding = s.sync.discardPending(resetDeletes)
+  await s.settle()
+  onWay.fail(503)
+  await s.settle()
+  assert.equal(s.writes().length, 2, 'sent again at once')
+  assert.ok(s.writes()[1].keepalive)
+  s.writes()[1].fail(502)
+  await discarding
+  // A save made during Reset's wait, after the flush.
+  s.sync.addIds('starred_entries', [9])
+  // The reload: pagehide's leave flush.
+  s.auto.on = true
+  s.sync.leave()
+  await s.settle()
+  assert.equal(s.writes().length, 3)
+  assert.ok(s.writes()[2].keepalive)
+  assert.deepEqual(server.value('starred_entries'), [8, 9])
 })
 
 test('a key at its cap, then more adds than the cap while offline: every PATCH after reconnecting fits, and the server ends with the newest', async () => {
