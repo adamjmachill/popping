@@ -475,14 +475,22 @@ export function ColumnInner({
   // place, so the reader keeps their place in the page. The first run
   // after the press can still see the button that went (the new row's
   // element reaches ``marker`` a render later), so it waits for a marker
-  // in the page.
+  // in the page. Focused without a scroll, then brought into view only
+  // if it isn't all inside ``sentinelRoot``'s box: on the phone the list
+  // has shrunk to it and nothing moves, but in the desktop grid the
+  // other columns of its row keep the page tall, so a shorter column's
+  // marker can be thousands of pixels above the screen.
   useEffect(() => {
     const from = refocusRef.current
     if (!from || from.generation === generation || !marker?.isConnected) return
     refocusRef.current = null
     const active = document.activeElement
-    if (count === 0 && (!active || active === document.body)) marker.focus({ preventScroll: true })
-  }, [generation, count, marker])
+    if (count !== 0 || (active && active !== document.body)) return
+    marker.focus({ preventScroll: true })
+    const box = sentinelRoot?.getBoundingClientRect()
+    const at = marker.getBoundingClientRect()
+    if (box && (at.top < box.top || at.bottom > box.bottom)) marker.scrollIntoView({ block: 'nearest' })
+  }, [generation, count, marker, sentinelRoot])
 
   const empty = unseenTotal === 0 && earlierTotal === 0
   const cardProps = {

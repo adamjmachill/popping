@@ -59,6 +59,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #45 · (If you have a desktop) On the laptop, open a story from the For You row at the top, then look at its category's column. Pass: the column's "N new" is one lower and the column didn't move.
 - [ ] #45 · On a tab that says "You're all caught up", open "Earlier (N)", scroll down until that line is off the top of the screen, and stay there while new stories come in (a busy tab, a few minutes). Pass: the story you are reading never jumps; back at the top, the new stories are above the line.
 - [ ] #45 · With VoiceOver on, go to the end of a tab and double-tap "N not seen · Mark as read". Pass: VoiceOver lands on "You're all caught up" in its place, not at the top of the page, and can reach the toast's Undo.
+- [ ] #45 · (If you have a desktop) On the laptop, scroll down to the end of a short column that sits next to a much longer one, press Tab until its "N not seen · Mark as read" is focused, then press Enter. Pass: the page scrolls up to that column's "You're all caught up", which shows the focus ring, and the next Tab goes on from there without a jump.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

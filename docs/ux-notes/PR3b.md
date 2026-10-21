@@ -329,7 +329,9 @@ History are gone, so a story is used up only by opening it or by Mark all
   applies on both layouts (PR1r's guard stays phone-only for the reload).
   That second reset is called off once the user does anything after the
   return (review fix 2): a touch, click, key or wheel, a list scrolled
-  off its top, or a story opened by any path. The spec's "Polls never
+  off its top, or a story opened by any path. (`click` itself joined the
+  listeners in re-check round 2; before that a click with no pointer or
+  touch event, as a desktop screen reader in Firefox sends, was missed.) The spec's "Polls never
   reset it" and D3 ("it stays where it is until you leave the tab") then
   hold: the late refresh's stories append or wait like a poll's.
 - **A Sort change resets through the snapshot's `order`**, not a
@@ -418,20 +420,26 @@ History are gone, so a story is used up only by opening it or by Mark all
   an open straight before leaving: nothing; from the review fixes, an open
   or a scroll before a slow return's refresh lands: nothing moves; from
   re-check round 1, a finger resting on the list too, and the first
-  return's refresh held until the return's own scroll event),
+  return's refresh held until the return's own scroll event; from
+  re-check round 2, a click alone opening Earlier, a bare key and a
+  wheel turn, the open made a dispatched middle-click so only the open
+  guards keep it, and the scroll case waiting for its scroll event),
   `flow-refresh-resets` (a poll appends without a toast; Refresh starts
   the tab over, "1 new" then "Nothing new", and folds an open Earlier;
   from re-check round 1, a Refresh past the old batch draws the first 30
-  and the sentinel),
+  and the sentinel; from re-check round 2, the same on NHL when the old
+  limit already reaches the new snapshot's unseen stories),
   and from the review fixes `flow-arrival-batch-edge` (an arrival past a
   whole batch never takes the marker or Earlier off the page) and
   `flow-earlier-keys-fold` (1280: Earlier folds with the keyboard
   selection inside, on `r` and with its button, and the selection goes
-  with it), and from re-check round 1 `flow-return-from-earlier` (C1 from
-  deep in Earlier: the hold is let go, the end row follows the opens and
-  an arrival goes in at once).
+  with it; from re-check round 2 an `h` sent in the same task as the
+  button's fold), and from re-check round 1 `flow-return-from-earlier`
+  (C1 from deep in Earlier: the hold is let go, the end row follows the
+  opens and an arrival goes in at once).
 - Changed flows: `flow-auto-append` ends with the marker;
-  `flow-desktop-layout` adds a Mark all step; `flow-reset-keeps-saves`
+  `flow-desktop-layout` adds a Mark all step (and from re-check round 2
+  News's end row pressed with the keyboard far down the page); `flow-reset-keeps-saves`
   seeds `seen:news` and opens a story where it tapped ✓;
   `flow-foryou-fails-keeps-tab` and `flow-scroller-rotate` as under
   Deviations. FN's toast regex is `/^(\d+ new|Nothing new)$/`, looked for
@@ -441,8 +449,9 @@ History are gone, so a story is used up only by opening it or by Mark all
   didn't handle itself is recorded in `opened` and kept on the page
   (bubble phase), so opening a story leaves the flow on Popping.
   Helpers: `withArrivals`, `arrivalNhl`, `groupIds`, `markerText`,
-  `badge`, `textNow`, `openStory`, `seenAdded`, `seenRemoved`, and from
-  re-check round 1 `restFinger`.
+  `badge`, `textNow`, `openStory`, `seenAdded`, `seenRemoved`, from
+  re-check round 1 `restFinger`, and from re-check round 2 `markerAbove`
+  and `scrolledTo`.
 - Smoke states (390 and 320): `caught-up`, `not-seen-row`,
   `earlier-open`: rows 44px, the marker not a status region and not a
   nested `<section>`, Earlier's cards at opacity 0.6.
@@ -620,7 +629,9 @@ Every one was fixed; none was skipped.
    marker is `tabIndex={-1}`. When the end row is pressed with the
    keyboard or VoiceOver (it held focus, or a click with `detail` 0), an
    effect moves the focus to the new marker once the tab has started
-   over, only if the focus fell to `<body>`, and without scrolling. The
+   over, only if the focus fell to `<body>`, and without scrolling
+   (re-check round 2: then brought into view if it isn't all inside the
+   scroller's box, which in the desktop grid it can be far from). The
    ⋯ row returns the focus to ⋯ under the same condition. No
    `role="status"` was added; strict smoke C7 still passes.
 7. (Same as 4.)
@@ -695,8 +706,11 @@ Earlier that folded) and are fixed together.
    and App's stable `dropSelection` clears it while it is still that
    card. The call is in a layout effect: from a passive effect App's
    update waited behind the next key, and the flow showed `h` and `b`
-   still acting on the card that went (the `useEffect` mutant fails 3 of
-   3 runs). The next ArrowDown starts at the column's first card.
+   still acting on the card that went (the `useEffect` mutant failed 3 of
+   3 runs here, but only through a timing window: re-check round 2 found
+   it surviving 12 of 31 runs and made the flow send `h` in the same
+   task as the fold). The next ArrowDown starts at the column's first
+   card.
    `flow-earlier-keys-fold` presses `h`, `b` and `s` after the fold and
    checks that nothing was sent, toasted, hidden or expanded, then that
    Enter on the focused Earlier button opens it.
@@ -716,7 +730,10 @@ Earlier that folded) and are fixed together.
    refresh lands. The list must be the reset one with the late story at
    its end, at its top, Earlier as it was. Case 1's open is now a
    `dispatchEvent('click')` (no pointer or touch, as VoiceOver does), so
-   the open guards are tested with the input listeners in place. The two
+   the open guards are tested with the input listeners in place.
+   (Re-check round 2 added `click` to the listeners, so that open now
+   calls the reset off by itself; case 1 became a dispatched middle-click,
+   the one open that reaches `openEntry` with none of the inputs.) The two
    open guards back each other up: `openEntry` stamps the open the
    landing checks, so a story opened from a card is kept by either one,
    and only removing both fails (each alone has no visible effect on a
@@ -753,9 +770,9 @@ the copy was restored after each.
 
 | Test | Broken line | Fails on |
 |---|---|---|
-| `flow-return-from-earlier` (1) | the marker observer's dependencies without `generation` | RETURN-EARLIER: after two opens the end row reads "7 not seen", expected 5; the arrival waits; the row reads 7, expected 6; "the end row, scrolled to at 555, moved to 741" (2 of 2 runs) |
+| `flow-return-from-earlier` (1) | the marker observer's dependencies without `generation` | RETURN-EARLIER: after two opens the end row reads "7 not seen", expected 5; the arrival waits; the row reads 7, expected 6; "the end row, scrolled to at 555, moved to 741" (2 of 2 runs here; under load it survived 2 runs in 8 until re-check round 2 checked the hold before leaving) |
 | `flow-earlier-keys-fold` (2) | no `onSelectionFolded` call | EARLIER-KEYS: after `r` ArrowDown selected 603 in Earlier, expected 601; with Earlier folded `h`, `b` and `s` sent `never` and `bookmark` for 603, "Earlier (1)", a toast; Enter on the focused Earlier button did nothing |
-| `flow-earlier-keys-fold` (2) | the call in `useEffect`, not `useLayoutEffect` | EARLIER-KEYS: `h` and `b` sent `never` and `bookmark` for 602, "Earlier (1)", a toast (3 of 3 runs) |
+| `flow-earlier-keys-fold` (2) | the call in `useEffect`, not `useLayoutEffect` | EARLIER-KEYS: `h` and `b` sent `never` and `bookmark` for 602, "Earlier (1)", a toast (3 of 3 runs here; it survived 12 of 31 in re-check round 2, which pinned it) |
 | `flow-earlier-keys-fold` (3) | `setOpenedFor(undefined)` back in the new-snapshot block | EARLIER-KEYS: "r with the selection inside left Earlier expanded true with 2 cards drawn, expected it folded" |
 | `flow-earlier-keys-fold` (review fix 4, again) | Earlier opened on every render while the selection is in it | EARLIER-KEYS: `r` and the Earlier button both left it expanded, and the shortcuts acted on 603 |
 | `flow-return-after-10-min` (4) | no input listeners while armed | RETURN: "with a finger on the list when the return's refresh landed, the list became [7954,7953,7952,102,…], expected [7953,7952,102,…,7954]" (2 of 2 runs) |
@@ -766,7 +783,7 @@ the copy was restored after each.
 | `flow-return-after-10-min` (review fix 2, again) | no scroll listener | RETURN: the scroll case's list and position, as before |
 | `flow-open-marks-seen` (6) | the Reddit-thread link's `onAuxClick` dropped | OPEN-SEEN: "a middle-click on story 104's Reddit thread sent no PATCH adding it to seen:news"; badge "10", expected "9" |
 | `flow-open-marks-seen` (6) | Listen's `onAuxClick` dropped | OPEN-SEEN: "a middle-click on episode 401's Listen sent no PATCH adding it to seen:podcast" |
-| `flow-refresh-resets` (7) | the three `!newSnapshot &&` guards removed | REFRESH: "after a Refresh that brought 20 to 13 unseen the tab draws 33 unseen cards without a "load more" sentinel" (2 of 2 runs) |
+| `flow-refresh-resets` (7) | the three `!newSnapshot &&` guards removed | REFRESH: "after a Refresh that brought 20 to 13 unseen the tab draws 33 unseen cards without a "load more" sentinel" (2 of 2 runs; this case kills only the `needUnseen` guard: the `drewAllUnseen` one got its own case in re-check round 2) |
 
 ### Verification (re-check round 1)
 
@@ -792,6 +809,179 @@ On the same base (`e1f0390`), with the same local loop (`popping_test_f`,
   loop).
 - Mutation checks: the table above; every mutant of a fix failed its
   flow, the two single open guards pass as explained under fix 4.
+
+## Review fixes (re-check round 2, "PR3b: re-check fixes, round 2")
+
+The re-check confirmed nine findings: two in the app, seven in the
+tests. Every one was fixed; nothing was skipped. Findings 3 and 4 share a
+cause (a fixed sleep stood in for the marker observer's callback) and
+share the fix. Finding 1's fix changed what case 1 of the return flow
+tests, so that case changed too.
+
+1. **C1's second reset was not called off by a click with no pointer or
+   touch event** (minor). The finding modelled it as VoiceOver on an
+   iPhone; the verifier showed that WebKit sends a simulated touch first
+   there (React's root has touch listeners), so the real case is a
+   desktop screen reader in Firefox (NVDA, JAWS), which sends only mouse
+   events. Opening Earlier, the end row, C8's row, a save or a hide that
+   way before a slow return's refresh landed was undone by the second
+   reset. `click` joins `RETURN_INPUTS` (window, capture, passive, only
+   while armed), which the comments and these notes already said it was
+   in. `flow-return-after-10-min` has a fourth slow return: "Earlier (N)"
+   opened with `dispatchEvent('click')` before the refresh lands; Earlier
+   stays open, the late story is at the end, the list at its top. With
+   `click` listened to, case 1's dispatched click on a story now calls
+   the reset off by itself, so case 1 opens the story with a dispatched
+   middle-click (an `auxclick`, button 1), which reaches `openEntry`
+   with none of the inputs: the open guards are still tested alone (the
+   "neither open guard" mutant still fails).
+2. **The end row's keyboard Mark as read on the desktop left the focus
+   thousands of pixels above the screen** (minor). In the desktop grid
+   the other columns of a row keep it, and the page, as tall as before,
+   so the shorter column's new marker could be far above the wrapper's
+   view, focused with `preventScroll`: no focus to see, and the next Tab
+   jumped the page. After `marker.focus({ preventScroll: true })` Column
+   now calls `marker.scrollIntoView({ block: 'nearest' })` when the
+   marker isn't all inside `sentinelRoot`'s box. On the phone the list
+   has shrunk to the marker, so nothing moves there (`flow-caught-up`'s
+   focus checks pass unchanged). `flow-desktop-layout` presses News's end
+   row with Enter while NHL's 60 cards keep the row tall, and checks the
+   focused marker is inside the wrapper's box. `docs/DEVICE_CHECKS.md`
+   gains a line for it.
+3. **`flow-return-from-earlier` assumed the hold was on after a fixed
+   sleep** (major, tests). If the marker observer's callback hadn't come
+   by the time the page hid, the hold was never on, and the flow passed
+   with fix 1 of re-check round 1 reverted. The flow now waits on
+   `markerAbove(list)`: an IntersectionObserver made after the scroll, on
+   the same root, resolves on its first report of the marker above the
+   screen. The app's observer saw the crossing in the same rendering
+   update or an earlier one, so its callback runs in the same
+   notification task or an earlier one: nothing the flow sends next is
+   handled before it has run and the hold (a ref) is on. The `io-no-generation` mutant now fails 9 of 9 runs, three
+   copies at once at load 12.
+4. **`flow-new-arrival-appends` flaked under load** (major, tests): its
+   `sleep(400)` was shorter than the observer's callback delay, so a poll
+   landed with the hold still off. All three scrolls that put the marker
+   above the screen now wait on `markerAbove`. On the same source at load
+   13 with three copies at once, HEAD's flows failed 5 of 9 runs here
+   and the new ones 0 of 9.
+5. **`flow-return-after-10-min`'s scroll case waited a fixed 300 ms for
+   the scroll event** (minor, tests). `scrolledTo(list, 300)` scrolls and
+   resolves once the list's scroll event has been sent (the app's
+   capture listener on the document hears it first), and only then lets
+   the refresh in. In the same runs as 4, HEAD's scroll case failed 5 of
+   9 and the new one 0 of 9. The finding's optional app-side change (skip
+   the second reset when the scroller isn't at its top when the refresh
+   lands) was not made: a finger scroll sends `touchstart`, which calls
+   the reset off at once; only a scroll with no touch (VoiceOver) relies
+   on the scroll event, whose window is one frame; and no flow could pin
+   such a change, since the race it would cover can't be made to happen
+   on purpose.
+6. **The `useLayoutEffect` requirement for `onSelectionFolded` was
+   pinned only by timing** (minor, tests). The flow now folds Earlier
+   with `b.click()` inside one `evaluate` and sends `h` from a microtask
+   queued after it: React flushes the click's update in an earlier
+   microtask, and only a drop made in that flush (a layout effect, whose
+   sync update and App's re-registered key listener land in the same
+   flush) is in time. `b` and `s` follow with the keyboard as before.
+   The `useEffect` mutant now fails 8 of 8 runs (two copies at once, load
+   13); the real code passes. The round-1 notes' "3 of 3" is corrected
+   above.
+7. **`foldedWithout`'s "a card is still selected" check could not fail
+   once Earlier was folded** (minor, tests): a folded Earlier draws none
+   of its cards, so no card has `tabindex="0"` whether or not App dropped
+   the selection. The check is gone; the drop is read from what the keys
+   do. After `r`, the next ArrowDown selects 601 (as before); after the
+   button's fold, the same-task `h`, then `b` and `s`, act on nothing,
+   and after Enter has reopened Earlier the next ArrowDown selects 601
+   (an ArrowDown straight after the fold would select 601 and give `h`,
+   `b` and `s` a card to act on). `dropSelection`'s own-id guard
+   (`cur === entryId`) stays as a guard and is noted as such in App:
+   Column calls it from a layout effect of the very commit in which that
+   card is selected, so no path reaches it with another selection and no
+   flow can pin it (the verifier's unconditional mutant passed the three
+   flows that fold or move the selection).
+8. **`flow-refresh-resets` killed only the `needUnseen` guard** (minor,
+   tests). Removing `!newSnapshot` from the `drewAllUnseen` line passed
+   every flow. The flow now ends on NHL with 61 unseen stories, scrolled
+   to its end once (60 drawn, the sentinel), 601 opened, then Refresh: the
+   new snapshot's 60 unseen fit the old limit, so without the guard the
+   pass that resets the limits also sets `drewAllUnseen` and the next
+   render draws all 60. It must draw its first 30 and the sentinel. This
+   is the finding's case (old limit at least the new total, more than one
+   batch, not every unseen card drawn before) with one open in place of
+   fifteen marks from another device. The `no-guard-drewall` mutant fails
+   2 of 2 runs. The finding's remark that the `earlierLimit` guard can't
+   change behaviour was not re-checked here; the round-1 row is reworded
+   so it no longer claims each guard is covered.
+9. **The `keydown` and `wheel` listeners had no test** (minor, tests).
+   Two more slow returns: a bare Shift with the focus on the page, and the
+   wheel turned up over the list at its top (a `wheel` event, waited for
+   in the page, that scrolls nothing). Each must leave the reset list
+   with the late story at its end and the list at its top. Dropping
+   `keydown`, or `wheel`, from `RETURN_INPUTS` now fails its case 2 of 2
+   runs.
+
+Changed: `App.tsx` (`RETURN_INPUTS`, the arm comment, `dropSelection`'s
+comment), `Column.tsx` (the end row's focus hand-over), `flows.cjs`
+(`markerAbove` and `scrolledTo`; `flow-return-after-10-min`,
+`flow-return-from-earlier`, `flow-new-arrival-appends`,
+`flow-earlier-keys-fold`, `flow-refresh-resets`, `flow-desktop-layout`),
+the README rows for those flows and helpers, `docs/DEVICE_CHECKS.md`.
+
+### Mutation checks (re-check round 2)
+
+Each mutant was a scratch copy of `frontend/` with one edit (the
+worktree untouched), built, served on port 4173 of its own loopback
+address, run with `--only` on its flow and stopped by PID. "HEAD's flows"
+is the same source run with `flows.cjs` from 76f31bd.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `flow-return-after-10-min` (1) | `click` dropped from `RETURN_INPUTS` | RETURN: "with Earlier opened by a click alone before the return's refresh landed, the list became [7955,7954,…,112], expected [7954,…,112,7955]"; "Earlier … folded: expanded false with 0 cards drawn" (2 of 2) |
+| `flow-return-after-10-min` (1) | neither open guard (no call-off in `openEntry`, the landing ignores opens) | RETURN: "story 7951, opened before the return's refresh landed, moved"; "Earlier (3)", was "Earlier (2)"; the late story not at the end (2 of 2) |
+| `flow-desktop-layout` (2) | the `scrollIntoView` dropped | DESK-LAYOUT: "the focused marker is at -3086..-3042, outside the wrapper's 113..800" (2 of 2) |
+| `flow-return-from-earlier` (3) | the marker observer's dependencies without `generation` | RETURN-EARLIER: the end row reads 7, expected 5; the arrival waits; the row reads 7, expected 6; the end row moved from 555 to 741 (9 of 9, three copies at once, load 12) |
+| `flow-new-arrival-appends` (4) | App ignores the hold | ARRIVAL: "the arrival went in: [601,602,7901,7902]", and "[7912]"; the card being read moved (2 of 2) |
+| `flow-new-arrival-appends` (4) | `keepEnd` always false | ARRIVAL: the Earlier card moved from 341 to 393, "C8's row came in"; moved from 207 to 155, "C8's row went" (2 of 2) |
+| `flow-new-arrival-appends`, `flow-return-after-10-min` (4, 5) | none: HEAD's flows on this source | 8 of 9 runs failed at load 13, three copies at once (the arrival flow 5 of 9, the scroll case 5 of 9); the new flows 0 of 9 in the same runs |
+| `flow-return-after-10-min` (5) | no scroll listener | RETURN: "scrolled before the return's refresh landed, the list became [7953,7952,…]"; "the list is at 486" (2 of 2) |
+| `flow-earlier-keys-fold` (6) | the `onSelectionFolded` call in `useEffect` | EARLIER-KEYS: "h, b and s sent [{602, never}]", "Earlier (1)", a toast (8 of 8, two copies at once, load 13) |
+| `flow-earlier-keys-fold` (7) | no `onSelectionFolded` call | EARLIER-KEYS: "after the fold ArrowDown selected 603 in Earlier, expected 601"; `h` and `b` acted on 603; Enter on the Earlier button did nothing (2 of 2) |
+| `flow-refresh-resets` (8) | `!newSnapshot &&` dropped from the `drewAllUnseen` line | REFRESH: "after a Refresh to 60 unseen with 60 drawn before it, the NHL tab draws 60 unseen cards without a "load more" sentinel" (2 of 2) |
+| `flow-return-after-10-min` (9) | `keydown` dropped from `RETURN_INPUTS` | RETURN: "with a key pressed before the return's refresh landed, the list became [7956,7955,…]" (2 of 2) |
+| `flow-return-after-10-min` (9) | `wheel` dropped from `RETURN_INPUTS` | RETURN: "with the wheel turned before the return's refresh landed, the list became [7957,7956,…]" (2 of 2) |
+
+### Verification (re-check round 2)
+
+On the same base (`e1f0390`), with the same local loop (`popping_test_f`,
+`vite preview` on port 4173, started and stopped by PID). 127.0.0.1:4173
+was held by an orphaned preview left over from an earlier verifier of
+this unit, which this pass did not stop, so every preview here bound
+127.0.0.2:4173 (the mutants 127.0.0.3 to .6, same port).
+
+- `npm run lint`: 0 errors (the same 4 react-refresh warnings).
+  `npm run build`: clean. `git diff --exit-code package.json
+  package-lock.json`: clean.
+- Unit tests: 193 of 193 pass (no library changed).
+- Backend pytest, the ten tests that read frontend source (slice 21,
+  slice 19 and the rest): 210 passed. No prop, comparator entry or
+  handler changed.
+- Strict smoke (`--csp --strict`, fonts-ci.conf), every state and flow:
+  1 failure in 172 runs (701 s, load about 4 to 7 from other agents):
+  `flow-desktop-keys-past-batch`, "the selected card was not scrolled
+  into view", a 3 s wait on the app's scroll to the keyboard selection,
+  which nothing here touches. Re-run once: it passed. The only edit
+  after that build was a comment in `App.tsx`; the rebuilt bundle
+  differs from the tested one only in its build stamp.
+- The PR3b flows and states (the 23 flows and 3 states of re-check round
+  1 at 390 and 320), looped 3 times on the final build: loop 1 had 1
+  failure, `flow-reset-keeps-saves` at setup ("clock.pauseAt: Cannot
+  fast-forward to the past": the flow reads the page's time, then pauses
+  the clock 1 s later, and load overran that second); it passed when
+  re-run once. Loops 2 and 3: 0 failures (189 to 270 s a loop).
+- Mutation checks: the table above; every mutant failed its flow, and
+  the flows the fixes made deterministic failed every run under load.
 
 ## Open items for later units
 

@@ -98,8 +98,10 @@ const HEALTH_INTERVAL_MS = 5 * 60_000
 // iOS suspends the page.
 const RETURN_RESET_MS = 10 * 60 * 1000
 // What calls off C1's second reset (``armReturnReset``): the user is
-// already using the page.
-const RETURN_INPUTS = ['pointerdown', 'touchstart', 'keydown', 'wheel'] as const
+// already using the page. ``click`` too, for an activation that comes
+// with none of the others (a desktop screen reader in Firefox sends
+// only mouse events, and no pointer events with them).
+const RETURN_INPUTS = ['pointerdown', 'touchstart', 'click', 'keydown', 'wheel'] as const
 
 // Structural equality for the plain JSON objects the API returns
 // (Entry, Source — flat scalars plus at most one nested plain
@@ -612,11 +614,12 @@ export function App() {
     disarmRef.current?.()
     disarmRef.current = null
   }, [])
-  // Armed by a long return, until its refresh lands. A touch, a click, a
-  // key or the wheel calls it off (a story opened from a card starts with
-  // one of these), and so does a list moved off its top (VoiceOver
-  // scrolls without them). The return's own scroll to the top leaves the
-  // list at 0, so it doesn't count.
+  // Armed by a long return, until its refresh lands. A touch, a click
+  // (even one that comes alone), a key or the wheel calls it off
+  // (``RETURN_INPUTS``; a story opened from a card starts with one of
+  // these), and so does a list moved off its top (VoiceOver scrolls
+  // without them). The return's own scroll to the top leaves the list at
+  // 0, so it doesn't count.
   const armReturnReset = useCallback(() => {
     disarmRef.current?.()
     resetAfterSeqRef.current = refreshSeqRef.current
@@ -871,8 +874,10 @@ export function App() {
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null)
   // A Column folded Earlier with the selected card inside (its button, or
   // a new snapshot): the selection goes, so the shortcuts never act on a
-  // card that isn't drawn. Only while it is still that card. Stable:
-  // Column's memo keeps callbacks.
+  // card that isn't drawn. Only while it is still that card: a guard
+  // only, since Column calls it from a layout effect of the very commit
+  // in which that card is selected, so no path today reaches it with
+  // another (no flow can pin it). Stable: Column's memo keeps callbacks.
   const dropSelection = useCallback((entryId: number) => {
     setSelectedCardId((cur) => (cur === entryId ? null : cur))
   }, [])
