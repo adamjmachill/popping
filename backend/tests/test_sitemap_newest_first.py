@@ -32,10 +32,10 @@ SITEMAP = f"""<?xml version="1.0" encoding="UTF-8"?>
 
 
 def _serve(monkeypatch, docs: dict[str, str]):
-    async def fake_fetch_html(url, content_types=None, custom_headers=None):
+    async def fake_fetch_html_checked(url, custom_headers=None, content_types=None, **kwargs):
         return docs.get(url)
 
-    monkeypatch.setattr(feed_autodiscovery, "fetch_html", fake_fetch_html)
+    monkeypatch.setattr(feed_autodiscovery, "fetch_html_checked", fake_fetch_html_checked)
 
 
 def test_entry_date_prefers_lastmod_then_url():
@@ -70,8 +70,8 @@ def test_newest_first_keeps_undated_last_in_order():
 @pytest.mark.asyncio
 async def test_crawl_scoped_to_section_newest_first(monkeypatch):
     _serve(monkeypatch, {f"{SITE}/sitemap.xml": SITEMAP})
-    urls = await _crawl_sitemaps(f"{SITE}/sitemap.xml", limit=10, path_prefix="/news-events/cpabc-newsroom/")
-    assert urls == [
+    entries = await _crawl_sitemaps(f"{SITE}/sitemap.xml", limit=10, path_prefix="/news-events/cpabc-newsroom/")
+    assert [e.url for e in entries] == [
         f"{NEWSROOM}2026/july/regulatory-pause-esg/",
         f"{NEWSROOM}2026/february/8-things-to-know-before-filing/",
         f"{NEWSROOM}2024/october/cra-new-audit-powers/",
@@ -83,8 +83,13 @@ async def test_crawl_scoped_to_section_newest_first(monkeypatch):
 @pytest.mark.asyncio
 async def test_crawl_limit_applies_after_sorting(monkeypatch):
     _serve(monkeypatch, {f"{SITE}/sitemap.xml": SITEMAP})
-    urls = await _crawl_sitemaps(f"{SITE}/sitemap.xml", limit=1, path_prefix="/news-events/cpabc-newsroom/")
-    assert urls == [f"{NEWSROOM}2026/july/regulatory-pause-esg/"]
+    entries = await _crawl_sitemaps(f"{SITE}/sitemap.xml", limit=1, path_prefix="/news-events/cpabc-newsroom/")
+    assert [e.url for e in entries] == [f"{NEWSROOM}2026/july/regulatory-pause-esg/"]
+    # The date in the URL orders the entries, but it is no publication
+    # date (only the month) and no <lastmod>: the candidate carries
+    # neither.
+    assert entries[0].published is None
+    assert entries[0].modified is None
 
 
 def test_section_prefix():
@@ -97,16 +102,26 @@ def test_section_prefix():
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
-async def test_fetch_falls_back_to_whole_sitemap_when_section_empty(monkeypatch):
+async def test_an_empty_section_does_not_fall_back_to_the_whole_sitemap(monkeypatch):
+    """A section feed whose section has no sitemap entries finds
+    nothing. It used to fall back to the whole site's sitemap, which is
+    how a section feed filled with the rest of the site (PR10b)."""
+    from app.article_detect import Candidate
+
     calls = []
 
-    async def fake_discover(url, limit=200, path_prefix=None):
+    async def fake_discover(url, limit=200, path_prefix=None, **kwargs):
         calls.append(path_prefix)
-        return [] if path_prefix else [f"{SITE}/post"]
+        return [] if path_prefix else [Candidate(f"{SITE}/post", None, None)]
 
-    monkeypatch.setattr(generic_scrape, "discover_sitemap_urls", fake_discover)
-    assert await generic_scrape._section_candidates(f"{SITE}/blog/", f"{SITE}/blog/", 10) == [f"{SITE}/post"]
-    assert calls == ["/blog/", None]
+    async def no_page_links(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(generic_scrape, "discover_sitemap_entries", fake_discover)
+    monkeypatch.setattr(generic_scrape, "_discover_page_links", no_page_links)
+    plan = await generic_scrape.plan_candidates(f"{SITE}/blog/")
+    assert plan == generic_scrape.Plan("", [], [])
+    assert calls == ["/blog/"]
 
 
 def test_too_old_skips_old_dated_pages_only():

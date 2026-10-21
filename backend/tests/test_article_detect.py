@@ -118,10 +118,291 @@ def _page(
         "https://www.example.com/p/2041",
         # "page" is pagination only when a number follows it.
         "https://www.example.com/page/how-we-report",
+        # Slugs that name a file type, and endings that are no file
+        # type (news CMSs). courlan's own tests match ``-png`` and
+        # ``.js`` anywhere in a URL and reject any ending it doesn't
+        # know, so PR10b's first cut rejected all of these.
+        "https://www.example.com/blog/how-to-compress-png-files",
+        "https://www.example.com/blog/converting-jpg-to-webp",
+        "https://www.example.com/blog/png-vs-jpg",
+        "https://www.example.com/news/2026/10/14/apple-drops-png-support/",
+        "https://www.example.com/blog/img-tags-explained",
+        "https://www.example.com/blog/node.js-22-released",
+        "https://www.example.com/news/national/council-vote/article68765432.ece",
+        "https://www.example.com/city/news/council-vote/112233.cms",
+        "https://www.example.com/rj/noticia/2026/10/18/council-vote.ghtml",
+        "https://www.example.com/cgi-bin/news.pl?id=42",
+        # Page endings of CMSs courlan doesn't know: nyc.gov's agency
+        # press releases, JavaServer Faces, ColdFusion.
+        "https://www.example.com/site/doh/about/press/pr2026/flu-shots-available.page",
+        "https://www.example.com/news/item.jsf?id=123",
+        "https://www.example.com/news/report.cfml",
+        # A slug that keeps a dotted word, with a trailing slash (Hugo,
+        # Jekyll pretty permalinks): the path has no ending.
+        "https://www.example.com/blog/moving-to-fly.io/",
+        "https://www.example.com/posts/notes-on-deno.land/",
+        # A slug that ends in a software name, before a trailing slash
+        # (Hugo, Eleventy) or under a page ending (Jekyll): a code
+        # word there is part of the slug, not a file's ending.
+        "https://www.example.com/posts/getting-started-with-three.js/",
+        "https://www.example.com/posts/understanding-package.json/",
+        "https://www.example.com/blog/why-i-moved-off-tailwind.css/",
+        "https://www.example.com/blog/reading-a-pom.xml/",
+        "https://www.example.com/2026/10/18/whats-new-in-vue.js.html",
     ],
 )
 def test_url_ok_keeps_articles(url):
     assert url_ok(url, SITE)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.example.com/library/riverlm3",
+        "https://www.example.com/library/riverlm3-png-tools",
+        "https://www.example.com/library/home",
+        "https://www.example.com/library/why-we-chose-deno.land",
+        "https://www.example.com/library/flu-shots-available.page",
+        "https://www.example.com/library/getting-started-with-three.js/",
+        "https://www.example.com/library/whats-new-in-vue.js.html",
+    ],
+)
+def test_url_ok_takes_the_owners_link_pattern_as_the_article_signal(url):
+    """Under the owner's ``link_pattern`` courlan isn't asked, nor its
+    2-to-5-letter ending rule: the pattern says what an article is, as
+    ``score_page`` takes it."""
+    assert url_ok(url, SITE, owner_pattern=True)
+
+
+@pytest.mark.parametrize(
+    ("path", "ok"),
+    [
+        # Without the owner's pattern, an unknown ending at the end of
+        # the path is a file, as courlan reads it ...
+        ("/blog/why-we-chose-deno.land", False),
+        ("/parks/trails/maps/trail-1.gpx", False),
+        # ... but a path that ends in ``/`` has no ending ...
+        ("/blog/why-we-chose-deno.land/", True),
+        # ... and a document or media ending is a file either way ...
+        ("/files/annual-report.pdf/", False),
+        ("/files/annual-report.pdf.html", False),
+        # ... while a code word names a file only at the very end.
+        ("/blog/whats-new-in-vue.js", False),
+        ("/blog/whats-new-in-vue.js/", True),
+        ("/blog/whats-new-in-vue.js.html", True),
+    ],
+)
+def test_url_ok_reads_an_ending_only_at_the_end_of_the_path(path, ok):
+    assert url_ok("https://www.example.com" + path, SITE) is ok
+
+
+@pytest.mark.parametrize(
+    "ending", ["jhtml", "jspx", "shtm", "dhtml", "phtm", "xhtm", "rhtml", "lasso", "nsf", "land"]
+)
+def test_url_ok_reads_a_sitemap_entrys_unknown_ending_as_a_page(ending):
+    """A sitemap lists pages, and main fetched every entry: an ending of
+    2 to 5 letters no list here knows (ATG's ``.jhtml``, ``.jspx``,
+    ``.shtm``, Domino's ``.nsf``) is a page's there. A listing page's
+    link keeps the rule, as courlan's ending test read it on main."""
+    url = f"https://www.example.com/news/story-123-council-approves-plan.{ending}"
+    assert url_ok(url, SITE, sitemap_entry=True)
+    assert url_ok(url, SITE, sitemap_entry=True, section="/news/")
+    assert not url_ok(url, SITE)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/uploads/trail-map.jpg",
+        "/files/annual-report.pdf",
+        "/files/annual-report.pdf.html",
+        "/feed.xml",
+        "/assets/app.js",
+        "/img_1234",
+        "/tag/parks/",
+        "/about/",
+    ],
+)
+def test_url_ok_keeps_its_other_rules_for_a_sitemap_entry(path):
+    assert not url_ok("https://www.example.com" + path, SITE, sitemap_entry=True)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/news/council-approves-river-trail/index.html",
+        "/council-approves-river-trail/index.html",
+        "/news/20261020/index.html",
+        "/news/council-approves-river-trail/default.aspx",
+        "/news/council-approves-river-trail/index.php",
+        "/news/2026/council-approves-river-trail/index.html",
+        "/2026/10/20/politics/council-approves-river-trail/index.html",
+    ],
+)
+@pytest.mark.parametrize("sitemap_entry", [False, True])
+def test_url_ok_reads_a_folders_index_page_as_the_folder(path, sitemap_entry):
+    """Round 7: a static or exported site publishes each story as a folder
+    with its own index page. courlan reads an index page under a short
+    path as a home page, and it was shown the path above the page as
+    ``x/x/``, so ``/news/<slug>/index.html`` read as a home page and a
+    feed of them as ``[no list]``. The folder is judged instead, as
+    courlan judged the real path."""
+    assert url_ok("https://www.example.com" + path, SITE, sitemap_entry=sitemap_entry)
+
+
+@pytest.mark.parametrize(
+    ("path", "section"),
+    [
+        # The site's own index page is the home page.
+        ("/index.html", None),
+        ("/default.aspx", None),
+        # A folder that is no article's is judged as that folder.
+        ("/about/index.html", None),
+        ("/privacy/index.html", None),
+        ("/tag/parks/index.html", None),
+        ("/2026/10/index.html", None),
+        ("/blog/2026/index.html", None),
+        ("/category/news/index.html", "/category/news/"),
+        # With no web page's ending it is no folder's index page, and
+        # courlan judges it as before.
+        ("/library/home", None),
+        ("/blog/index", None),
+    ],
+)
+def test_url_ok_keeps_its_rules_for_a_folders_index_page(path, section):
+    url = "https://www.example.com" + path
+    assert not url_ok(url, SITE, section=section)
+    assert not url_ok(url, SITE, section=section, sitemap_entry=True)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://www.example.com/library/tag/python",
+        "https://www.example.com/library/2026/07/",
+        "https://www.example.com/library/riverlm3.png",
+        "https://www.example.com/library/riverlm3.zip/",
+        # A code word at the very end of the path is a file's ending,
+        # under the owner's pattern too.
+        "https://www.example.com/library/getting-started-with-three.js",
+        "https://www.example.com/library/feed.xml",
+        "https://www.example.com/library/about",
+        "https://www.other-site.com/library/riverlm3",
+    ],
+)
+def test_url_ok_keeps_its_own_rules_under_the_owners_link_pattern(url):
+    assert not url_ok(url, SITE, owner_pattern=True)
+
+
+@pytest.mark.parametrize(
+    ("path", "ok"),
+    [
+        # A news section filed under a static section (councils,
+        # universities, companies): its articles are articles ...
+        ("/about/news/council-approves-river-trail", True),
+        ("/about-us/news/harvest-market-returns/", True),
+        ("/about/press/2026/flu-shots-available", True),
+        ("/about/media/news-releases/new-library-hours", True),
+        ("/pages/blog/our-new-trail-map", True),
+        # ... and so are those of a section named like no news section
+        # (round 7): only a page directly under a static section is
+        # static. score_page judges the rest of the static tree, as main
+        # fetched every sitemap entry.
+        ("/about-us/news-and-media/council-approves-river-trail/", True),
+        ("/about/media-centre/council-approves-river-trail", True),
+        ("/about/press-room/new-library-hours", True),
+        ("/contact-us/notices/road-closure-on-main-street/", True),
+        ("/about/team/dana-smith", True),
+        ("/about/team/news", True),
+        # The section page itself, the pages directly under a static
+        # section and the news section's own listings are not.
+        ("/about/news", False),
+        ("/about/news/", False),
+        ("/about-us/news-and-media/", False),
+        ("/about/history", False),
+        ("/about/team", False),
+        ("/pages/our-story", False),
+        ("/policies/refund-policy", False),
+        ("/about/news/page/2/", False),
+        ("/about/news/tag/parks/", False),
+        ("/about/news/2026/10/", False),
+        ("/about/news/contact", False),
+    ],
+)
+def test_url_ok_reads_a_news_section_under_a_static_section(path, ok):
+    assert url_ok("https://www.example.com" + path, SITE) is ok
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/about/media-centre/council-approves-river-trail",
+        "/about-us/news-and-media/council-approves-river-trail/",
+        "/contact-us/notices/road-closure-on-main-street/",
+    ],
+)
+@pytest.mark.parametrize("section", [None, "static section", "subsection"])
+def test_url_ok_reads_a_page_deeper_in_a_static_section_with_or_without_its_section(path, section):
+    """Round 7: a page below a static section's subsection is a candidate
+    on every feed, not only on one that reads that subsection: a root
+    feed's sitemap and a listing page with another list of links on it
+    both find it."""
+    url = "https://www.example.com" + path
+    segments = path.strip("/").split("/")
+    own = {
+        "static section": f"/{segments[0]}/",
+        "subsection": f"/{segments[0]}/{segments[1]}/",
+    }.get(section)
+    assert url_ok(url, SITE, section=own)
+    assert url_ok(url, SITE, section=own, sitemap_entry=True)
+
+
+@pytest.mark.parametrize(
+    ("path", "section", "owner_pattern"),
+    [
+        ("/shop/journal/new-trail-shoes", "/shop/journal/", False),
+        ("/shop/journal/new-trail-shoes", "/shop/journal/", True),
+        ("/category/news/council-approves-river-trail", "/category/news/", False),
+        ("/products/canvas-tote", "/products/", True),
+        ("/members/dana", "/members/", True),
+    ],
+)
+def test_url_ok_judges_only_the_segments_below_the_feeds_own_section(path, section, owner_pattern):
+    """The feed reads a section the owner chose (its address's section,
+    or its link pattern), so the segment rules don't judge that
+    section's own segments: its pages are candidates, which
+    ``score_page`` judges. Without the section they are not."""
+    url = "https://www.example.com" + path
+    assert url_ok(url, SITE, owner_pattern=owner_pattern, section=section)
+    assert not url_ok(url, SITE, owner_pattern=owner_pattern)
+
+
+@pytest.mark.parametrize(
+    ("path", "section"),
+    [
+        # Outside the section the rules are whole.
+        ("/about/", "/about/media-centre/"),
+        ("/about/team", "/about/media-centre/"),
+        ("/shop/canvas-tote", "/shop/journal/"),
+        # The section page itself is the listing.
+        ("/about/media-centre/", "/about/media-centre/"),
+        ("/about/media-centre", "/about/media-centre/"),
+        # Below it, the segments below the section, the page's own name
+        # and the file endings are judged.
+        ("/about/media-centre/tag/parks/", "/about/media-centre/"),
+        ("/about/media-centre/page/2/", "/about/media-centre/"),
+        ("/about/media-centre/contact", "/about/media-centre/"),
+        ("/about/media-centre/2026/10/", "/about/media-centre/"),
+        ("/about/media-centre/annual-report.pdf", "/about/media-centre/"),
+        # A prefix that ends inside a segment owns only the whole
+        # segments before it.
+        ("/library/tags", "/library/ta"),
+        ("/library/tag/python", "/library/t"),
+    ],
+)
+def test_url_ok_keeps_its_rules_outside_and_below_the_feeds_own_section(path, section):
+    assert not url_ok("https://www.example.com" + path, SITE, section=section)
+    assert not url_ok("https://www.example.com" + path, SITE, owner_pattern=True, section=section)
 
 
 def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():
@@ -173,6 +454,28 @@ def test_url_ok_keeps_a_loopback_host_that_is_the_sources_own():
         "https://www.example.com/feed/",
         "https://www.example.com/wp-content/uploads/2026/10/trail.jpg",
         "https://www.example.com/files/annual-report.pdf",
+        "https://www.example.com/wp-content/uploads/2026/10/trail.JPG",
+        # Upper-case endings outside any rejected section: only the
+        # (lower-cased) ending rejects them.
+        "https://www.example.com/files/Trail-Map.JPG",
+        "https://www.example.com/news/Episode-12.MP3",
+        # Endings of 2 to 5 letters that are no web page's are files,
+        # listed or not (map downloads, documents, video).
+        "https://www.example.com/parks/trails/maps/trail-1.gpx",
+        "https://www.example.com/parks/trails/maps/trail-2.kmz",
+        "https://www.example.com/files/minutes-2026-10.rtf",
+        "https://www.example.com/media/council-meeting.wmv",
+        # A file behind a page ending, and a camera's file name as the
+        # page (WordPress attachment pages).
+        "https://www.example.com/files/doc.pdf.html",
+        "https://www.example.com/blog/IMG_1234",
+        "https://www.example.com/2026/10/img-1234/",
+        "https://www.example.com/news/feed.xml",
+        "https://www.example.com/assets/app.js",
+        "https://www.example.com/download?file=annual-report.pdf",
+        "https://www.example.com/blog/home",
+        "https://www.example.com/index.html",
+        "https://www.example.com/2026_10_01_archive.html",
         "https://www.example.com/kontakt",
         "https://www.other-site.com/news/a-story",
         "mailto:news@example.com",
@@ -297,6 +600,73 @@ def test_news_sitemap_reads_first():
 )
 def test_classify_sitemap_edge_cases(url, cls):
     assert classify_sitemap(url) == cls
+
+
+@pytest.mark.parametrize(
+    ("name", "cls"),
+    [
+        # A custom post type named with a media, product or user word
+        # lists posts: the word only qualifies its last one (round 6).
+        ("media_release-sitemap.xml", "other"),
+        ("media-release-sitemap.xml", "other"),
+        ("product_update-sitemap.xml", "other"),
+        ("user_story-sitemap.xml", "post"),
+        ("wp-sitemap-posts-media_release-1.xml", "post"),
+        ("wp-sitemap-posts-product_update-1.xml", "post"),
+        ("?sitemap=posts&sitemap-subtype=media_release", "post"),
+        # Taxonomies keep their class by their last word, or by WordPress
+        # core's taxonomy provider, whatever the taxonomy is called.
+        ("product_tag-sitemap.xml", "taxonomy"),
+        ("tribe_events_cat-sitemap.xml", "taxonomy"),
+        ("wp-sitemap-taxonomies-post_format-1.xml", "taxonomy"),
+        ("wp-sitemap-taxonomies-region-1.xml", "taxonomy"),
+        ("sitemap-tax-post_tag.xml", "taxonomy"),
+        # A product or author sitemap is still one, and so is an
+        # attachment sitemap ...
+        ("attachment-sitemap.xml", "media"),
+        ("store-products-sitemap.xml", "product"),
+        ("sitemap_products_1.xml", "product"),
+        ("wp-sitemap-posts-product-1.xml", "product"),
+        ("sitemap-authors.xml", "author"),
+        # ... but a video or image sitemap lists the pages that show them
+        # (and a ``video`` post type's posts), as main read them, and
+        # "media" names a site's media section (round 7).
+        ("video-sitemap.xml", "other"),
+        ("sitemap-images.xml", "other"),
+        ("sitemap-media.xml", "other"),
+        ("media/sitemap.xml", "other"),
+        # After "sitemap" the rest counts by its last word too, after
+        # WordPress core's provider word (round 7: a post type's name may
+        # hold a "-").
+        ("sitemap-pt-post-2026-10.xml", "post"),
+        ("sitemap-media-releases.xml", "other"),
+        ("sitemap-tax-category.xml", "taxonomy"),
+        ("wp-sitemap-posts-media-release-1.xml", "post"),
+        ("wp-sitemap-posts-product-update-1.xml", "post"),
+        ("wp-sitemap-posts-user-story-1.xml", "post"),
+        ("wp-sitemap-posts-page-1.xml", "page"),
+        ("wp-sitemap-posts-product-1.xml", "product"),
+        ("wp-sitemap-taxonomies-event-region-1.xml", "taxonomy"),
+        ("wp-sitemap-users-1.xml", "author"),
+        ("?sitemap=posts&sitemap-subtype=media-release", "post"),
+        ("blog-posts-sitemap.xml", "post"),
+        # A name with no "sitemap" in it counts by its last word too, and
+        # so does the section a sitemap is filed under.
+        ("media-releases.xml", "other"),
+        ("sitemaps/product-updates.xml", "other"),
+        ("media-centre/sitemap.xml", "other"),
+        ("video-news/sitemap.xml", "news"),
+        ("videos.xml", "other"),
+        ("attachments.xml", "media"),
+        ("shop/sitemap.xml", "product"),
+        # A taxonomy named by a word this module doesn't know is read, as
+        # main read every sitemap (score_page then rejects a brand's
+        # archive pages, one fetch each).
+        ("product_brand-sitemap.xml", "other"),
+    ],
+)
+def test_a_sitemap_name_of_several_words_counts_by_its_last_word(name, cls):
+    assert classify_sitemap(f"https://www.example.com/{name}") == cls
 
 
 # ---------------------------------------------------------------------------
@@ -464,19 +834,191 @@ def test_a_date_in_the_url_counts_as_dated():
         # A class-less <time> in the article's header is its date.
         (('<article><header><h1>Council approves the trail</h1>'
           '<time datetime="2026-10-14">Oct 14</time></header><p>Story.</p></article>'), True),
+        # So is one anywhere in the h1's own article: Astro, Next.js and
+        # Webflow templates print the date in a div under the title.
+        (('<main><article><h1>Council approves the trail</h1>'
+          '<p><time datetime="2026-10-14">Oct 14</time></p><p>Story.</p></article></main>'), True),
+        (('<article><div class="date"><time datetime="2026-10-14">Oct 14</time></div>'
+          '<h1>Council approves the trail</h1><p>Story.</p></article>'), True),
         # In the article's footer it is not ("updated", comment times).
         (('<article><header><h1>Council approves the trail</h1></header><p>Story.</p>'
           '<footer><time datetime="2026-10-14">Oct 14</time></footer></article>'), False),
+        # Nor in its related-posts aside, nor one marked as an update.
+        (('<article><h1>Council approves the trail</h1><p>Story.</p><aside>'
+          '<time datetime="2026-10-14">Oct 14</time></aside></article>'), False),
+        (('<article><h1>Council approves the trail</h1><p>Updated '
+          '<time class="updated" datetime="2026-10-14">Oct 14</time></p></article>'), False),
         # Nor outside the article.
         (('<article><header><h1>Council approves the trail</h1></header><p>Story.</p></article>'
           '<div class="sidebar"><time datetime="2026-10-14">Oct 14</time></div>'), False),
+        # Nor a card's, when several articles hold an h1 (a listing).
+        (('<article><h1><a href="/a">A</a></h1><time datetime="2026-10-14">Oct 14</time></article>'
+          '<article><h1><a href="/b">B</a></h1><time datetime="2026-10-13">Oct 13</time></article>'),
+         False),
     ],
 )
-def test_a_class_less_time_counts_only_in_the_articles_header(body, dated):
+def test_a_class_less_time_counts_only_as_the_articles_own_date(body, dated):
     html = _page(og_type="website", published=None, body=body)
     _, reasons = score_page(html, STORY_URL, text="x" * 650)
     assert ("+1 dated 2026-10-14" in reasons) is dated
     assert ("-1 no date" in reasons) is not dated
+
+
+def test_an_astro_style_post_is_accepted_without_a_link_pattern():
+    """og:type=website on every page, no JSON-LD, and the date in a
+    plain <time> inside the post's article: a real article on a site
+    with no feed (PR10b review)."""
+    score, reasons = score_page(
+        _fixture("astro-post.html"), "https://www.example.com/blog/rebuilding-the-river-trail-bridge/"
+    )
+    assert score >= ACCEPT_SCORE, reasons
+    assert "+1 dated 2026-10-14" in reasons
+
+
+def test_a_page_with_a_plain_time_and_no_og_tags_is_accepted():
+    html = (
+        "<html><head><title>Council approves the trail</title></head><body><main><article>"
+        "<h1>Council approves the trail</h1><p><time datetime='2026-10-14'>Oct 14</time></p>"
+        f"<p>{'The extension adds four kilometres of path. ' * 16}</p></article></main></body></html>"
+    )
+    score, reasons = score_page(html, STORY_URL)
+    assert score >= ACCEPT_SCORE, reasons
+
+
+def test_the_lists_date_dates_a_page_that_carries_none():
+    """A listing card's date (or a news sitemap's) is the site saying
+    when the page was published: it counts like a date on the page."""
+    html = _page(og_type="website", published=None)
+    listed = dt.datetime(2026, 10, 14, tzinfo=dt.timezone.utc)
+    score, reasons = score_page(html, STORY_URL, text="x" * 650)
+    assert score < ACCEPT_SCORE
+    score, reasons = score_page(html, STORY_URL, text="x" * 650, listed_date=listed)
+    assert "+1 listed 2026-10-14" in reasons
+    assert not any("website" in r for r in reasons)
+    assert score >= ACCEPT_SCORE, reasons
+    # The page's own date wins over the list's.
+    dated = _page(og_type="website", published="2026-10-12T08:00:00+00:00")
+    _, reasons = score_page(dated, STORY_URL, text="x" * 650, listed_date=listed)
+    assert "+1 dated 2026-10-12" in reasons
+
+
+@pytest.mark.parametrize(("fixture", "url"), [
+    ("about.html", "https://www.example.com/about"),
+    ("yoast-about.html", "https://www.example.com/about-us/"),
+    ("listing-long.html", "https://www.example.com/blog/"),
+    ("listing.html", "https://www.example.com/blog/"),
+])
+def test_static_pages_and_listings_stay_rejected_with_the_wider_date_rule(fixture, url):
+    score, reasons = score_page(_fixture(fixture), url)
+    assert score < ACCEPT_SCORE, reasons
+
+
+_LONG_BODY = "<p>" + "The extension adds four kilometres of path along the north bank. " * 12 + "</p>"
+
+
+def _builder_post(meta: str, *, og_type: str | None = "website") -> str:
+    """A site builder's post page: no ``<article>``, no JSON-LD, no date
+    metadata; ``meta`` is what follows its ``<h1>``."""
+    head = "<title>Council approves the river trail | Example</title>"
+    if og_type:
+        head += f'<meta property="og:type" content="{og_type}">'
+    h1 = "<h1 class='heading'>Council approves the river trail</h1>"
+    return (
+        f"<html><head>{head}</head><body><div class='navbar'><a href='/'>Example</a></div>"
+        f"<div class='section'><div class='container'>{h1}{meta}"
+        f"<div class='rich-text'>{_LONG_BODY}</div></div></div>"
+        "<div class='footer'><p>&copy; 2026 Example</p></div></body></html>"
+    )
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        # Webflow: the date printed as text right after the title.
+        "<div class='blog-date'>October 14, 2026</div>",
+        "<div class='blog-date'>Oct. 14th, 2026</div>",
+        "<div class='blog-date'>14 October 2026</div>",
+        "<div class='blog-date'>Wednesday, October 14, 2026</div>",
+        "<div class='blog-date'>Posted on October 14, 2026</div>",
+        "<p>2026-10-14</p>",
+        "<div class='meta'><span>October 14, 2026</span><span>5 min read</span></div>",
+        # A WordPress block theme: a plain <time> beside the title in
+        # its container, with no <article> around them.
+        "<div class='wp-block-post-date'><time datetime='2026-10-14T09:00:00+00:00'>Oct 14</time></div>",
+    ],
+)
+@pytest.mark.parametrize("og_type", ["website", None])
+def test_a_builder_post_dated_next_to_its_title_is_an_article(meta, og_type):
+    """Round 7: Webflow tags every page og:type=website and prints a post's
+    date as text, and a WordPress block theme prints it in a plain
+    ``<time>`` beside an ``<h1>`` with no ``<article>``. Both pages read
+    as undated, so a feed of them stored nothing, where main stored every
+    post."""
+    score, reasons = score_page(_builder_post(meta, og_type=og_type), STORY_URL)
+    assert "+1 dated 2026-10-14" in reasons
+    assert score >= ACCEPT_SCORE, reasons
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        # Nothing next to the title, or no date there.
+        "",
+        "<p class='lead'>Who we are and how the gym started.</p>",
+        # An update is not when the page was published.
+        "<div class='meta'>Updated October 14, 2026</div>",
+        # A paragraph is no line of post meta, whatever it starts with.
+        "<p>" + "October 14, 2015 was the day we opened in a warehouse by the river. " * 3 + "</p>",
+        "<div><p>Founded</p><p>October 14, 2015</p></div>",
+        "<div class='meta'>Founded October 14, 2015</div>",
+        # A listing built of div cards: several <time>s beside its title.
+        "".join(
+            f"<div class='card'><h2><a href='/blog/post-{n}'>Post {n}</a></h2>"
+            f"<time datetime='2026-10-{14 - n:02d}'>Oct {14 - n}</time></div>"
+            for n in range(3)
+        ),
+        # Nor one that only looks like a date.
+        "<div class='blog-date'>Octember 14, 2026</div>",
+        "<div class='blog-date'>October 32, 2026</div>",
+    ],
+)
+def test_a_builder_page_with_no_date_next_to_its_title_stays_undated(meta):
+    score, reasons = score_page(_builder_post(meta), STORY_URL)
+    assert "-1 no date" in reasons
+    assert score < ACCEPT_SCORE, reasons
+
+
+@pytest.mark.parametrize(
+    "main",
+    [
+        # A news page that prints today's date under its title, above
+        # its <article> cards.
+        "<h1>News</h1><p>Wednesday, October 14, 2026</p>"
+        + "".join(
+            f"<article><h2><a href='/news/story-{n}'>Story {n}</a></h2>"
+            f"<p>{'Excerpt. ' * 20}</p></article>"
+            for n in range(3)
+        ),
+        # A listing whose div cards title each post with an <h1>.
+        "".join(
+            f"<div class='card'><h1><a href='/news/story-{n}'>Story {n}</a></h1>"
+            f"<p>October {14 - n}, 2026</p><p>{'Excerpt. ' * 20}</p></div>"
+            for n in range(3)
+        ),
+    ],
+    ids=["article cards", "several h1"],
+)
+def test_a_date_next_to_the_title_counts_only_on_a_page_of_one_title_and_no_article(main):
+    """A listing is no story: with ``<article>`` cards, or with an
+    ``<h1>`` on each card, the date by its first title is not the
+    page's."""
+    html = (
+        "<html><head><title>News | Example</title><meta property='og:type' content='website'>"
+        f"</head><body><main>{main}</main></body></html>"
+    )
+    score, reasons = score_page(html, "https://www.example.com/news/")
+    assert "-1 no date" in reasons
+    assert score < ACCEPT_SCORE, reasons
 
 
 def test_home_page_redirect_is_rejected():
@@ -683,6 +1225,25 @@ def test_listing_links_needs_three_distinct_links():
       <article><h2><a href="/news/two#comments">Two again</a></h2></article>
     </main></body></html>"""
     assert listing_links(html, "https://www.example.com/news/") == []
+
+
+def test_listing_links_takes_the_post_cards_over_a_larger_table_of_downloads():
+    """A parks page lists 4 news cards and a table of 8 trail-map
+    downloads. The downloads are files (endings no web page has), so
+    they never form a group, and the cards are the list."""
+    cards = "".join(
+        f'<article><h2><a href="/parks/trails/news/trail-update-{n}">Trail update {n}</a></h2></article>'
+        for n in range(4)
+    )
+    rows = "".join(
+        f'<tr><td>Trail {n}</td><td><a href="/parks/trails/maps/trail-{n}.{ext}">Download</a></td></tr>'
+        for n, ext in enumerate(["gpx", "kmz", "kml", "gpx", "kmz", "kml", "gpx", "kmz"])
+    )
+    html = f"<html><body><main><div>{cards}</div><table>{rows}</table></main></body></html>"
+    page = "https://www.example.ca/parks/trails"
+    assert [c.url for c in listing_links(html, page)] == [
+        f"https://www.example.ca/parks/trails/news/trail-update-{n}" for n in range(4)
+    ]
 
 
 def test_listing_links_prefers_title_links_over_image_links_to_the_same_posts():

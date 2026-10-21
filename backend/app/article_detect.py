@@ -25,7 +25,7 @@ import json
 import re
 from collections import defaultdict
 from email.utils import parsedate_to_datetime
-from typing import Iterable, NamedTuple
+from typing import Iterable, Iterator, NamedTuple
 from urllib.parse import parse_qsl, unquote, urljoin, urlsplit
 
 import courlan
@@ -38,12 +38,30 @@ ACCEPT_SCORE = 2
 
 
 class Candidate(NamedTuple):
-    """One article link found on a listing page. Unpacks as
-    ``(url, published, title)``, the same shape as a sitemap entry."""
+    """One article link from a site's own list: a listing page's card or
+    a sitemap entry.
+
+    - ``published``: when the list says the page was published, a
+      listing card's ``<time datetime>`` or a news sitemap's
+      ``<news:publication_date>``. A date the site gives for that page,
+      so ``score_page`` counts it (``listed_date``).
+    - ``title``: the card's link text or a news sitemap's title.
+    - ``modified``: a sitemap's ``<lastmod>``. When the page last
+      changed, not when it was published (static pages get edited), so
+      it orders a sitemap but never dates a page. A page was published
+      no later than it.
+    - ``place``: a sitemap entry's place in the site's own order, the
+      sitemap documents as the crawl read them, each top to bottom
+      (None for a listing card, whose list is in its own order).
+      Candidates are sorted by date, which moves every undated entry
+      last, so this is the only record of where the site listed it.
+    """
 
     url: str
     published: dt.datetime | None
     title: str | None
+    modified: dt.datetime | None = None
+    place: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -139,11 +157,14 @@ _STATIC_SLUGS = frozenset({
     "wp-login.php", "xmlrpc.php",
 })
 
-# Sections whose every page is a static page: Shopify's ``/pages/``,
-# ``/policies/``, and ``/about/team``-style trees. Not ``legal``,
-# ``help`` or ``support``: news sites file stories under those
-# (Reuters' ``/legal/government/...``). As the page itself they are
-# still static slugs above.
+# Sections whose pages are static pages: Shopify's ``/pages/<x>``,
+# ``/policies/<x>``, and ``/about/<x>``. Only a page directly under one
+# is static (``_static_section``): councils, universities and companies
+# file their news deeper in them (``/about/news/<slug>``,
+# ``/about-us/news-and-media/<slug>``). Not ``legal``, ``help`` or
+# ``support``: news sites file stories under those (Reuters'
+# ``/legal/government/...``). As the page itself they are still static
+# slugs above.
 _STATIC_SECTIONS = frozenset({
     "pages", "policies", "about", "about-us", "contact", "contact-us",
 })
@@ -169,6 +190,116 @@ _NUMBER_RE = re.compile(r"\d+")
 # ``url_ok``); this stands in for the source's own host and for the
 # path above the page.
 _PROBE_HOST = "example.com"
+
+# Files, by the page's own ending: ``/uploads/trail.jpg``, ``/feed.xml``,
+# ``/report.pdf``. Only the ending counts. courlan's own file-type test
+# matches ``.js`` or ``-png`` anywhere in a URL, so it read
+# ``/blog/how-to-compress-png-files`` and ``/blog/node.js-22-released``
+# as files.
+_FILE_EXTENSIONS = frozenset({
+    "jpg", "jpeg", "png", "gif", "svg", "webp", "avif", "bmp", "ico", "tif", "tiff", "heic",
+    "pdf", "zip", "gz", "tgz", "tar", "rar", "7z", "iso", "dmg", "exe", "apk", "msi",
+    "mp3", "m4a", "aac", "ogg", "oga", "wav", "flac", "opus",
+    "mp4", "m4v", "mov", "avi", "webm", "mkv", "flv", "swf",
+    "css", "js", "mjs", "json", "xml", "rss", "atom", "rdf", "csv", "ics", "vcf",
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "epub",
+    "woff", "woff2", "ttf", "otf", "eot",
+})
+# File endings that also end the names of software, which dev blogs keep
+# in their slugs (Hugo, Eleventy and Jekyll keep the dots): ``three.js``,
+# ``package.json``, ``tailwind.css``, ``pom.xml``. They name a file only
+# at the true end of a path (``/assets/app.js``, ``/feed.xml``). Before
+# a ``/`` (``/posts/whats-new-in-vue.js/``) or under a page ending
+# (``/2026/10/18/whats-new-in-vue.js.html``) they are a word of the
+# slug; a document or media ending there (``annual-report.pdf/``,
+# ``doc.pdf.html``) is still a file.
+_CODE_EXTENSIONS = frozenset({"js", "mjs", "json", "css", "xml"})
+_DOCUMENT_EXTENSIONS = _FILE_EXTENSIONS - _CODE_EXTENSIONS
+# Endings of web pages that courlan knows (its own whitelist, without
+# ``.txt`` and ``.xml``, which are files here).
+_PAGE_EXTENSIONS = frozenset({
+    "html", "htm", "xhtml", "shtml", "phtml", "mht", "mhtml", "htx",
+    "php", "php3", "php4", "php5", "asp", "aspx", "adp", "jsp", "cfm", "cgi", "pl", "do",
+    "stm", "amp",
+})
+# Endings of article pages on CMSs that courlan doesn't know: news CMSs
+# (Escenic's ``.ece``, the Times Internet ``.cms``, Globo's ``.ghtml``),
+# the ``.page`` of nyc.gov's agency press releases, JavaServer Faces'
+# ``.jsf`` and ColdFusion's ``.cfml``. They are left out of what courlan
+# sees.
+_ARTICLE_EXTENSIONS = frozenset({"ece", "cms", "ghtml", "page", "jsf", "cfml"})
+# Any other ending of 2 to 5 letters is a file of a type not listed
+# above (``.gpx``, ``.kmz``, ``.rtf``, ``.wmv``), as courlan's own
+# ending test reads the end of a path. Not at the end of a path that
+# ends in ``/`` (``/blog/moving-to-fly.io/`` has no ending, for courlan
+# too), not under the owner's link pattern, and not in a sitemap (see
+# ``url_ok``).
+_LETTERS_ENDING_RE = re.compile(r"[a-z]{2,5}")
+# A camera's file name used as the page name (WordPress attachment
+# pages: ``/img_1234/``, ``/IMG-1234``).
+_CAMERA_NAME_RE = re.compile(r"img[-_]?\d+")
+# A folder's own index page under a web page's ending
+# (``/news/council-vote/index.html``, ``/news/20261020/default.aspx``):
+# static and exported sites publish each story as a folder with its own
+# index page. ``url_ok`` judges the folder.
+_INDEX_PAGE_NAMES = frozenset({"index", "default"})
+_EXTENSION_RE = re.compile(r"^(.+)\.([a-z][a-z0-9]{0,4})$")
+# A page name of one word, which courlan judges as a whole (``contact``,
+# ``login``, ``impressum``, ``index``, ``home``, ``feed``). A slug of
+# several words is judged by our rules and ``score_page``, not by the
+# words in it.
+_ONE_WORD_RE = re.compile(r"[^\W_]+")
+
+
+def _split_extension(page: str) -> tuple[str, str]:
+    """``("article68765432", "ece")`` for ``article68765432.ece``;
+    ``(page, "")`` when the page name has no ending."""
+    match = _EXTENSION_RE.match(page)
+    return (match.group(1), match.group(2)) if match else (page, "")
+
+
+def _is_index_page(page: str) -> bool:
+    """``index.html``, ``default.aspx``: a folder's own index page
+    (``_INDEX_PAGE_NAMES`` under a web page's ending)."""
+    stem, extension = _split_extension(page)
+    return stem in _INDEX_PAGE_NAMES and extension in _PAGE_EXTENSIONS
+
+
+def _courlan_page(page: str) -> str:
+    """The page's own name as courlan sees it (see ``url_ok``): a
+    one-word name as it is, with its ending when it is a web page's, and
+    any longer slug as a neutral word."""
+    stem, extension = _split_extension(page)
+    name = stem if _ONE_WORD_RE.fullmatch(stem) else "post"
+    return f"{name}.{extension}" if extension in _PAGE_EXTENSIONS else name
+
+
+def _is_file(page: str, *, at_end: bool = True, any_ending: bool = True) -> bool:
+    """Whether the page's own name (lower case) names a file: a file
+    ending (``trail.jpg``, ``episode-12.mp3``), any other ending of 2 to
+    5 letters that is no web page's (``trail-3.gpx``), a document or
+    media ending under a page ending (``doc.pdf.html``), or a camera's
+    file name (``img_1234``).
+
+    ``at_end``: nothing follows the name (the path doesn't end in
+    ``/``). Before a ``/`` only a document or media ending counts, not
+    a code word (``_CODE_EXTENSIONS``), and the 2-to-5-letter rule
+    needs ``at_end`` and ``any_ending`` both."""
+    stem, extension = _split_extension(page)
+    if extension in _PAGE_EXTENSIONS:
+        stem, inner = _split_extension(stem)
+        if inner in _DOCUMENT_EXTENSIONS:
+            return True
+    elif extension in (_FILE_EXTENSIONS if at_end else _DOCUMENT_EXTENSIONS):
+        return True
+    elif (
+        at_end
+        and any_ending
+        and extension not in _ARTICLE_EXTENSIONS
+        and _LETTERS_ENDING_RE.fullmatch(extension)
+    ):
+        return True
+    return bool(_CAMERA_NAME_RE.fullmatch(stem))
 
 
 def _segments(path: str) -> list[str]:
@@ -197,10 +328,14 @@ def _date_archive(segments: list[str]) -> bool:
     return False
 
 
-def _listing_path(segments: list[str]) -> bool:
+def _listing_path(segments: list[str], own: int = 0) -> bool:
     """A path whose segments name a listing, a record or CMS plumbing
-    rather than an article (see the segment sets above)."""
+    rather than an article (see the segment sets above). The first
+    ``own`` segments are the feed's own section (``_own_segments``) and
+    aren't judged."""
     for i, segment in enumerate(segments):
+        if i < own:
+            continue
         rest = segments[i + 1:]
         if segment in _NON_ARTICLE_SEGMENTS:
             return True
@@ -214,31 +349,106 @@ def _listing_path(segments: list[str]) -> bool:
     return False
 
 
-def url_ok(url: str, site: str) -> bool:
+def _static_section(segments: list[str]) -> bool:
+    """A page directly under a static section (``_STATIC_SECTIONS``):
+    ``/about/history``, ``/pages/our-story``,
+    ``/policies/refund-policy``. A deeper path is judged like any other
+    path, so the news a site files there comes in
+    (``/about/news/<slug>``, ``/about-us/news-and-media/<slug>``), and
+    ``score_page`` judges the rest (``/about/team/<name>``), one fetch
+    each, as main fetched every sitemap entry."""
+    return len(segments) == 2 and segments[0] in _STATIC_SECTIONS
+
+
+def _own_segments(path: str, section: str | None) -> int:
+    """How many of ``path``'s segments are the feed's own section
+    (``section``, a path prefix such as ``/about/news/``): its whole
+    segments, when ``path`` is below it, else 0. A prefix that ends
+    inside a segment (``/about/news-``) owns only the segments before
+    it."""
+    if not section or not path.startswith(section) or path.rstrip("/") == section.rstrip("/"):
+        return 0
+    return len(_segments(section[: section.rfind("/") + 1]))
+
+
+def url_ok(
+    url: str,
+    site: str,
+    *,
+    owner_pattern: bool = False,
+    section: str | None = None,
+    sitemap_entry: bool = False,
+) -> bool:
     """Cheap test of whether ``url`` could be an article on ``site``
     (the source's URL or host). Same-site http(s) URLs only.
 
-    Two checks, each on what it reads well:
+    Three checks, each on what it reads well:
 
     - **The path above the page is ours**, by whole segment and by
       position (``_NON_ARTICLE_SEGMENTS`` anywhere; record, archive and
       pagination words only where they are the listing or one record;
-      ``_STATIC_SECTIONS`` first; date archives last). The site root is
+      a page directly under a ``_STATIC_SECTIONS`` word, as in
+      ``/about/history``, but not ``/about/news/<slug>``; date archives
+      last). The site root is
       the home page unless its query names a post (WordPress's
       ``/?p=123``). courlan's own structure filter matches substrings:
       it reads
       ``/pets/fat-cat/how-to-feed`` as a category page,
       ``/news/power-user/tips`` as a user page, and any ``/search/``
       as a search page.
-    - **courlan judges the rest**: ``check_url(strict=True)`` on the
-      page's own name, the query and the host — file types, feeds,
-      contact, login and index pages, malformed hosts. It is a yes/no
-      test only. The URL it would normalize to is never used, because
-      strict normalizing drops query parameters it doesn't know.
+    - **Files are ours too**, by the page's own name only (``_is_file``):
+      a file ending, any other ending of 2 to 5 letters that is no web
+      page's or known CMS's, or a camera's file name.
+      ``/blog/png-vs-jpg``, ``/blog/node.js-22-released`` and
+      ``/press/flu-shots-available.page`` are articles; ``trail.jpg``,
+      ``trail-3.gpx`` and ``img_1234`` are not. Only the end of the path
+      has an ending, as courlan reads it: a path that ends in ``/``
+      (``/blog/moving-to-fly.io/``) and the name under a page ending
+      are judged by the document and media endings alone, so a slug
+      that ends in a software name (``/posts/whats-new-in-vue.js/``,
+      ``vue.js.html``) is an article and ``annual-report.pdf/`` a file.
+    - **courlan judges the rest**: ``check_url(strict=True)`` on a
+      one-word page name (contact, login, imprint and index pages,
+      ``/feed``), the query (a file type hidden in it) and the host
+      (malformed hosts). A slug of several words reaches it as a
+      neutral word, and a news CMS's ending it doesn't know (``.ece``,
+      ``.cms``) is left off. It is a yes/no test
+      only. The URL it would normalize to is never used, because strict
+      normalizing drops query parameters it doesn't know.
+
+    A folder's own index page (``/news/<slug>/index.html``,
+    ``/news/20261020/default.aspx``) is judged as the folder
+    (``/news/<slug>/``), by all three checks: courlan reads an index
+    page under a short path as a home page, and the path it would read
+    above it is ours. ``/index.html`` is still the home page.
 
     When the URL's host is the source's own host, courlan's host check
     is skipped: the owner chose that host, and courlan rejects an IP or
     ``localhost`` with a port, which every loopback test server uses.
+
+    ``owner_pattern``: the URL is under the owner's ``link_pattern``,
+    which is the article signal (as ``score_page``'s
+    ``owner_configured``), so courlan isn't asked, and neither is the
+    2-to-5-letter ending rule that reads like it
+    (``/library/why-we-chose-deno.land``); our path rules and the file
+    endings (as read above) still apply.
+
+    ``section``: the section the feed reads (its ``link_pattern``, else
+    its address's section, such as ``/about/news/``). The owner chose
+    it, so for a URL below it the segment rules (listing, record and
+    static section) judge only the segments below it:
+    ``/about/news/<slug>`` and ``/shop/journal/<slug>`` are candidates
+    of a feed that reads them. The page's own name, date archives, the
+    file endings and courlan are judged as for any URL.
+
+    ``sitemap_entry``: the URL is a sitemap's entry. A sitemap lists a
+    site's pages, and main fetched every entry, so an ending this module
+    doesn't know is a page's there (ATG's ``.jhtml``, ``.jspx``,
+    ``.shtm``, Domino's ``.nsf``): the 2-to-5-letter ending rule doesn't
+    apply, while the file endings (as read above) still do. A file the
+    sitemap lists under an ending of its own is dropped by the page
+    fetch's HTML check, once. A listing page's links keep the rule, as
+    courlan's ending test read them on main.
     """
     try:
         parts = urlsplit(url.strip())
@@ -249,30 +459,47 @@ def url_ok(url: str, site: str) -> bool:
     if not same_site(url, site):
         return False
 
-    segments = _segments(parts.path)
+    path = parts.path
+    segments = _segments(path)
+    if len(segments) > 1 and _is_index_page(segments[-1]):
+        # A folder's own index page is the folder.
+        path = path[: path.rstrip("/").rfind("/") + 1]
+        segments = segments[:-1]
     query_keys = {k.lower() for k, _ in parse_qsl(parts.query, keep_blank_values=True)}
     if not segments and not query_keys & _ROOT_POST_QUERY_KEYS:
         return False  # the home page
-    if _listing_path(segments):
+    own = _own_segments(path, section)
+    if _listing_path(segments, own):
         return False
-    if segments and (segments[-1] in _STATIC_SLUGS or segments[0] in _STATIC_SECTIONS):
+    if segments and (segments[-1] in _STATIC_SLUGS or (not own and _static_section(segments))):
         return False
     if segments and _date_archive(segments):
         return False
     if query_keys & _NON_ARTICLE_QUERY_KEYS:
         return False
+    page = segments[-1] if segments else ""
+    if _is_file(
+        page,
+        at_end=not path.endswith("/"),
+        any_ending=not (owner_pattern or sitemap_entry),
+    ):
+        return False
+    # Blogspot's date archives (/2026_10_01_archive.html).
+    if page.endswith("_archive.html"):
+        return False
+    if owner_pattern:
+        return True
 
     own_host = parts.hostname.lower().rstrip(".") == _host(site)
     netloc = _PROBE_HOST if own_host else parts.netloc
-    # Keep the page's own segment (and its trailing slash); every
-    # segment above it was judged above. A root post (/?p=123) keeps
-    # the bare root.
-    path = ""
+    # Keep the page's own name as courlan should see it (and its
+    # trailing slash); every segment above it was judged above. A root
+    # post (/?p=123) keeps the bare root.
+    shown = ""
     if segments:
-        page = parts.path.rstrip("/").rsplit("/", 1)[-1]
-        trailing = "/" if parts.path.endswith("/") else ""
-        path = "x/" * (len(segments) - 1) + page + trailing
-    probe = f"{parts.scheme}://{netloc}/{path}"
+        trailing = "/" if path.endswith("/") else ""
+        shown = "x/" * (len(segments) - 1) + _courlan_page(page) + trailing
+    probe = f"{parts.scheme}://{netloc}/{shown}"
     if parts.query:
         probe += "?" + parts.query
     return courlan.check_url(probe, strict=True) is not None
@@ -291,16 +518,19 @@ SITEMAP_PRODUCT = "product"
 SITEMAP_MEDIA = "media"
 SITEMAP_OTHER = "other"
 
-# Never read: their entries are listings, people, products or files.
+# Never read: their entries are listings, people, products or files
+# (attachment pages). A video, image or media sitemap is read: its
+# ``<loc>`` is the page that shows the video or image (Google's sitemap
+# extensions), Yoast names a ``video`` post type's sitemap
+# ``video-sitemap.xml``, and "media" names a site's media section and
+# its releases (``sitemap-media-releases.xml``, ``/media/sitemap.xml``).
 SKIPPED_SITEMAPS = frozenset({
     SITEMAP_TAXONOMY, SITEMAP_AUTHOR, SITEMAP_PRODUCT, SITEMAP_MEDIA,
 })
 
-# Whole tokens of a sitemap's file name. Checked in this order, so the
-# subtype wins over a broader word next to it: WordPress core's
-# ``wp-sitemap-posts-page-1.xml`` is pages, Yoast's
-# ``post_tag-sitemap.xml`` is tags and ``product_cat-sitemap.xml`` is
-# product categories, not posts or products.
+# Whole words of a sitemap's file name (``_sitemap_tokens``). Checked
+# in this order, so the subtype wins over a broader word next to it:
+# WordPress core's ``wp-sitemap-posts-page-1.xml`` is pages, not posts.
 _SITEMAP_TOKENS: tuple[tuple[str, frozenset[str]], ...] = (
     (SITEMAP_TAXONOMY, frozenset({
         "tag", "tags", "category", "categories", "cat", "taxonomy",
@@ -308,9 +538,7 @@ _SITEMAP_TOKENS: tuple[tuple[str, frozenset[str]], ...] = (
     })),
     (SITEMAP_AUTHOR, frozenset({"author", "authors", "user", "users"})),
     (SITEMAP_PRODUCT, frozenset({"product", "products", "shop"})),
-    (SITEMAP_MEDIA, frozenset({
-        "attachment", "attachments", "image", "images", "video", "videos", "media",
-    })),
+    (SITEMAP_MEDIA, frozenset({"attachment", "attachments"})),
     (SITEMAP_PAGE, frozenset({"page", "pages"})),
     (SITEMAP_NEWS, frozenset({"news", "googlenews"})),
     (SITEMAP_POST, frozenset({
@@ -320,22 +548,60 @@ _SITEMAP_TOKENS: tuple[tuple[str, frozenset[str]], ...] = (
 
 _SITEMAP_EXT_RE = re.compile(r"\.(?:xml|txt)(?:\.gz)?$|\.gz$")
 _TOKEN_SPLIT_RE = re.compile(r"[-_.]+")
+_PART_SPLIT_RE = re.compile(r"[-.]+")
+_SITEMAP_WORD_RE = re.compile(r"sitemaps?")
 # Trailing page numbers: post-sitemap2, sitemap_products_1.
 _TOKEN_DIGITS_RE = re.compile(r"\d+$")
 _NOISE_TOKENS = frozenset({"sitemap", "sitemaps", "index", "wp", "xml", ""})
+# WordPress core's sitemap providers: ``wp-sitemap-<provider>-<subtype>-1``.
+_WP_PROVIDERS = frozenset({"posts", "taxonomies", "users"})
+
+
+def _head_word(phrase: str) -> str | None:
+    """The last word of ``phrase``, without page numbers, "index" and
+    the like: the word the others only qualify."""
+    words = [
+        word
+        for word in (_TOKEN_DIGITS_RE.sub("", raw) for raw in _TOKEN_SPLIT_RE.split(phrase))
+        if word not in _NOISE_TOKENS
+    ]
+    return words[-1] if words else None
 
 
 def _sitemap_tokens(name: str) -> list[str]:
-    """Whole words of a sitemap name, without "sitemap" and page
-    numbers. "sitemap" glued to a word is split off, so
-    ``newssitemap1`` and ``sitemapnews`` both give ``news``; a word is
-    never searched for inside another (``heritage`` holds no tag)."""
-    tokens = []
-    for raw in _TOKEN_SPLIT_RE.split(name.lower()):
-        for token in _TOKEN_DIGITS_RE.sub("", raw).split("sitemap"):
-            token = _TOKEN_DIGITS_RE.sub("", token)
-            if token not in _NOISE_TOKENS:
-                tokens.append(token)
+    """The words of a sitemap name that say what it lists, without
+    "sitemap" and page numbers.
+
+    A name of several words counts by its last word, which the others
+    only qualify: a WordPress type or taxonomy joined with "_"
+    (``post_tag``, ``product_cat``, ``media_release``,
+    ``product_update``), the whole name in front of "sitemap" (Yoast's
+    and Rank Math's ``<type>-sitemap.xml``, Wix's
+    ``blog-posts-sitemap.xml``, a ``media-release-sitemap.xml``), and a
+    name with no "sitemap" in it (a section's ``/media-centre/sitemap.xml``,
+    a ``media-releases.xml``). So ``media_release-sitemap.xml`` lists
+    releases, not media, and ``post_tag-sitemap.xml`` tags. After
+    "sitemap" the rest counts by its last word too
+    (``sitemap-pt-post-2026-10``, ``sitemap-media-releases``), after
+    WordPress core's provider word when it leads
+    (``wp-sitemap-<provider>-<subtype>-1``): ``wp-sitemap-posts-page-1``
+    gives posts and page, ``wp-sitemap-posts-media-release-1`` posts and
+    release, ``wp-sitemap-taxonomies-region-1`` taxonomies and region.
+    WordPress allows a "-" in a post type's name. "sitemap" glued to a
+    word is split off, so ``newssitemap1`` and ``sitemapnews`` both give
+    ``news``; a word is never searched for inside another (``heritage``
+    holds no tag)."""
+    lead, *rest = _SITEMAP_WORD_RE.split(name.lower(), maxsplit=1)
+    head = _head_word(lead)
+    tokens = [head] if head else []
+    if not rest:
+        return tokens
+    parts = [p for p in _PART_SPLIT_RE.split(_SITEMAP_WORD_RE.sub("-", rest[0])) if p]
+    if parts and parts[0] in _WP_PROVIDERS:
+        tokens.append(parts.pop(0))
+    head = _head_word("-".join(parts))
+    if head:
+        tokens.append(head)
     return tokens
 
 
@@ -391,8 +657,8 @@ _SITEMAP_ORDER = {SITEMAP_NEWS: 0, SITEMAP_POST: 1, SITEMAP_OTHER: 2, SITEMAP_PA
 def order_sitemaps(urls: Iterable[str]) -> list[str]:
     """The sitemaps worth reading, best first: news, then post (post,
     article and blog), then unknown ones, keeping the given order
-    within each class. Taxonomy, author, product and media sitemaps
-    are dropped.
+    within each class. Taxonomy, author, product and media (attachment)
+    sitemaps are dropped.
 
     A page sitemap is dropped whenever a news or post sitemap exists.
     Page sitemaps are where About and Contact come from, and because
@@ -589,6 +855,121 @@ def _marked_dates(doc) -> list[tuple[object, dt.datetime]]:
     return out
 
 
+# Inside an article, the parts whose ``<time>`` is not the article's
+# own: its footer ("Updated ..."), and related-post lists and menus.
+_NOT_OWN_TIME_TAGS = frozenset({"footer", "aside", "nav"})
+_UPDATED_CLASS_RE = re.compile(r"updat|modif", re.IGNORECASE)
+
+
+def _own_times(scope) -> Iterator[dt.datetime]:
+    """The plain ``<time datetime>`` dates in ``scope``, in page order:
+    ones with no published marker (a theme that prints the date in a
+    ``<div>`` under the title, as Astro, Next.js and Webflow templates
+    do), outside the scope's footer, asides and menus, and not marked as
+    an update."""
+    for el in scope.iter("time"):
+        stamp = el.get("datetime")
+        if not stamp or _UPDATED_CLASS_RE.search(el.get("class") or ""):
+            continue
+        outside = False
+        for ancestor in el.iterancestors():
+            if ancestor is scope:
+                break
+            if ancestor.tag in _NOT_OWN_TIME_TAGS:
+                outside = True
+                break
+        if outside:
+            continue
+        parsed = parse_date(stamp)
+        if parsed:
+            yield parsed
+
+
+def _article_time(article) -> dt.datetime | None:
+    """The first plain ``<time datetime>`` of an article (``_own_times``)."""
+    return next(_own_times(article), None)
+
+
+_MONTH_NUMBERS = {
+    name: number
+    for number, names in enumerate(
+        [("jan", "january"), ("feb", "february"), ("mar", "march"), ("apr", "april"),
+         ("may",), ("jun", "june"), ("jul", "july"), ("aug", "august"),
+         ("sep", "sept", "september"), ("oct", "october"), ("nov", "november"),
+         ("dec", "december")],
+        start=1,
+    )
+    for name in names
+}
+# A date written out at the start of a line: "October 20, 2026",
+# "Oct. 20th, 2026", "20 October 2026", "2026-10-20", after an optional
+# "Posted on" or "Published" and a weekday ("October 20, 2026 · 5 min
+# read" is one; "Updated October 20, 2026" and "Founded October 20,
+# 2015" are not).
+_TEXT_DATE_RE = re.compile(
+    r"(?:(?:posted|published)(?:\s+on)?:?\s+)?"
+    r"(?:(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?,?\s+)?"
+    r"(?:(?P<m1>[a-z]{3,9})\.?\s+(?P<d1>\d{1,2})(?:st|nd|rd|th)?,?\s+(?P<y1>(?:19|20)\d{2})"
+    r"|(?P<d2>\d{1,2})(?:st|nd|rd|th)?\s+(?P<m2>[a-z]{3,9})\.?,?\s+(?P<y2>(?:19|20)\d{2})"
+    r"|(?P<y3>(?:19|20)\d{2})-(?P<m3>\d{2})-(?P<d3>\d{2}))"
+    r"(?!\w)",
+    re.IGNORECASE,
+)
+# The longest text of the element after a title that is read for a
+# date: a line of post meta, not a paragraph of the page.
+_META_LINE_CHARS = 80
+
+
+def _text_date(text: str) -> dt.datetime | None:
+    """The date ``text`` starts with (``_TEXT_DATE_RE``), or None."""
+    match = _TEXT_DATE_RE.match(_clean_text(text))
+    if not match:
+        return None
+    if match["y3"]:
+        year, month, day = int(match["y3"]), int(match["m3"]), int(match["d3"])
+    else:
+        name = (match["m1"] or match["m2"]).lower()
+        if name not in _MONTH_NUMBERS:
+            return None
+        year = int(match["y1"] or match["y2"])
+        month, day = _MONTH_NUMBERS[name], int(match["d1"] or match["d2"])
+    try:
+        return dt.datetime(year, month, day, tzinfo=dt.timezone.utc)
+    except ValueError:
+        return None
+
+
+def _title_date(doc, h1) -> dt.datetime | None:
+    """A page with one ``<h1>`` and no ``<article>``, whose theme marks
+    no date, dates itself next to its title:
+
+    - a plain ``<time datetime>`` in the ``<h1>``'s own container
+      (``_own_times``), when it is the only one there: a WordPress block
+      theme's ``div.wp-block-post-date`` beside its
+      ``h1.wp-block-post-title``. A listing's cards hold one each.
+    - a date written out at the start of the element right after the
+      ``<h1>``, when that element is a short line
+      (``_META_LINE_CHARS``): a Webflow post's ``div.blog-date``, which
+      has no ``<time>`` and no metadata.
+    """
+    if h1 is None or doc.find(".//article") is not None or len(doc.findall(".//h1")) != 1:
+        return None
+    container = h1.getparent()
+    if container is not None:
+        times = list(_own_times(container))
+        if len(times) == 1:
+            return times[0]
+    after = h1.getnext()
+    while after is not None and not isinstance(after.tag, str):
+        after = after.getnext()
+    if after is None:
+        return None
+    # Each piece of text as its own word: two spans' "October 14, 2026"
+    # and "5 min read" don't run together.
+    line = _clean_text(" ".join(after.itertext()))
+    return _text_date(line) if len(line) <= _META_LINE_CHARS else None
+
+
 def _body_date(doc) -> dt.datetime | None:
     """The page's published date from its body, only when the page is
     one article. A listing's post cards each carry a marked date, and
@@ -598,12 +979,15 @@ def _body_date(doc) -> dt.datetime | None:
       ``<header>``), a marked date inside that element is the page's.
       Not when several articles hold an ``<h1>``: that is a listing
       whose cards use one.
+    - With no marked date there, a plain ``<time datetime>`` inside the
+      first ``<h1>``'s own ``<article>`` is the page's
+      (``_article_time``): that article is the page's one story.
     - Otherwise a marked date counts only when the page has at most one
       ``<article>`` and all its marked dates agree.
+    - A page with no marked date at all, one ``<h1>`` and no
+      ``<article>`` may date itself next to its title (``_title_date``).
     """
     marked = _marked_dates(doc)
-    if not marked:
-        return None
     h1 = doc.find(".//h1")
     if h1 is not None:
         ancestors = list(h1.iterancestors())
@@ -618,6 +1002,12 @@ def _body_date(doc) -> dt.datetime | None:
             for el, parsed in marked:
                 if scope in el.iterancestors():
                     return parsed
+            if scope.tag == "article":
+                parsed = _article_time(scope)
+                if parsed:
+                    return parsed
+    if not marked:
+        return _title_date(doc, h1)
     if len(doc.findall(".//article")) > 1:
         return None
     if len({parsed for _, parsed in marked}) > 1:
@@ -742,6 +1132,7 @@ def score_page(
     final_url: str | None = None,
     text: str | None = None,
     owner_configured: bool = False,
+    listed_date: dt.datetime | None = None,
 ) -> tuple[int, list[str]]:
     """Score a fetched page as an article: ``(score, reasons)``, where
     the page is accepted at ``ACCEPT_SCORE`` (2) or more and each reason
@@ -752,6 +1143,12 @@ def score_page(
     main text; when None it is extracted here, the same way the plugin
     does. Run it off the event loop, like any trafilatura call.
 
+    ``listed_date``: when the site's own list says the page was
+    published (``Candidate.published``: a listing card's
+    ``<time datetime>`` or a news sitemap's publication date). It dates
+    the page like a date on the page itself. Never a sitemap's
+    ``<lastmod>``, which every static page has too.
+
     Kind and date:
     - +3 for ``og:type=article`` or a JSON-LD Article, BlogPosting or
       NewsArticle. ``og:type=article`` earns nothing when JSON-LD calls
@@ -760,7 +1157,7 @@ def score_page(
     - -3 for ``og:type=website`` or a JSON-LD WebSite, AboutPage or
       ContactPage, but only when the page has no JSON-LD article and
       no date. Many CMSs tag every page ``og:type=website``.
-    - +1 for a published date, -1 for none.
+    - +1 for a published date (the page's, or the list's), -1 for none.
 
     Length: +1 for 600+ characters, -2 under 300.
 
@@ -799,7 +1196,7 @@ def score_page(
             add(3, "json-ld " + "/".join(sorted(article_ld)))
         elif facts.og_type == "article" and not facts.jsonld_types & _PAGE_TYPES:
             add(3, "og:type article")
-        dated = facts.published is not None or facts.url_dated
+        dated = facts.published is not None or listed_date is not None or facts.url_dated
         site_ld = facts.jsonld_types & _SITE_TYPES
         if not article_ld and not dated:
             if facts.og_type == "website":
@@ -808,6 +1205,8 @@ def score_page(
                 add(-3, "json-ld " + "/".join(sorted(site_ld)) + ", undated")
         if facts.published is not None:
             add(1, "dated " + facts.published.date().isoformat())
+        elif listed_date is not None:
+            add(1, "listed " + listed_date.date().isoformat())
         elif facts.url_dated:
             add(1, "date in URL")
         else:
@@ -891,13 +1290,14 @@ def _link_title(a) -> str:
     return _clean_text(img.get("alt")) if img is not None and img.get("alt") else ""
 
 
-def listing_links(html: str, page_url: str) -> list[Candidate]:
+def listing_links(html: str, page_url: str, *, section: str | None = None) -> list[Candidate]:
     """The article links on a listing page, in page order:
     ``[Candidate(url, published, title)]``.
 
     - Links resolve against ``<base href>`` when the page has one.
-    - Only same-site links that pass ``url_ok`` count, and never the
-      page itself.
+    - Only same-site links that pass ``url_ok`` count (below the feed's
+      own ``section``, as ``url_ok`` reads it), and never the page
+      itself.
     - nav, aside and page-level header and footer are dropped first.
     - Links group by their tag path (``main/div/article/h2/a``), and
       the largest group with 3 or more distinct URLs wins: a listing's
@@ -929,7 +1329,7 @@ def listing_links(html: str, page_url: str) -> list[Candidate]:
             absolute = urlsplit(urljoin(base, href))._replace(fragment="").geturl()
         except ValueError:
             continue
-        if absolute == page_key or not url_ok(absolute, page_url):
+        if absolute == page_key or not url_ok(absolute, page_url, section=section):
             continue
         groups[_tag_path(a)].append((absolute, a))
 
