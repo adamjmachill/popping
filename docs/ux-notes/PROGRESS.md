@@ -48,3 +48,11 @@ Work in progress is pushed to `claude/ux-<unit>` branches as it goes.
 - Claude merges PR9a and PR10b once CI is green and the unit's review step has passed; the owner no longer holds those merges. PR10b's read-only probe of the live website feeds moves to `docs/DEVICE_CHECKS.md`, to run after deploying.
 - The device gates don't hold frontend merges. Their checks stay in `docs/DEVICE_CHECKS.md` for the owner to run after deploying, and any `fail:` becomes a fix unit.
 - PR2c still merges only after both devices run the PR2b build (`popping-update`, then relaunch each device), because merging it earlier makes old app copies fail to save.
+
+## Owner decisions (2026-10-21)
+
+- The owner tests on the phone only; no desktop is in use. Device checks are written phone-first, and desktop-only lines say "(If you have a desktop)".
+- PR2c's condition is now that the phone shows the PR2b build in Settings. No browser tab is open on an old build; a browser opened later loads the current build.
+- The process stays as before: every unit gets the full review, and units with major fixes or risky logic get re-checks. Each unit is built on top of the one before it, so the next can start while the last finishes review.
+- PR10b merged after six review rounds. The owner's real-feed probe (baseline, then 3 hours and a day after deploying) is its final check. PR11a waits for that probe.
+- D34: cards get preview text under the headline, and the Summary arrow stays for the full AI summary. PR5a builds it.
