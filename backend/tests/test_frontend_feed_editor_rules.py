@@ -17,6 +17,7 @@ import pytest
 
 from app.routes import sources as routes
 from app.sources import list_sources
+from app.sources.rss import BROWSER_HEADERS
 
 REPO = Path(__file__).resolve().parents[2]
 LIB = REPO / "frontend/src/lib"
@@ -37,6 +38,12 @@ def _number(src: str, const: str) -> int:
     m = re.search(rf"export const {const}\b[^=]*=\s*(\d+)", src)
     assert m, f"couldn't find the {const} number"
     return int(m.group(1))
+
+
+def _string(src: str, const: str) -> str:
+    m = re.search(rf"export const {const}\b[^=]*=\s*'([^']*)'", src)
+    assert m, f"couldn't find the {const} string"
+    return m.group(1)
 
 
 def _string_map(src: str, const: str) -> dict[str, str]:
@@ -66,6 +73,15 @@ def test_header_limits_and_canonical_names_match():
     assert _number(src, "HEADER_VALUE_MAX") == routes._HEADER_VALUE_MAX
     assert _number(src, "HEADER_NAME_MAX") == routes._HEADER_NAME_MAX
     assert _string_map(src, "CANONICAL_HEADER_NAMES") == routes._CANONICAL_HEADER_NAMES
+
+
+@pytest.mark.no_db
+def test_browser_user_agent_matches():
+    """The Add preview's Safari retry (``rss.BROWSER_HEADERS``) and the
+    feed editor's "Use a browser identity" preset send the same
+    User-Agent, so a feed the preview read as Safari reads the same way
+    once Add stores the preset."""
+    assert BROWSER_HEADERS["User-Agent"] == _string(_ts("headers.ts"), "BROWSER_USER_AGENT")
 
 
 @pytest.mark.no_db

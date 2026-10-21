@@ -52,6 +52,9 @@ from app.schemas import (
     SourceAutoResult,
     SourceCreate,
     SourceOut,
+    SourcePreviewDuplicate,
+    SourcePreviewRequest,
+    SourcePreviewResult,
     SourceTestRequest,
     SourceTestResult,
     SourceUpdate,
@@ -59,7 +62,7 @@ from app.schemas import (
 from app.sources import list_sources as registered_plugin_names
 from app.sources.reddit import normalize_subreddit
 from app.url_safety import check_url_safe
-from app import reddit_client, scheduler
+from app import reddit_client, scheduler, source_preview
 
 router = APIRouter(tags=["sources"])
 
@@ -156,6 +159,11 @@ _YOUTUBE_DEFAULT_REFRESH = 21_600
 # out of courtesy to sites that never opted into being polled the
 # way a real feed's operator implicitly did.
 _GENERIC_SCRAPE_DEFAULT_REFRESH = 7_200
+
+# The types PATCH ``type`` moves a feed between: the ones that read a
+# plain http(s) address. Reddit and YouTube rows store a reference their
+# own type resolved, so they stay what they are.
+_RETYPE_TYPES = frozenset({"rss", "podcast", "generic_scrape"})
 
 # Mirrors ``Source.category``'s ``String(40)``. A PATCH / POST with a
 # longer string would crash on the DB layer with a Postgres
@@ -909,6 +917,26 @@ async def update_source_endpoint(
             status_code=400,
             detail=f"built-in source {pre.name!r} cannot be renamed or re-URLed",
         )
+    # ``type`` switches how a dynamic feed is read (Find its feed turns
+    # a website feed into the feed its page links to). Only between the
+    # types that read a plain address, both ways, and never on a
+    # built-in, whose type is its plugin class. The same type is no
+    # change.
+    type_change: str | None = None
+    if body.type is not None and body.type != pre.type:
+        if pre.name in registered_plugin_names():
+            raise HTTPException(
+                status_code=400,
+                detail=f"built-in source {pre.name!r} cannot change type",
+            )
+        if pre.type not in _RETYPE_TYPES or body.type not in _RETYPE_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail="type can only change between 'rss', 'podcast' and 'generic_scrape'",
+            )
+        type_change = body.type
+    # The URL is checked as the type the row will have.
+    row_type = type_change or pre.type
     if body.url is not None:
         # Apple Podcasts catalog links aren't a feed — resolve to the
         # real RSS URL before validating. No-op for anything that
@@ -922,7 +950,7 @@ async def update_source_endpoint(
         # YouTube row.
         try:
             body.url = await resolve_channel_feed_url(
-                body.url, allow_bare_handle=(pre.type == "youtube_channel")
+                body.url, allow_bare_handle=(row_type == "youtube_channel")
             )
         except YouTubeResolutionError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
@@ -930,10 +958,14 @@ async def update_source_endpoint(
         # reference when the row is a Reddit row (so a typo'd edit
         # doesn't store a malformed URL the plugin can't fetch).
         # For non-Reddit rows fall through to the plain URL check.
-        if pre.type == "reddit":
+        if row_type == "reddit":
             body.url = _validate_reddit_url(body.url)
         else:
             _validate_url(body.url)
+    elif type_change is not None:
+        # A type change alone: the stored address must still be one the
+        # new type can read.
+        _validate_url(pre.url)
     # ``sitemap_url`` is an optional override for generic_scrape
     # sources only. ``None`` means "clear back to homepage-based
     # discovery"; any string is validated as an http(s) URL. The
@@ -998,7 +1030,12 @@ async def update_source_endpoint(
             sitemap_url=sitemap_url_value,
             link_pattern=link_pattern_value,
             custom_headers=headers,
+            type_=type_change,
         )
+    except ValueError as exc:
+        # ``update_source``'s own built-in guard, behind the one above.
+        await session.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
     except IntegrityError:
         # Most likely cause: ``Source.name`` has a UNIQUE constraint
         # (``models.py:44``) and the new name collides with another
@@ -1352,6 +1389,82 @@ async def test_source_endpoint(
     without re-running with curl.
     """
     return await _test_source_impl(body, session)
+
+
+# --- Preview (no persist) -----------------------------------------------
+
+
+def _link_pattern_ok(value: str) -> bool:
+    """A link pattern is a leading-slash path prefix, never a full URL
+    (the rule POST and PATCH enforce)."""
+    return value.startswith("/") and "://" not in value
+
+
+@router.post(
+    "/sources/preview",
+    response_model=SourcePreviewResult,
+    dependencies=_write_deps,
+)
+async def preview_source_endpoint(
+    body: SourcePreviewRequest,
+    session: AsyncSession = Depends(get_session),
+) -> SourcePreviewResult:
+    """What an address will bring if it is added: the stories, how many
+    Add's first check would store, and the type and address Add should
+    use. Nothing is written. See ``app.source_preview`` for the steps,
+    the deadline, the two-at-a-time limit and the cache.
+
+    The options and headers are checked as Add checks them. Every
+    failure is a 200 with ``ok`` false, an ``error_kind`` and one short
+    sentence (``source_preview.ERRORS``); none carries upstream text or
+    an address. ``/sources/test`` stays as it is.
+    """
+
+    def refused(kind: str) -> SourcePreviewResult:
+        return SourcePreviewResult(ok=False, error_kind=kind, error=source_preview.ERRORS[kind])
+
+    url = body.url.strip()
+    if not url:
+        return refused("invalid_url")
+    try:
+        headers = _validate_custom_headers(body.custom_headers) if body.custom_headers else None
+    except HTTPException:
+        return refused("invalid_headers")
+    if body.link_pattern is not None and not _link_pattern_ok(body.link_pattern):
+        return refused("invalid_options")
+    if body.sitemap_url is not None:
+        try:
+            _validate_url(body.sitemap_url)
+        except HTTPException:
+            return refused("invalid_options")
+    request = source_preview.PreviewRequest(
+        url=url,
+        type=body.type,
+        sitemap_url=body.sitemap_url,
+        link_pattern=body.link_pattern,
+        headers=headers,
+    )
+    upstream = await source_preview.run_preview(request)
+    # Worked out on every request, never cached: an Add, a delete or a
+    # first check changes them.
+    known = await scheduler._stored_urls(session, source_preview.lookup_urls(upstream))
+    duplicate = None
+    if upstream.url:
+        row = await session.scalar(
+            select(Source)
+            .where(Source.url.in_(source_preview.address_variants(upstream.url)))
+            .order_by(Source.id)
+            .limit(1)
+        )
+        if row is not None:
+            duplicate = SourcePreviewDuplicate(id=row.id, name=row.name, display_name=row.display_name)
+    return source_preview.build_result(
+        upstream,
+        known=known,
+        duplicate=duplicate,
+        rules=await scheduler._ingest_tunables(),
+        now=dt.datetime.now(dt.timezone.utc),
+    )
 
 
 # --- Check now (pull to refresh) ------------------------------------------

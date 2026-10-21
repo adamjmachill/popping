@@ -75,7 +75,7 @@ from app.scoring import convergence as convergence_helper
 from app.scoring import personal as personal_scorer
 from app.scoring import recency
 from app.sources import list_sources
-from app.sources.base import NoArticleListError, NotAFeedError, SourcePlugin
+from app.sources.base import NoArticleListError, NotAFeedError, SourcePlugin, row_fetch_target
 from app.sources.dynamic_reddit import DynamicRedditPlugin
 from app.sources.dynamic_rss import DynamicRssPlugin
 from app.sources.generic_scrape import GenericScrapePlugin
@@ -401,6 +401,25 @@ def _reschedule_ingest_job(plugin_cls: Any, interval_seconds: float) -> None:
         logger.debug("scheduler: could not reschedule %s", job_id, exc_info=True)
 
 
+async def _stored_urls(session: AsyncSession, urls: list[str]) -> set[str]:
+    """The ones of ``urls`` already stored as entries (by any feed).
+    ``_ingest`` runs it on every listing before the ingest rules, and
+    hands it to a website feed (``_known_urls_lookup``) so the plugin
+    skips stored pages before fetching them."""
+    if not urls:
+        return set()
+    return set((await session.scalars(select(Entry.url).where(Entry.url.in_(urls)))).all())
+
+
+async def _known_urls_lookup(urls: list[str]) -> set[str]:
+    """``_stored_urls`` in its own short session: the ``known_urls``
+    lookup ``_ingest`` passes to a plugin with ``takes_ingest_hints``
+    (``app.sources.base.KnownUrls``), called during its fetch, when no
+    ingest session is open."""
+    async with SessionLocal() as session:
+        return await _stored_urls(session, urls)
+
+
 async def _ingest_tunables() -> ingest_rules.IngestTunables:
     """The ``ingest.*`` knobs from runtime settings, parsed and range
     checked (see ``ingest_rules.parse_tunables``). There is no env
@@ -443,6 +462,28 @@ async def _is_first_fetch(
         )
     )
     return not has_rows
+
+
+async def _backlog_cutoff(
+    session: AsyncSession,
+    source: Source,
+    now: dt.datetime,
+    rules: ingest_rules.IngestTunables,
+) -> dt.datetime | None:
+    """For a website feed's fetch (``takes_ingest_hints``): the date
+    before which a page is old backlog on this poll, the line
+    ``ingest_rules`` draws for dated items on a later poll (the
+    baseline's backfill window, or ``max_age_days``, whichever is
+    later). None on a first fetch, which keeps the newest items
+    whatever their age. ``generic_scrape._backlog_rule`` holds an
+    undated page's sitemap ``<lastmod>`` against it."""
+    if await _is_first_fetch(session, source, now, rules):
+        return None
+    cutoff = now - dt.timedelta(days=rules.max_age_days)
+    baseline = _as_utc(source.created_at)
+    if baseline is not None:
+        cutoff = max(cutoff, baseline - dt.timedelta(hours=rules.backfill_hours))
+    return cutoff
 
 
 def _as_utc(value: dt.datetime | None) -> dt.datetime | None:
@@ -623,17 +664,17 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
     # failure path below reads them too.
     source_id: int | None = None
     source_url: str | None = None
-    # What the plugin is about to fetch: the feed's URL, sitemap
-    # URL and link pattern. If the row no longer has that address
-    # when the batch (or the failure) is recorded, it came from the
-    # old address and is discarded (see the commit session and the
-    # failure path below). A row-driven plugin carries the address it
-    # was built from (``SourcePlugin.fetch_target``): its job keeps
-    # that instance until ``update_source`` replaces it after an
-    # edit's commit, so the row read below can already hold the new
-    # address while this instance still fetches the old one. A
-    # class-driven built-in's address can't be edited, so its row is
-    # the snapshot.
+    # What the plugin is about to fetch, and how: the feed's type,
+    # URL, sitemap URL and link pattern (``row_fetch_target``). If the
+    # row no longer has that address and type when the batch (or the
+    # failure) is recorded, it came from the old feed and is discarded
+    # (see the commit session and the failure path below). A
+    # row-driven plugin carries the address it was built from
+    # (``SourcePlugin.fetch_target``): its job keeps that instance
+    # until ``update_source`` replaces it after an edit's commit, so
+    # the row read below can already hold the new address while this
+    # instance still fetches the old one. A class-driven built-in's
+    # address can't be edited, so its row is the snapshot.
     fetch_target: tuple[str | None, ...] | None = getattr(plugin, "fetch_target", None)
     try:
         needs_favicon = False
@@ -649,7 +690,7 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             source_id = source.id
             source_url = source.url
             if fetch_target is None:
-                fetch_target = (source.url, source.sitemap_url, source.link_pattern)
+                fetch_target = row_fetch_target(source)
             # Only subreddit feeds depend on the server's Reddit setting
             # (``is_disabled`` is global). Read here so a Reddit-off feed
             # doesn't ask reddit.com for its favicon either; raised
@@ -675,6 +716,9 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             except Exception:
                 logger.debug("favicon fetch failed for %s", plugin_cls.name, exc_info=True)
 
+        rules = await _ingest_tunables()
+        takes_hints = getattr(plugin, "takes_ingest_hints", False)
+        backlog_before: dt.datetime | None = None
         async with SessionLocal() as session:
             source = await session.get(Source, source_id) if source_id else None
             if source is None:
@@ -693,6 +737,10 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 logger.debug("ingest: %s paused — skipping", source.name)
                 summary["status"] = "paused"
                 return summary
+            if takes_hints:
+                backlog_before = await _backlog_cutoff(
+                    session, source, dt.datetime.now(dt.timezone.utc), rules
+                )
 
         # Raised before the fetch (``reddit_off`` is read above), so the
         # failure path records it as the ``[reddit off]`` setup state
@@ -705,9 +753,20 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
         # Network fetch with no DB session open: some plugins (podcasts,
         # generic scrape) take minutes, and an idle transaction for that
         # long starves the connection pool.
-        raw_items = await plugin.fetch()
+        if takes_hints:
+            # A website feed fetches one page per candidate, so it asks
+            # which candidates are already stored before fetching them
+            # (one short session per poll), and caps undated pages
+            # itself, holding them against this poll's backlog line
+            # (``GenericScrapePlugin``).
+            raw_items = await plugin.fetch(
+                known_urls=_known_urls_lookup,
+                max_undated=rules.max_undated_per_poll,
+                backlog_before=backlog_before,
+            )
+        else:
+            raw_items = await plugin.fetch()
         summary["fetched"] = len(raw_items)
-        rules = await _ingest_tunables()
 
         async with SessionLocal() as session:
             # Loaded first: it commits when it has to create the
@@ -729,7 +788,10 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             )
             if source is None:
                 return summary
-            if (source.url, source.sitemap_url, source.link_pattern) != fetch_target:
+            if row_fetch_target(source) != fetch_target:
+                # The address or the type changed while this poll ran
+                # (PATCH ``url``, ``sitemap_url``, ``link_pattern`` or
+                # ``type``): the batch is the old feed's.
                 logger.info(
                     "ingest: %s changed address during the fetch — discarding %d item(s)",
                     plugin_cls.name, len(raw_items),
@@ -745,11 +807,7 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
             # before embedding, which is the expensive step; the INSERT's
             # ON CONFLICT still covers a concurrent writer.
             urls = [n["url"] for n in normalized if n.get("url")]
-            known: set[str] = set()
-            if urls:
-                known = set(
-                    (await session.scalars(select(Entry.url).where(Entry.url.in_(urls)))).all()
-                )
+            known = await _stored_urls(session, urls)
             # The ingest rules (``app.ingest_rules``): a first fetch
             # keeps the newest few plus the last couple of days, later
             # polls skip old and undated backlog, and one poll stores at
@@ -928,7 +986,7 @@ async def _ingest_once(plugin_cls: Any, mark_recorded: Callable[[], None]) -> di
                 if (
                     source is not None
                     and fetch_target is not None
-                    and (source.url, source.sitemap_url, source.link_pattern) != fetch_target
+                    and row_fetch_target(source) != fetch_target
                 ):
                     # The error came from an address the feed no longer
                     # has. Recording it would count a failure (and back
@@ -2967,6 +3025,7 @@ async def update_source(
     sitemap_url: str | None = _UNSET,
     link_pattern: str | None = _UNSET,
     custom_headers: dict | None = _UNSET,
+    type_: str | None = None,
 ) -> Source | None:
     """Apply a partial update to a Source row and reschedule if needed.
 
@@ -2997,6 +3056,13 @@ async def update_source(
         job's args — for dynamic rows this means the next tick uses
         a freshly-constructed ``DynamicRssPlugin`` / ``GenericScrapePlugin``
         instance built from the updated row.
+
+    ``type_`` switches how a dynamic feed is read (the route allows
+    only ``rss``, ``podcast`` and ``generic_scrape``). Like an address
+    change it starts the feed over from a first fetch, and it also
+    clears the error state, which belonged to the old way of reading
+    it; the job is rebuilt with the new type's plugin. A built-in's
+    type is its plugin class: changing it raises ``ValueError``.
 
     URL changes clear the cached favicon: ``favicon_url`` and
     ``favicon_path`` are NULLed on the row, and the on-disk file
@@ -3052,7 +3118,12 @@ async def update_source(
         link_pattern is not _UNSET
         and link_pattern != row.link_pattern
     )
-    # All eight fields participate in the early-return guard.
+    type_changed = type_ is not None and type_ != row.type
+    if type_changed and row.name in list_sources():
+        # The route refuses this first; checked here too because the
+        # registered-name return below runs only after the commit.
+        raise ValueError(f"built-in source {row.name!r} cannot change type")
+    # All nine fields participate in the early-return guard.
     if not (
         refresh_changed
         or active_changed
@@ -3062,6 +3133,7 @@ async def update_source(
         or headers_changed
         or sitemap_url_changed
         or link_pattern_changed
+        or type_changed
     ):
         return row
     if refresh is not None:
@@ -3116,8 +3188,14 @@ async def update_source(
         # page_links" so an empty-string body also counts as a
         # clear here.
         row.link_pattern = link_pattern
-    if url_changed or sitemap_url_changed or link_pattern_changed:
-        # Each of the three re-points the feed, so it starts again
+    if type_changed:
+        row.type = type_
+        # The errors were the old way of reading the feed's; the new
+        # one starts clean (PR9b's pill reads these).
+        row.last_error = None
+        row.error_count = 0
+    if url_changed or sitemap_url_changed or link_pattern_changed or type_changed:
+        # Each of the four re-points the feed, so it starts again
         # from a first fetch: newest few plus the last couple of days,
         # not the new address's whole back catalogue (see
         # ``_is_first_fetch``). ``clock_timestamp()``, not ``now()``:
@@ -3166,6 +3244,7 @@ async def update_source(
         or headers_changed
         or sitemap_url_changed
         or link_pattern_changed
+        or type_changed
     ):
         return row
 

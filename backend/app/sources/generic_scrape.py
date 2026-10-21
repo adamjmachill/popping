@@ -4,11 +4,19 @@ RSS/Atom feed.
 Auto-feed (see ``app.feed_autodiscovery``) tries an actual feed
 first; this is the fallback the "Add custom" flow wires up when none
 exists. Rather than a bespoke "guess which links on this page are
-articles" heuristic, this leans on the site's own sitemap (via
-``app.feed_autodiscovery.discover_sitemap_urls``) for the list of candidate
-page URLs, then extracts each one's title/body the same way the
+articles" heuristic, it reads the site's own lists of articles: the
+listing page the feed points at and the site's sitemap (see
+``plan_candidates``). Each new page is extracted the same way the
 on-demand article-summary feature does (``trafilatura.bare_extraction``,
-same library, same SSRF-guarded fetch as ``app.article_extract``).
+same library, same SSRF-guarded fetch as ``app.article_extract``) and
+kept only when ``app.article_detect.score_page`` reads it as an
+article, so About, Contact, tag and shop pages stay out.
+
+A failure says what it is (``scheduler._classify_error``): a site that
+refuses us is ``[blocked]``, the feed's own address gone is
+``[not found]``, a host that doesn't answer is ``[network]``, and a
+site with no list of articles at all is ``[no list]``
+(``NoArticleListError``, a setup state).
 
 Not registered via ``@register_source`` — row-driven, same pattern as
 ``DynamicRssPlugin`` / ``DynamicYouTubePlugin``. The scheduler
@@ -25,12 +33,30 @@ import asyncio
 import datetime as dt
 import logging
 from collections import OrderedDict
-from typing import Optional
+from typing import Callable, NamedTuple, Optional
+from urllib.parse import urlparse
 
-from app.article_extract import fetch_html
-from app.feed_autodiscovery import discover_sitemap_urls
+import httpx
+
+from app.article_detect import (
+    ACCEPT_SCORE,
+    Candidate,
+    listing_links,
+    same_site,
+    score_page,
+    url_ok,
+)
+from app.article_extract import (
+    NETWORK_ERRORS,
+    FetchRefusedError,
+    fetch_html_checked,
+    most_telling_error,
+)
+from app.feed_autodiscovery import discover_sitemap_entries, looks_like_sitemap
+from app.ingest_rules import IngestTunables
 from app.models import Source
-from app.sources.base import SourcePlugin, row_fetch_target
+from app.sources.base import KnownUrls, NoArticleListError, SourcePlugin, row_fetch_target
+from app.thread_work import run_in_thread
 
 logger = logging.getLogger("popping.sources.generic_scrape")
 
@@ -78,11 +104,30 @@ _SUMMARY_MAX_CHARS = 2000
 # forcing the FIFO eviction to re-attempt URLs the DB already has.
 _MAX_EXTRACTED_URLS = 5000
 
+# A page whose fetch fails in a way that passes (a timeout, a network
+# error, a 5xx) is asked for again on later polls, and passed over
+# (marked extracted) after this many failed polls in a row, so a page
+# that never answers can't take a slot of every poll. The counts are
+# per plugin instance, bounded like ``_extracted_urls``.
+_MAX_PAGE_FAILURES = 3
+_MAX_PAGE_FAILURE_URLS = 1000
+
+# When every page a poll asked for was refused, how many other pages of
+# the site ``GenericScrapePlugin._settle_refusals`` may fetch to see
+# whether the site serves us at all (a gone control page is skipped).
+_MAX_CONTROLS = 3
+
 # Pages dated more than this many days ago are skipped. Sitemaps list a
 # site's whole back catalogue, so without this a new source fills its
 # column with years-old pages before it ever reaches this week's.
-# Pages with no date are kept (nothing to judge them by).
+# Undated pages are judged by the undated cap instead (see
+# ``GenericScrapePlugin._cap_undated``).
 _MAX_AGE_DAYS = 30
+
+# The undated cap when ``fetch`` is called without the scheduler's
+# ``max_undated`` (a direct call): ``ingest.max_undated_per_poll``'s
+# default.
+_DEFAULT_MAX_UNDATED = IngestTunables().max_undated_per_poll
 
 
 def _section_prefix(url: str) -> str | None:
@@ -90,8 +135,6 @@ def _section_prefix(url: str) -> str | None:
     ``https://example.com/news``; None for a homepage or a file-like
     page (``/feed.xml``, ``/news.html``), where there's no section to
     scope to."""
-    from urllib.parse import urlparse
-
     path = urlparse(url).path
     if path in ("", "/"):
         return None
@@ -100,16 +143,118 @@ def _section_prefix(url: str) -> str | None:
     return path if path.endswith("/") else path + "/"
 
 
-async def _section_candidates(sitemap_input: str, page_url: str, limit: int) -> list[str]:
-    """Sitemap URLs under ``page_url``'s section, newest first; the
-    whole sitemap when the URL has no section or the section has no
-    entries in it (its articles may live elsewhere)."""
-    prefix = _section_prefix(page_url)
-    if prefix:
-        candidates = await discover_sitemap_urls(sitemap_input, limit=limit, path_prefix=prefix)
-        if candidates:
-            return candidates
-    return await discover_sitemap_urls(sitemap_input, limit=limit)
+def _is_site_root(url: str) -> bool:
+    """The site's home page: no path beyond ``/`` (a query is allowed:
+    ``/?lang=en`` is still the home page)."""
+    return urlparse(url).path in ("", "/")
+
+
+class Plan(NamedTuple):
+    """What a website feed can read this poll (``plan_candidates``)."""
+
+    # Which read found the candidates: "page" (the listing page) or
+    # "sitemap"; "" when neither found any.
+    mode: str
+    # Raw discovery: every candidate that passed ``url_ok`` and the link
+    # pattern, newest first, before the stored-URL skip and the caps.
+    candidates: list[Candidate]
+    # The candidates not already stored (``known_urls``), in the same
+    # order. All of them when no lookup was given.
+    fresh: list[Candidate]
+
+
+async def plan_candidates(
+    url: str,
+    sitemap_url: str | None = None,
+    link_pattern: str | None = None,
+    headers: dict | None = None,
+    known_urls: KnownUrls | None = None,
+    *,
+    limit: int = _MAX_SITEMAP_CANDIDATES,
+    raise_errors: bool = False,
+) -> Plan:
+    """Find the pages a website feed could pull, for both
+    ``GenericScrapePlugin.fetch`` and ``probe``.
+
+    Two reads, the listing page (``url``) and the sitemap, and the
+    first that finds articles wins:
+
+    - A section URL (``/news``) reads its page first: a listing shows
+      its newest posts, and the site's sitemap mixes every section.
+    - A site root, a feed with an explicit ``sitemap_url``, or a URL
+      that looks like a sitemap reads the sitemap first. The page comes
+      second: an HTML sitemap page (``/sitemap/``) is a listing, and an
+      XML one reads as no page at the cost of one fetch.
+
+    The sitemap read takes the owner's ``sitemap_url`` as the sitemap
+    whatever its address looks like, so a 404 there is the feed's own
+    address missing (``[not found]``).
+
+    The page read keeps the links under ``link_pattern`` when the owner
+    set one (today's prefix filter), and the page's repeating list of
+    posts (``article_detect.listing_links``) otherwise. The sitemap read
+    keeps entries under the link pattern, else under the URL's section.
+    There is no fallback from an empty section to the whole site: that
+    is how a section feed used to fill with the rest of the site. Every
+    candidate also passes ``article_detect.url_ok``; under the owner's
+    link pattern, as the owner's choice (``owner_pattern``).
+
+    ``known_urls`` marks the candidates already stored (``fresh`` leaves
+    them out); the scheduler passes it, so stored pages are never
+    fetched again, even after a restart empties ``_extracted_urls``.
+
+    With ``raise_errors`` (the plugin's scheduled fetch), a plan that
+    found nothing raises: the most telling failure of the two reads
+    (``article_extract.most_telling_error``: a refusal, then the feed's
+    own page or sitemap failing, then a network error), else
+    ``NoArticleListError`` (``[no list]``). When one read finds
+    articles, the other's failure doesn't matter. Without it (``probe``,
+    the Test preview), nothing raises and an empty plan comes back.
+    """
+    prefix = link_pattern or _section_prefix(url)
+
+    async def read_sitemap() -> list[Candidate]:
+        return await discover_sitemap_entries(
+            sitemap_url or url,
+            limit=limit,
+            path_prefix=prefix,
+            headers=headers,
+            raise_errors=raise_errors,
+            input_is_sitemap=bool(sitemap_url),
+            owner_pattern=bool(link_pattern),
+        )
+
+    async def read_page() -> list[Candidate]:
+        return await _discover_page_links(
+            url, link_pattern, limit=limit, headers=headers, raise_errors=raise_errors
+        )
+
+    if sitemap_url or _is_site_root(url) or looks_like_sitemap(url):
+        reads = [("sitemap", read_sitemap), ("page", read_page)]
+    else:
+        reads = [("page", read_page), ("sitemap", read_sitemap)]
+
+    failures: list[BaseException] = []
+    mode, found = "", []
+    for name, read in reads:
+        try:
+            found = await read()
+        except Exception as exc:  # noqa: BLE001 - kept: the other read may still find the list
+            logger.info("generic_scrape: %s: the %s read failed: %s", url, name, exc)
+            failures.append(exc)
+            continue
+        if found:
+            mode = name
+            break
+    if not found:
+        if raise_errors:
+            exc = most_telling_error(failures)
+            if exc is not None:
+                raise exc
+            raise NoArticleListError("no sitemap or listing page with articles")
+        return Plan("", [], [])
+    stored = await known_urls([c.url for c in found]) if known_urls is not None else set()
+    return Plan(mode, found, [c for c in found if c.url not in stored])
 
 
 def _too_old(item: dict) -> bool:
@@ -120,50 +265,164 @@ def _too_old(item: dict) -> bool:
     return published < cutoff
 
 
-async def _extract_one(url: str, custom_headers: dict | None = None) -> dict | None:
-    """Fetch + extract a single candidate URL into a plugin-item
-    dict, or None if the fetch or extraction didn't produce anything
-    usable. Module-level (not a method) so both ``GenericScrapePlugin.
-    fetch`` and the "Test" endpoint's ``probe`` below share the exact
-    same extraction logic without one needing a full Source row to
-    exercise the other's code path.
+# Why a page read for the Add preview isn't a story (``preview_page``).
+NO_TEXT = "no_text"          # no usable title or text in the page
+NOT_ARTICLE = "not_article"  # ``score_page`` says it isn't an article
+UNREADABLE = "unreadable"    # gone (404, 410, another 4xx), not HTML, empty
+REFUSED = "refused"          # the site refused it (401, 402, 403, 429)
+FAILED = "failed"            # a network error, a timeout or a 5xx
+TOO_OLD = "too_old"          # dated more than ``_MAX_AGE_DAYS`` ago
+# The verdicts of a page the site answered with a page (HTML), a story
+# or not: what ``_Read.served`` records for a poll.
+SERVED = frozenset({None, NO_TEXT, NOT_ARTICLE, TOO_OLD})
 
-    ``custom_headers`` (B4 fix): forwarded to ``fetch_html`` so the
-    plugin can pass user-supplied ``Source.custom_headers`` (e.g.
-    a custom User-Agent for sites that block default UAs, or an
-    Authorization header for paywalled content) through to the
-    actual HTTP request. ``None`` uses only the default headers.
-    """
-    html = await fetch_html(url, custom_headers=custom_headers)
-    if html is None:
-        return None
-    try:
-        import trafilatura
 
-        # Parsing a page is CPU-bound and synchronous, and a poll
-        # extracts up to ``_MAX_NEW_PER_POLL`` pages. Run on the event
-        # loop, it stalled every API request and scheduler job for the
-        # length of each parse. Run it in asyncio's default thread
-        # pool instead, the same way ``feed_autodiscovery`` runs
-        # ``determine_feed``.
-        doc = await asyncio.to_thread(
-            trafilatura.bare_extraction,
-            html,
-            url=url,
-            with_metadata=True,
-            favor_recall=True,
-        )
-    except Exception:  # noqa: BLE001 - a single page's extraction failing shouldn't sink the whole poll
-        logger.debug("generic_scrape: %s: extraction raised", url)
-        return None
+def _judge_page(
+    html: str,
+    url: str,
+    final_url: str,
+    owner_configured: bool,
+    listed_date: dt.datetime | None = None,
+) -> tuple[tuple[dict, str, str] | None, str | None]:
+    """``_read_page`` with the reason a page was turned down:
+    ``(page, None)`` for an article, ``(None, NO_TEXT)`` or ``(None,
+    NOT_ARTICLE)`` otherwise."""
+    import trafilatura
+
+    doc = trafilatura.bare_extraction(
+        html,
+        url=url,
+        with_metadata=True,
+        favor_recall=True,
+    )
     if doc is None:
-        return None
+        return None, NO_TEXT
     data = doc.as_dict()
     title = (data.get("title") or "").strip()
     text = (data.get("text") or "").strip()
     if not title or not text:
         logger.debug("generic_scrape: %s: no usable title/text extracted", url)
+        return None, NO_TEXT
+    score, reasons = score_page(
+        html,
+        url,
+        final_url=final_url,
+        text=text,
+        owner_configured=owner_configured,
+        listed_date=listed_date,
+    )
+    if score < ACCEPT_SCORE:
+        logger.debug(
+            "generic_scrape: %s: not an article (score %d: %s)", url, score, ", ".join(reasons)
+        )
+        return None, NOT_ARTICLE
+    return (data, title, text), None
+
+
+def _read_page(
+    html: str,
+    url: str,
+    final_url: str,
+    owner_configured: bool,
+    listed_date: dt.datetime | None = None,
+) -> tuple[dict, str, str] | None:
+    """Extract one fetched page and score it as an article: ``(data,
+    title, text)`` from ``bare_extraction``, or None when there is no
+    usable title or text or ``score_page`` says it isn't an article.
+    ``listed_date`` is the date the site's list gave the page
+    (``Candidate.published``). CPU-bound and synchronous;
+    ``_extract_one`` runs it in a thread."""
+    return _judge_page(html, url, final_url, owner_configured, listed_date)[0]
+
+
+async def _extract_one(
+    url: str,
+    custom_headers: dict | None = None,
+    *,
+    owner_configured: bool = False,
+    listed_date: dt.datetime | None = None,
+    served: set[str] | None = None,
+) -> dict | None:
+    """Fetch + extract a single candidate URL into a plugin-item
+    dict, or None if the fetch or extraction didn't produce anything
+    usable, or the page isn't an article (``score_page``). Module-level
+    (not a method) so both ``GenericScrapePlugin.fetch`` and the "Test"
+    endpoint's ``probe`` below share the exact same extraction logic
+    without one needing a full Source row to exercise the other's code
+    path.
+
+    ``custom_headers`` (B4 fix): forwarded to ``fetch_html_checked`` so
+    the plugin can pass user-supplied ``Source.custom_headers`` (e.g.
+    a custom User-Agent for sites that block default UAs, or an
+    Authorization header for paywalled content) through to the
+    actual HTTP request. ``None`` uses only the default headers.
+
+    ``owner_configured``: the candidates came from the owner's
+    ``link_pattern`` or ``sitemap_url``, so ``score_page`` takes the
+    owner's choice as the article signal (an ollama-style
+    ``/library/<model>`` page declares no article type and no date).
+
+    ``listed_date``: when the site's list says the page was published
+    (``Candidate.published``). ``score_page`` counts it as the page's
+    date, and it dates the item when the page itself carries none.
+
+    ``served``: when given, ``url`` is added to it once the site answers
+    with a page (HTML), whether or not it turns out to be an article, so
+    the plugin knows which pages can show that the site serves us (see
+    ``GenericScrapePlugin._settle_refusals``).
+
+    Two kinds of failure raise, so the plugin can leave the page for a
+    later poll instead of passing over it:
+
+    - ``FetchRefusedError`` when the site refuses the page (401, 402,
+      403, 429); the plugin reports the feed blocked when the site
+      refuses everything.
+    - A failure that passes: a network error or timeout
+      (``NETWORK_ERRORS``) or a 5xx answer (``httpx.HTTPStatusError``).
+
+    A page that is gone (404, 410 or another 4xx), isn't HTML, or isn't
+    an article gives None: it was read, and asking again won't change it.
+    """
+    try:
+        fetched = await fetch_html_checked(
+            url,
+            custom_headers=custom_headers,
+            return_final_url=True,
+            raise_for_status=True,
+        )
+    except FetchRefusedError:
+        raise
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code >= 500:
+            raise
+        logger.debug("generic_scrape: %s: gone: %s", url, exc)
         return None
+    except NETWORK_ERRORS:
+        raise
+    except httpx.HTTPError as exc:
+        logger.debug("generic_scrape: %s: fetch failed: %s", url, exc)
+        return None
+    if fetched is None:
+        return None
+    html, final_url = fetched
+    if served is not None:
+        served.add(url)
+    try:
+        # Parsing and scoring a page is CPU-bound and synchronous, and
+        # a poll extracts up to ``_MAX_NEW_PER_POLL`` pages. Run on the
+        # event loop, it stalled every API request and scheduler job
+        # for the length of each parse. Run it in asyncio's default
+        # thread pool instead, the same way ``feed_autodiscovery`` runs
+        # ``determine_feed``.
+        page = await asyncio.to_thread(
+            _read_page, html, url, final_url, owner_configured, listed_date
+        )
+    except Exception:  # noqa: BLE001 - a single page's extraction failing shouldn't sink the whole poll
+        logger.debug("generic_scrape: %s: extraction raised", url)
+        return None
+    if page is None:
+        return None
+    data, title, text = page
     summary = text[:_SUMMARY_MAX_CHARS]
     return {
         "title": title,
@@ -179,7 +438,9 @@ async def _extract_one(url: str, custom_headers: dict | None = None) -> dict | N
         # anything it can't parse (a missing or unparseable date
         # yields zero recency contribution — the entry still
         # lands in the DB, just without the convergence boost).
-        "published_at": _parse_published_str(data.get("date")),
+        # A page that carries no date of its own takes the one its
+        # site's list gave it, the date ``score_page`` counted.
+        "published_at": _parse_published_str(data.get("date")) or listed_date,
         "summary": summary,
         "image_url": data.get("image"),
     }
@@ -252,21 +513,26 @@ async def probe(url: str, limit: int = 3) -> list[dict]:
     """Standalone, row-free version of ``GenericScrapePlugin.fetch``
     for ``POST /api/sources/test`` — Add's "does this actually work"
     preview needs to run before a Source row exists to construct a
-    real plugin instance from. Tries a few more sitemap candidates
-    than ``limit`` in case the first couple don't extract cleanly
-    (e.g. a listing/index page that slipped into the sitemap), so the
-    preview isn't overly pessimistic about a genuinely workable site."""
+    real plugin instance from. Same plan (``plan_candidates``), but it
+    never raises: a site it can't read gives ``[]``. Tries a few more
+    candidates than ``limit`` in case the first couple aren't articles,
+    so the preview isn't overly pessimistic about a genuinely workable
+    site."""
     items: list[dict] = []
 
     async def _run() -> None:
-        candidates = await _section_candidates(url, url, max(limit * 3, 10))
+        plan = await plan_candidates(url, limit=max(limit * 3, 10))
+        candidates = plan.candidates
         # A few pages at a time: one slow page shouldn't hold up the rest.
         for start in range(0, len(candidates), _FETCH_CONCURRENCY):
             if len(items) >= limit:
                 return
             chunk = candidates[start:start + _FETCH_CONCURRENCY]
-            results = await asyncio.gather(*(_extract_one(c) for c in chunk))
-            items.extend(r for r in results if r is not None)
+            results = await asyncio.gather(
+                *(_extract_one(c.url, listed_date=c.published) for c in chunk),
+                return_exceptions=True,
+            )
+            items.extend(r for r in results if isinstance(r, dict))
 
     # Add waits on this, so a slow site returns what it has (or
     # nothing) after _PROBE_BUDGET instead of spinning for minutes.
@@ -275,6 +541,62 @@ async def probe(url: str, limit: int = 3) -> list[dict]:
     except asyncio.TimeoutError:
         logger.info("generic_scrape: probe of %s hit the %ss budget", url, _PROBE_BUDGET)
     return items[:limit]
+
+
+async def preview_page(
+    candidate: Candidate,
+    headers: dict | None = None,
+    *,
+    owner_configured: bool = False,
+) -> dict:
+    """Read one candidate for the Add preview (``app.source_preview``)
+    the way a poll would (``_extract_one``'s fetch, ``_read_page``'s
+    extraction and scoring, the ``_MAX_AGE_DAYS`` rule), and say what
+    became of it: ``{title, url, published_at, accepted, reason}``.
+    ``reason`` is None for a story and one of the module's reason
+    constants otherwise. ``title`` falls back to the list's title for
+    the candidate (None when it had none). A ``REFUSED`` verdict also
+    carries the refusal's ``status`` (401-403 or 429), so the preview
+    can tell a site that refuses us from a rate limit. Never raises an
+    HTTP error: a refusal or a failure is a reason, like a page that
+    isn't an article."""
+    verdict = {
+        "title": candidate.title,
+        "url": candidate.url,
+        "published_at": candidate.published,
+        "accepted": False,
+        "reason": UNREADABLE,
+    }
+    try:
+        fetched = await fetch_html_checked(
+            candidate.url, custom_headers=headers, return_final_url=True, raise_for_status=True
+        )
+    except FetchRefusedError as exc:
+        return {**verdict, "reason": REFUSED, "status": exc.response.status_code}
+    except httpx.HTTPStatusError as exc:
+        return {**verdict, "reason": FAILED if exc.response.status_code >= 500 else UNREADABLE}
+    except NETWORK_ERRORS:
+        return {**verdict, "reason": FAILED}
+    except httpx.HTTPError:
+        return verdict
+    if fetched is None:
+        return verdict
+    html, final_url = fetched
+    try:
+        page, reason = await run_in_thread(
+            _judge_page, html, candidate.url, final_url, owner_configured, candidate.published
+        )
+    except Exception:  # noqa: BLE001 - one page's extraction failing is that page's verdict
+        logger.debug("generic_scrape: %s: extraction raised", candidate.url)
+        return {**verdict, "reason": NO_TEXT}
+    if page is None:
+        return {**verdict, "reason": reason}
+    data, title, _text = page
+    published = _parse_published_str(data.get("date")) or candidate.published
+    item = {**verdict, "title": title, "published_at": published, "accepted": True, "reason": None}
+    if _too_old(item):
+        return {**item, "accepted": False, "reason": TOO_OLD}
+    return item
 
 
 def _extract_links_from_html(html: str, page_url: str, pattern: str) -> list[str]:
@@ -341,21 +663,125 @@ def _extract_links_from_html(html: str, page_url: str, pattern: str) -> list[str
     return out
 
 
-async def _discover_page_links(
-    page_url: str, pattern: str, limit: int = _MAX_SITEMAP_CANDIDATES
-) -> list[str]:
-    """Fetch ``page_url``, extract matching ``<a href>`` URLs from
-    its HTML, return up to ``limit`` of them.
+def _page_links(html: str, page_url: str, final_url: str, pattern: str | None) -> list[Candidate]:
+    """The article links on a fetched listing page, as candidates. With
+    a link pattern, the links under it (``_extract_links_from_html``),
+    undated and untitled, passing ``url_ok`` as the owner's choice;
+    without, the page's repeating list of posts (``listing_links``),
+    each with its card's title and date, passing ``url_ok``. CPU-bound
+    (an HTML parse and a URL test per link), so ``_discover_page_links``
+    runs it in a thread."""
+    if pattern:
+        return [
+            Candidate(link, None, None)
+            for link in _extract_links_from_html(html, page_url, pattern)
+            if url_ok(link, page_url, owner_pattern=True)
+        ]
+    # Resolve against where the page ended up (``/news`` redirecting to
+    # ``/news/`` changes what a relative link means), unless it
+    # redirected off the site.
+    return listing_links(html, final_url if same_site(final_url, page_url) else page_url)
 
-    ``fetch_html`` enforces the URL safety check (denied hosts,
+
+async def _discover_page_links(
+    page_url: str,
+    pattern: str | None,
+    limit: int = _MAX_SITEMAP_CANDIDATES,
+    *,
+    headers: dict | None = None,
+    raise_errors: bool = False,
+) -> list[Candidate]:
+    """Fetch ``page_url`` and return up to ``limit`` of its article
+    links (see ``_page_links``).
+
+    ``fetch_html_checked`` enforces the URL safety check (denied hosts,
     private network ranges), so this layer inherits the SSRF
     guard for free — every link returned here is reachable +
     not on a private network.
+
+    The page is the feed's own address, so with ``raise_errors`` its
+    failures raise, any HTTP error included (a 404 is ``[not found]``);
+    without, it gives ``[]``.
     """
-    html = await fetch_html(page_url)
-    if html is None:
+    try:
+        fetched = await fetch_html_checked(
+            page_url, custom_headers=headers, return_final_url=True, raise_for_status=True
+        )
+    except httpx.HTTPError as exc:
+        if raise_errors:
+            raise
+        logger.debug("generic_scrape: %s: listing page fetch failed: %s", page_url, exc)
         return []
-    return _extract_links_from_html(html, page_url, pattern)[:limit]
+    if fetched is None:
+        return []
+    html, final_url = fetched
+    links = await run_in_thread(_page_links, html, page_url, final_url, pattern)
+    return links[:limit]
+
+
+async def control_serves(url: str, headers: dict | None = None) -> bool | None:
+    """Read ``url`` as a control page (``GenericScrapePlugin._settle_refusals``,
+    and the Add preview's same step, ``app.source_preview``): True when
+    the site answered with a page, None when it is gone (404, 410: it
+    says nothing about us, so the next control is tried), False for
+    anything else (a refusal, another error status, a network error, an
+    answer with no page in it)."""
+    try:
+        body = await fetch_html_checked(url, custom_headers=headers, raise_for_status=True)
+    except httpx.HTTPStatusError as exc:
+        return None if exc.response.status_code in (404, 410) else False
+    except httpx.HTTPError:
+        return False
+    return body is not None
+
+
+class _Read(NamedTuple):
+    """What ``GenericScrapePlugin._extracted_urls`` keeps for a page."""
+
+    # The site answered with a page (HTML) when it was read, whether it
+    # was kept, too old, not an article or over the undated cap: it can
+    # show that the site serves us (``_settle_refusals``). False for a
+    # page that was gone, wasn't HTML, kept failing or refused everyone.
+    served: bool = False
+    # Read in a poll whose candidates the owner never chose (see
+    # ``GenericScrapePlugin.fetch``).
+    unvouched: bool = False
+
+
+def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[str], bool]:
+    """Whether an undated candidate of ``plan`` is old backlog
+    (``GenericScrapePlugin._cap_undated``). It depends on what orders
+    the list:
+
+    - A listing page (``plan.mode == "page"``) is in publication order,
+      newest first, so a page listed below a stored story is older than
+      it: backlog.
+    - A sitemap is ordered by ``<lastmod>``, which moves a stored story
+      up whenever it is edited, so that order says nothing about age. A
+      page last modified before ``backlog_before`` (the line
+      ``ingest_rules`` draws for dated stories on a later poll) was
+      published before it: backlog. A first fetch (``backlog_before``
+      None) keeps the newest pages whatever their age.
+    - A sitemap page with no ``<lastmod>`` keeps the sitemap's own order,
+      the only one there is, so the listing page's rule applies: listed
+      below a stored story is backlog. That is its place in the sitemap
+      documents (``Candidate.place``), not in the candidates, whose date
+      order puts every undated entry after every dated one.
+    """
+    fresh = {c.url for c in plan.fresh}
+    modified = {c.url: c.modified for c in plan.candidates}
+    # Where the site listed each candidate: a sitemap entry's place, else
+    # its place in the list (a listing page's cards are in page order).
+    place = {c.url: i if c.place is None else c.place for i, c in enumerate(plan.candidates)}
+    first_stored = min((place[c.url] for c in plan.candidates if c.url not in fresh), default=None)
+
+    def backlog(url: str) -> bool:
+        changed = modified.get(url)
+        if plan.mode == "page" or changed is None:
+            return first_stored is not None and place.get(url, 0) > first_stored
+        return backlog_before is not None and changed < backlog_before
+
+    return backlog
 
 
 class GenericScrapePlugin(SourcePlugin):
@@ -364,6 +790,10 @@ class GenericScrapePlugin(SourcePlugin):
     Construction mirrors ``DynamicYouTubePlugin`` — see that class for
     the rationale on mirroring the row's fields onto ``self``.
     """
+
+    # ``fetch`` takes ``known_urls`` and ``max_undated`` (see
+    # ``SourcePlugin.takes_ingest_hints``).
+    takes_ingest_hints = True
 
     def __init__(self, source_row: Source) -> None:
         self._source_row = source_row
@@ -376,22 +806,20 @@ class GenericScrapePlugin(SourcePlugin):
         # The address this instance fetches (see ``SourcePlugin.fetch_target``).
         self.fetch_target = row_fetch_target(source_row)
         # Optional direct sitemap URL. When set, the plugin skips
-        # trafilatura's homepage-based sitemap discovery (which
-        # doesn't work on every site — e.g. theprogress.com's
-        # sitemap_index has 1100+ cross-domain entries that all
-        # 404) and instead parses the user-specified URL directly
-        # with ``app.feed_autodiscovery.discover_sitemap_urls``. Same code
-        # path, same SSRF guard, same dedup; just a more specific
-        # entry point. None falls back to the original behavior
-        # so old rows aren't affected by the migration.
+        # robots.txt and the guessed sitemap paths (which don't work
+        # on every site — e.g. theprogress.com's sitemap_index has
+        # 1100+ cross-domain entries that all 404) and reads the
+        # user-specified sitemap first. Same code path, same SSRF
+        # guard, same dedup; just a more specific entry point. None
+        # falls back to the original behavior so old rows aren't
+        # affected by the migration.
         self.sitemap_url: Optional[str] = getattr(source_row, "sitemap_url", None)
         # Optional path-prefix for the page_links strategy. When
-        # set, the plugin tries sitemap discovery first, and if
-        # that returns zero candidates, falls through to
-        # fetching ``self.url`` and extracting ``<a href>`` URLs
-        # matching this prefix. Designed for sites that don't
-        # publish a sitemap at all (e.g. ollama.com) but DO
-        # expose a "list of recent items" page with stable URL
+        # set, only links (and sitemap entries) under this prefix
+        # are candidates, and the listing page is read with a plain
+        # prefix filter instead of ``listing_links``. Designed for
+        # sites that don't publish a sitemap at all (e.g. ollama.com)
+        # but DO expose a "list of recent items" page with stable URL
         # shapes (``/library/<model>``, ``/blog/<slug>``, etc).
         # gettattr with a default preserves pre-migration rows.
         self.link_pattern: Optional[str] = getattr(source_row, "link_pattern", None)
@@ -399,18 +827,17 @@ class GenericScrapePlugin(SourcePlugin):
         # User-Agent for sites that block default UAs, or an
         # Authorization header for paywalled content). Stored on
         # the Source row via ``add_source`` / ``update_source``;
-        # forwarded to ``fetch_html`` on every candidate URL
-        # extraction. ``None`` (or empty dict) means "use default
-        # headers only" — the pre-B4 behavior.
+        # forwarded to every request this feed makes: robots.txt,
+        # sitemaps, the listing page and each candidate URL.
+        # ``None`` (or empty dict) means "use default headers only" —
+        # the pre-B4 behavior.
         self.custom_headers: dict | None = getattr(source_row, "custom_headers", None)
         # In-process cache of URLs we've already attempted extraction
         # for — see the module docstring for why this instance
-        # persists across polls. Resets on backend restart, which
-        # just means one extra pass over already-inserted URLs (the
-        # entries table's URL-uniqueness constraint is the real dedup
-        # backstop regardless — on_conflict_do_nothing in the
-        # scheduler's insert path silently no-ops a re-attempt),
-        # not a correctness issue.
+        # persists across polls. Resets on backend restart; stored
+        # pages are skipped through ``known_urls`` anyway, so a restart
+        # only means one extra pass over pages that were fetched but
+        # not kept (not articles, too old, over the undated cap).
         #
         # Slice 27: bounded via ``OrderedDict`` with FIFO eviction at
         # ``_MAX_EXTRACTED_URLS``. Without the bound, a source with a
@@ -422,46 +849,121 @@ class GenericScrapePlugin(SourcePlugin):
         # FIFO cap gives a worst-case fixed footprint; eviction
         # just means a previously-seen URL gets re-attempted, which
         # the entries-table UNIQUE constraint silently no-ops.
-        self._extracted_urls: "OrderedDict[str, None]" = OrderedDict()
+        self._extracted_urls: "OrderedDict[str, _Read]" = OrderedDict()
+        # Consecutive failed polls per page whose fetch failed in a way
+        # that passes (see ``_page_failed``); bounded FIFO.
+        self._page_failures: "OrderedDict[str, int]" = OrderedDict()
+        # Pages a poll left for a later one (refused, failed in a way that
+        # passes, or read without the owner's word) while they weren't
+        # backlog. Their next read keeps that verdict (see ``fetch``);
+        # bounded FIFO.
+        self._deferred_new: "OrderedDict[str, None]" = OrderedDict()
 
-    def _mark_extracted(self, url: str) -> None:
+    def _mark_extracted(self, url: str, *, served: bool = False, unvouched: bool = False) -> None:
         """Add ``url`` to the seen-set, evicting the oldest entry if
         the cap is exceeded. ``OrderedDict.popitem(last=False)`` is
         O(1) and returns FIFO order.
+
+        ``served``: the site answered with a page (``_Read.served``).
+        ``unvouched``: the page was read in a poll whose candidates the
+        owner never chose (see ``fetch``), so ``_seen`` lets a poll that
+        has the owner's word read it once more.
         """
         # ``setdefault`` would also work but ``__setitem__`` is faster
         # and we don't need the existing-value semantics.
-        self._extracted_urls[url] = None
+        self._extracted_urls[url] = _Read(served, unvouched)
+        self._page_failures.pop(url, None)
+        if not unvouched:
+            self._deferred_new.pop(url, None)
         while len(self._extracted_urls) > _MAX_EXTRACTED_URLS:
             self._extracted_urls.popitem(last=False)
 
-    async def fetch(self) -> list[dict]:
-        # If the row carries an explicit sitemap_url, use it
-        # directly — ``app.feed_autodiscovery.discover_sitemap_urls`` will
-        # parse it as a sitemap (returning the article URLs) when
-        # given a direct sitemap URL, but it tries to *find* the
-        # sitemap first when given a homepage URL, which is
-        # fragile (e.g. theprogress.com's sitemap_index is
-        # 1.1MB of cross-domain entries that all 404). Letting
-        # the user point at a known-good sitemap URL side-steps
-        # the discovery heuristic entirely.
-        sitemap_input = self.sitemap_url or self.url
-        candidates = await _section_candidates(sitemap_input, self.url, _MAX_SITEMAP_CANDIDATES)
-        # Fall back to the page_links strategy when:
-        #   1. sitemap discovery returned nothing
-        #   2. AND the user supplied a link_pattern on the row
-        # The plugin doesn't page_links-only by design — sitemap
-        # discovery is still the primary path because it's
-        # robust (the sitemap crawler handles sitemap
-        # indexes, news sitemaps, gzip, etc.). page_links is
-        # the "no sitemap at all" escape hatch.
-        if not candidates and self.link_pattern:
-            candidates = await _discover_page_links(
-                self.url, self.link_pattern, limit=_MAX_SITEMAP_CANDIDATES
+    def _seen(self, url: str, owner_configured: bool) -> bool:
+        """Whether this poll skips ``url`` as already read: it is marked,
+        unless it was marked ``unvouched`` and this poll's candidates
+        have the owner's word (``owner_configured``)."""
+        if url not in self._extracted_urls:
+            return False
+        return not (owner_configured and self._extracted_urls[url].unvouched)
+
+    def _page_failed(self, url: str, exc: BaseException) -> None:
+        """A page's fetch failed in a way that passes (a timeout, a
+        network error, a 5xx). It stays unmarked, so the next poll asks
+        for it again, until it has failed ``_MAX_PAGE_FAILURES`` polls in
+        a row: then it is marked like a page that was read, so a page
+        that never answers can't take a slot of every poll."""
+        failures = self._page_failures.pop(url, 0) + 1
+        if failures >= _MAX_PAGE_FAILURES:
+            logger.info(
+                "generic_scrape: %s: %s failed %d checks in a row (%s); skipping it",
+                self.name, url, failures, exc,
             )
-        batch: list[str] = []
-        for url in candidates:
-            if url in self._extracted_urls:
+            self._mark_extracted(url)
+            return
+        logger.debug("generic_scrape: %s: %s failed (%s); asking again next check", self.name, url, exc)
+        self._page_failures[url] = failures
+        while len(self._page_failures) > _MAX_PAGE_FAILURE_URLS:
+            self._page_failures.popitem(last=False)
+
+    async def fetch(
+        self,
+        *,
+        known_urls: KnownUrls | None = None,
+        max_undated: int | None = None,
+        backlog_before: dt.datetime | None = None,
+    ) -> list[dict]:
+        """One poll: plan the candidates (``plan_candidates``), fetch
+        and score up to ``_MAX_NEW_PER_POLL`` new ones, and return the
+        articles, newest candidate first.
+
+        ``known_urls``, ``max_undated`` and ``backlog_before`` come from
+        ``scheduler._ingest`` (``takes_ingest_hints``). Called without
+        them, nothing counts as stored, the undated cap is
+        ``ingest.max_undated_per_poll``'s default, and the poll is read
+        as a first fetch (see ``_cap_undated``).
+
+        Raises when the feed can't read its list of articles (see
+        ``plan_candidates``) and when the site refuses every page this
+        poll asked for (see ``_settle_refusals``). A poll whose
+        candidates are all stored or already tried returns ``[]``: the
+        list is there, it just has nothing new.
+        """
+        # If the row carries an explicit sitemap_url, it is read first
+        # and directly — finding the sitemap from a homepage URL
+        # (robots.txt, guessed paths) is fragile (e.g. theprogress.com's
+        # sitemap_index is 1.1MB of cross-domain entries that all 404).
+        # Letting the user point at a known-good sitemap URL side-steps
+        # the discovery heuristic entirely.
+        plan = await plan_candidates(
+            self.url,
+            self.sitemap_url,
+            self.link_pattern,
+            self.custom_headers,
+            known_urls,
+            raise_errors=True,
+        )
+        # The owner's choice is what makes a page an article for
+        # ``score_page``, but only when the candidates came from it: the
+        # link pattern filters both reads, while a ``sitemap_url`` that
+        # listed nothing leaves the home page's links, which the owner
+        # never chose.
+        owner_configured = bool(self.link_pattern) or (
+            bool(self.sitemap_url) and plan.mode == "sitemap"
+        )
+        # So a page the home page's links brought in a poll like that is
+        # marked as read without the owner's word (``unvouched``). When
+        # the owner's sitemap lists it on a later poll, it is read once
+        # more: a sitemap that failed for one poll (a 503, a timeout, an
+        # empty answer while it rebuilds) mustn't lose the pages it lists.
+        unvouched = bool(self.sitemap_url) and not owner_configured
+        if unvouched:
+            logger.info(
+                "generic_scrape: %s: its sitemap_url %s gave no pages; read %s instead",
+                self.name, self.sitemap_url, self.url,
+            )
+        batch: list[Candidate] = []
+        for candidate in plan.fresh:
+            if self._seen(candidate.url, owner_configured):
                 continue
             if len(batch) >= _MAX_NEW_PER_POLL:
                 # Leave the rest for the next poll — see
@@ -469,7 +971,14 @@ class GenericScrapePlugin(SourcePlugin):
                 # extracted, so they're candidates again next cycle
                 # instead of being skipped forever.
                 break
-            batch.append(url)
+            batch.append(candidate)
+        # A page an earlier poll left for later while it was new is still
+        # new: a story stored in the meantime and listed above it doesn't
+        # make it backlog (``_cap_undated``).
+        new_before = {c.url for c in batch if c.url in self._deferred_new}
+        backlog = _backlog_rule(plan, backlog_before)
+        # The pages the site answered with a page (``_extract_one``).
+        served: set[str] = set()
 
         # Fetch the batch concurrently (bounded — see
         # _FETCH_CONCURRENCY) instead of one at a time: a source
@@ -479,25 +988,44 @@ class GenericScrapePlugin(SourcePlugin):
         # and extraction is independent of every other's).
         sem = asyncio.Semaphore(_FETCH_CONCURRENCY)
 
-        async def _bounded_extract(url: str) -> dict | None:
+        async def _bounded_extract(candidate: Candidate) -> dict | None:
             async with sem:
                 # B4 fix: pass custom_headers through to _extract_one
                 # so user-supplied headers (e.g. a custom User-Agent
                 # or Authorization) are actually used by the HTTP
                 # fetch. Previously the headers were stored on the
                 # Source row but never passed to fetch_html.
-                return await _extract_one(url, custom_headers=self.custom_headers)
+                return await _extract_one(
+                    candidate.url,
+                    custom_headers=self.custom_headers,
+                    owner_configured=owner_configured,
+                    listed_date=candidate.published,
+                    served=served,
+                )
 
         results = await asyncio.gather(
-            *(_bounded_extract(url) for url in batch), return_exceptions=True,
+            *(_bounded_extract(candidate) for candidate in batch), return_exceptions=True,
         )
 
         items: list[dict] = []
-        for url, result in zip(batch, results):
+        refused: dict[str, FetchRefusedError] = {}
+        for candidate, result in zip(batch, results, strict=True):
+            url = candidate.url
+            if isinstance(result, FetchRefusedError):
+                # Not marked: a later poll (for example after Read as
+                # Safari) asks for the page again.
+                refused[url] = result
+                continue
+            if isinstance(result, httpx.HTTPError):
+                # A timeout, a network error or a 5xx: it passes, so
+                # the page is asked for again (``_page_failed``). It
+                # never fails the poll.
+                self._page_failed(url, result)
+                continue
             # Use the bounded helper (FIFO eviction at
             # ``_MAX_EXTRACTED_URLS``) instead of ``.add()`` to keep
             # the in-memory set's footprint fixed.
-            self._mark_extracted(url)
+            self._mark_extracted(url, served=url in served, unvouched=unvouched)
             if isinstance(result, BaseException):
                 logger.debug(
                     "generic_scrape: extraction failed for %s: %s", url, result,
@@ -505,7 +1033,111 @@ class GenericScrapePlugin(SourcePlugin):
                 continue
             if result is not None and not _too_old(result):
                 items.append(result)
-        return items
+        # The pages this poll leaves for a later one (refused, failed in a
+        # way that passes, or read without the owner's word) while they
+        # are new stay new until they are read for good.
+        for candidate in batch:
+            read = self._extracted_urls.get(candidate.url)
+            if (read is None or read.unvouched) and not backlog(candidate.url):
+                self._deferred_new[candidate.url] = None
+        while len(self._deferred_new) > _MAX_PAGE_FAILURE_URLS:
+            self._deferred_new.popitem(last=False)
+        if batch and len(refused) == len(batch):
+            await self._settle_refusals(refused, plan)
+        return self._cap_undated(items, backlog, max_undated, new_before)
+
+    async def _settle_refusals(self, refused: dict[str, FetchRefusedError], plan: Plan) -> None:
+        """Every page this poll asked for was refused. A site that
+        serves its sitemap but refuses its article pages is common (a
+        challenge in front of the pages), and so is a members-only page
+        among public ones. To tell them apart, fetch a page of the site
+        outside the batch as a control. The controls are the stored
+        stories, newest first (each loaded as an article before), then
+        the pages this feed read and didn't keep that answered with a
+        page (too old, not an article, over the undated cap: a site that
+        posts rarely has stored nothing), then the candidates not tried
+        yet. A page that was gone, wasn't a page, kept failing or was a
+        members-only page skipped on an earlier poll is never one: none
+        of those can say whether the site serves us.
+
+        - The control serves a page: the site serves us, and these pages
+          refuse everyone. The 401-403 ones are marked, so a lone
+          members-only page can't fail every poll and stop the feed. A
+          429 stays unmarked: a rate limit passes.
+        - The control is gone (404, 410): it says nothing about us, so
+          the next candidate is tried, up to ``_MAX_CONTROLS``.
+        - Anything else, or no control at all (a new feed's first poll):
+          the site doesn't serve us. A refusal, a 5xx (a challenge page
+          often answers 503), a network error, or an answer with no
+          page in it (not HTML, empty). Raise the refusal, so the feed
+          reads ``[blocked]`` (Read as Safari), or ``[http error]`` for
+          a 429. The pages stay unmarked, so the next poll asks for them
+          again.
+        """
+        served: str | None = None
+        fresh = {c.url for c in plan.fresh}
+        others = [c.url for c in plan.fresh if c.url not in refused]
+        read = self._extracted_urls
+        controls = (
+            [c.url for c in plan.candidates if c.url not in fresh]
+            + [url for url in others if url in read and read[url].served]
+            + [url for url in others if url not in read and url not in self._page_failures]
+        )
+        for control in controls[:_MAX_CONTROLS]:
+            answer = await control_serves(control, self.custom_headers)
+            if answer is None:
+                continue
+            if answer:
+                served = control
+            break
+        if served is None:
+            exc = most_telling_error(refused.values())
+            assert exc is not None  # ``refused`` is never empty here
+            raise exc
+        logger.info(
+            "generic_scrape: %s: %d page(s) refused while %s loads; skipping them",
+            self.name, len(refused), served,
+        )
+        for url, exc in refused.items():
+            if exc.response.status_code != 429:
+                self._mark_extracted(url)
+
+    def _cap_undated(
+        self,
+        items: list[dict],
+        backlog: Callable[[str], bool],
+        max_undated: int | None,
+        new_before: set[str],
+    ) -> list[dict]:
+        """At most ``max_undated`` undated pages per poll (D12), and none
+        that are old backlog (``_backlog_rule``). This is the rule
+        ``ingest_rules`` applies to every other feed type, which it can't
+        apply to this plugin's items because they never include stored
+        URLs. An undated page here is one whose page and list both gave
+        no publication date.
+
+        A page in ``new_before`` was left for this poll by an earlier one
+        (refused, failed in a way that passes, or read without the
+        owner's word) while it wasn't backlog, so it isn't now: it would
+        have come in then, before the stories stored since.
+
+        Every page dropped here stays marked extracted: it was read and
+        passed over, and fetching it again every poll would only drop it
+        again."""
+        cap = _DEFAULT_MAX_UNDATED if max_undated is None else max_undated
+        kept: list[dict] = []
+        undated = dropped = 0
+        for item in items:
+            if item.get("published_at") is not None:
+                kept.append(item)
+            elif undated < cap and (item["url"] in new_before or not backlog(item["url"])):
+                kept.append(item)
+                undated += 1
+            else:
+                dropped += 1
+        if dropped:
+            logger.info("generic_scrape: %s: skipped %d undated page(s)", self.name, dropped)
+        return kept
 
     # normalize() is inherited from SourcePlugin's default
     # (validate_required) — the dict shape _extract_one returns
