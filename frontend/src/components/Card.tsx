@@ -20,7 +20,7 @@
 
 import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } from 'react'
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
-import { noteStoryOpened, recordBatched, recordImmediate } from '../lib/interactions'
+import { noteStoryOpened, recordImmediate } from '../lib/interactions'
 import { sourceLabel } from '../lib/labels'
 import { useSourceLabels } from '../lib/useSourceLabels'
 import { SourceIcon } from './SourceIcon'
@@ -476,16 +476,6 @@ export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActi
       cancelled = true
     }
   }, [relatedExpanded, entry.id, related, relatedError])
-
-  // Record one ``view`` event per (entry, session). ``recordBatched``
-  // dedups internally so even if React strict-mode mounts the card
-  // twice in dev, only one event lands. Effect fires on mount and
-  // when the entry id changes; no dependency on entry itself — we
-  // only care that the card is on screen. (PR3c moves the ``view`` to
-  // the moment a card is seen on scroll.)
-  useEffect(() => {
-    recordBatched({ entry_id: entry.id, type: 'view' })
-  }, [entry.id])
 
   const clearLongPress = () => {
     if (longPressTimer.current != null) {

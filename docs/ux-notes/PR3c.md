@@ -1,0 +1,407 @@
+# PR3c: Seen on scroll (frontend track)
+
+Stacked on PR3b (`claude/ux-pr3b`, #45, in its re-check), built as if it
+were merged. PR3b and PR3c deploy together (D33).
+
+## Plan (written before the code)
+
+The unit is "plan first". The spec's line numbers are from main 4be8766,
+before PR1r through PR3b, so every anchor was found again by name on
+`stack-pr3c` at 45aac1e.
+
+### Anchors
+
+| Spec anchor | Where it is now | Holds? |
+|---|---|---|
+| Card's stable ref callback (Card.tsx:326-335) | `stableCardRef` in `CardInner`, passes `(el, prev)` | yes: runs only on attach and detach |
+| Card's on-mount `view` (Card.tsx:499-506) | the `recordBatched({type: 'view'})` effect in `CardInner` | yes, goes |
+| Column's `setCardRef` (Column.tsx:226-232) | `setCardRef` in `ColumnInner`, with PR3b's "PR3c registers ... here" note | yes |
+| the marker and its observer | `marker` state (`ref={setMarker}` on both forms of `[data-caught-up]`) and the hold observer | yes |
+| `_columnPropsEqual` / slice 21 | Column.tsx, `backend/tests/test_slice21_column_memo.py` | yes |
+| App's `addSeenMarks` | App.tsx, "the one way seen marks are written" | yes |
+| `useFeedOrder.setHold` | App passes `onHoldChange` → `setHold` | yes; PR3c needs no change there (the end rows already stay put while held) |
+| PR2b's `registerBeforeFlush` | `usePreferences().registerBeforeFlush`; `leave()` and `flushPending()` run it before reading the queue | yes |
+| phone scroller in state (PR1b) | `phoneScroller`, set through the phone Column's `scrollerRef` (undefined at md+) | yes |
+| the phone `<main>` stays mounted at md+ | `main.md:hidden`, phone Column `key={phoneCol.key}` | yes |
+| `drawerOpen`, Settings, ShortcutsSheet, TabsEditor | `drawerOpen`, `settingsOpen`, `shortcutsOpen`, `tabsEditorOpen` in App | yes |
+| the always-mounted Drawer with `aria-modal` | Drawer.tsx:281 | yes (so `modalOpen` is App's boolean, not a selector) |
+
+### Design
+
+**`lib/seen.ts` (pure, no imports, timers injected).**
+- `SEEN_DWELL_MS = 1000`, `SEEN_BATCH_MS = 300`, `SEEN_THRESHOLDS` (0,
+  0.1 … 1).
+- `createSeenTracker(deps)`: the registry and the rules, with no DOM.
+  - The registry: `Map<entryId, Element>` and the marker element. It
+    outlives observers. `card(id, el | null, prev?)` and
+    `marker(el | null, prev?)` always edit it, and call `observe` /
+    `unobserve` only while an observer is attached. A detach passes the
+    element going away, so a stale detach can't drop a newer element.
+  - `attach(observer)` observes every registered element (and the
+    marker); `detach(observer)` disconnects and clears every timer and
+    every card's dwell state. `handle(entries, from)` ignores entries
+    from an observer that is no longer attached (IntersectionObserver may
+    deliver queued entries after `disconnect`).
+  - Qualifying: half visible (`isIntersecting` and
+    `intersectionRect.height ≥ 0.5 × min(card, root)`) for
+    `SEEN_DWELL_MS` straight; dropping under half clears the timer.
+  - Seen: a qualified card leaving through the top (`!isIntersecting`,
+    `boundingClientRect.bottom ≤ rootBounds.top`), counted only when
+    `target.isConnected`, `boundingClientRect.height > 0` and
+    `rootBounds.height > 0`. Leaving through the bottom doesn't count.
+  - End rule: the marker half visible for `SEEN_DWELL_MS` turns it on:
+    every qualified card on screen is seen, and so is each card that
+    qualifies while it stays on. The marker dropping under half (or a new
+    marker element) turns it off.
+  - Pauses: a dwell timer (a card's or the marker's) that fires while
+    `pageHidden()` or `modalOpen()` is true restarts instead.
+  - `takeRecords()` handles the observer's pending entries at once (the
+    hide flush).
+  - `onSeen(ids)` once per batch of entries (one IntersectionObserver
+    callback, or the end rule), each id at most once per attach.
+- `createSeenBatch(deps)`: `markSeen`'s collector. `add(items)` keeps
+  them by id; the first add starts a `SEEN_BATCH_MS` timer that drains
+  everything collected in one call; `flush()` drains now.
+
+**`lib/useSeenObserver.ts` (React glue).**
+`useSeenObserver(root, {modalOpen, onSeen})`: one tracker per App (state),
+one IntersectionObserver per root (an effect on `root`), thresholds
+`SEEN_THRESHOLDS`. `modalOpen` and `onSeen` are read through refs. Returns
+a stable registry `{card, marker, takeRecords}`.
+
+**App.**
+- `useSeenObserver(isDesktop ? null : phoneScroller, {modalOpen, onSeen})`.
+- `modalOpen = drawerOpen || settingsOpen || shortcutsOpen ||
+  tabsEditorOpen`, with a marked place for PR5a's ActionSheet and PR8a's
+  TabSheet.
+- `onSeen(ids)`: each id is looked up in the shown phone tab's latest
+  partition (`latestPart(key).snapshot.cache`); one already seen
+  (`isSeen`, read through a ref) is skipped; the rest record `view`
+  (`recordBatched`) at that moment and go to the collector.
+- The collector (`createSeenBatch`, `SEEN_BATCH_MS`) drains into
+  `addSeenMarks`: one `addIds` per `seen:<category>` key per batch.
+- Flush on hide: `registerBeforeFlush(() => { seen.takeRecords();
+  batch.flush() })`, so a card that left the top just before the page hid
+  is in the keepalive PATCH.
+- Mark all flushes the collector first, so its Undo removes only what
+  Mark all added (a story seen on scroll stays seen).
+- Open marks keep bypassing the collector (`openEntry` → `addSeenMarks`).
+- The phone Column gets `trackSeen={phoneCol.key !== SAVED_KEY}` and
+  `seenRegistry={seen}`. The phone Column is keyed by tab, so `trackSeen`
+  never changes for a mounted one. Desktop Columns, SearchResults, the
+  desktop For You row and Brief get neither (open only, C2).
+
+**Column.** `trackSeen` (data prop, joins `_columnPropsEqual` and slice
+21) and `seenRegistry` (stable, ignored by the comparator like the
+callbacks; read through a ref). `setCardRef(id, track)`: attach registers
+when `track` (unseen group and `trackSeen`); detach always unregisters
+with the element going away. The marker registers from an effect on
+`[trackSeen, marker]`.
+
+**Card.** The on-mount `view` effect goes; `recordBatched` leaves its
+imports.
+
+### Tests
+
+- Unit `scripts/unit/seen.test.ts`: zero rects; a detached target; a
+  hidden page; `modalOpen` true; a closed always-mounted dialog that does
+  not pause; a root change; the end rule; plus qualify-then-exit, a
+  fling, an interrupted dwell, a tall card, leaving through the bottom,
+  stale entries from an old observer, `takeRecords`, the collector; and
+  the hook case (register, tear the observer down, recreate it, the card
+  is observed again) on the tracker the hook wraps.
+- pytest slice 21: `trackSeen` joins the comparator list.
+- Flows (clock installed in `before`, held, moved with `runFor`):
+  `flow-scroll-marks-seen`, `flow-view-on-seen`,
+  `flow-seen-flush-on-hide`, `flow-landscape-no-marks`, and the flung
+  case in `flow-caught-up`.
+- PR3b's flows and smoke states that read the unseen count with cards or
+  the marker on screen now race the dwell in real time. They get a held
+  clock where they need one (found by running every flow and state, not
+  guessed), so they keep testing PR3b's rules deterministically.
+
+### Risks checked in the plan
+
+- No `role="status"`, no `<section>`, no new sheet: smoke rules hold.
+- No new process, worker or port; IntersectionObserver on the main thread
+  with no library.
+- Desktop: no tracking, no `view` events from cards any more (spec: the
+  on-mount view goes; desktop is open only).
+
+## What changed
+
+On the phone, a story read on screen and scrolled off the top is used up,
+like an opened one: it stays where it is, the badge and the end row count
+it out, and its mark goes to `seen:<category>` in one PATCH per batch. The
+last cards on screen with the end row count once it has been there a
+second (the end rule), so a tab read to its end says "You're all caught
+up" and a tab flung through says "N not seen · Mark as read". The `view`
+event moves from drawing a card to that moment.
+
+- `frontend/src/lib/seen.ts` (new, pure, no imports): `SEEN_DWELL_MS`
+  (1000), `SEEN_BATCH_MS` (300), `SEEN_THRESHOLDS`;
+  `createSeenTracker(deps)` (the registry, the qualify / seen / end rules,
+  the pauses, `attach` / `detach` / `handle` / `takeRecords` /
+  `setCovered`); `createSeenBatch(deps)` (the collector).
+- `frontend/src/lib/useSeenObserver.ts` (new, React glue):
+  `useSeenObserver(root, {modalOpen, onSeen})` → a stable
+  `{card, marker, takeRecords}`. One tracker per App; one
+  IntersectionObserver per root (thresholds every tenth); covered while
+  the page is hidden or a sheet is open.
+- `frontend/src/App.tsx`:
+  - `modalOpen = drawerOpen || settingsOpen || shortcutsOpen ||
+    tabsEditorOpen`, with the place for PR5a's ActionSheet and PR8a's
+    TabSheet marked.
+  - `markSeen(ids)`: each id looked up in the phone tab's latest
+    partition; one already seen is skipped; the rest record `view`
+    (`recordBatched`) and go to the collector, which drains into
+    `addSeenMarks` (one `addIds` per `seen:<category>` key).
+  - `useSeenObserver(isDesktop ? null : phoneScroller, …)`.
+  - `registerBeforeFlush(() => { takeRecords(); flush() })`: the hide,
+    `pagehide`, `beforeunload` and the reload's flush write what is
+    collected first.
+  - `markColumnRead` (Mark all) flushes the collector first and counts
+    (and undoes) only the marks it added.
+  - The phone Column gets `trackSeen={phoneCol.key !== SAVED_KEY}` and
+    `seenRegistry`.
+- `frontend/src/components/Column.tsx`: `trackSeen` (data prop, in
+  `_columnPropsEqual`) and `seenRegistry` (stable, read through a ref,
+  ignored by the comparator like the callbacks). `setCardRef(id, track)`
+  registers an unseen card when `track`, and every detach unregisters with
+  the element going away; the marker (either form) registers from an
+  effect on `[trackSeen, marker]`.
+- `frontend/src/components/Card.tsx`: the on-mount `view` effect is gone.
+- `frontend/src/lib/interactions.ts`: the header says where views come
+  from now (comment only).
+- `backend/tests/test_slice21_column_memo.py`: `trackSeen` joins the
+  comparator list.
+- Tests and harness: `frontend/scripts/unit/seen.test.ts`; the flows and
+  smoke changes below; `frontend/scripts/iphone-audit/README.md`;
+  `docs/DEVICE_CHECKS.md` (Gate 1 refined phone-first, PR3c's lines under
+  Pending as `#<pr>`); `docs/ux-notes/PROGRESS.md`.
+
+## Deviations from the spec
+
+- **Covered dwells stop and start over** (beyond the spec's pause rule,
+  which is kept). The spec restarts a dwell timer that fires while the
+  page is hidden or `modalOpen` is true. On iOS a hidden page's timers are
+  frozen and fire late, just after the page is back, when it is no longer
+  hidden: a card on screen for a moment before the user left would
+  qualify. So the hook also tells the tracker when the list is covered
+  (`setCovered`: the page hidden, or a sheet open): every running dwell
+  stops, and the cards still half on screen start theirs over when it is
+  uncovered. `flow-seen-flush-on-hide` and two unit cases guard it.
+- **The marker joins the seen observer through Column's `marker` state**,
+  not through PR3b's hold observer: the end rule needs "half visible for
+  the dwell" on the 11-threshold observer, and the hold observer answers
+  only "above the screen or not". `useFeedOrder.setHold` and the hold
+  observer needed no change: the end rows already stay as drawn while the
+  marker is above the screen, so a count changed by a scroll mark moves
+  nothing.
+- **`trackSeen` is true for the phone Column whatever the width.** The
+  phone Column stays mounted, hidden, on a desktop; the registry keeps its
+  cards there so a turn back under 768px observes them again without a
+  remount (the spec's registry), and no observer runs on the desktop
+  (`root` null). The desktop Columns never get it.
+- **Ids are looked up in the phone tab's partition**
+  (`latestPart(key).snapshot.cache`), which also keeps Saved out a second
+  time (Saved has no partition), and covers a story a poll dropped.
+- **Mark all flushes the collector first**, and its toast counts what it
+  marked (`added`), not the partition's count a render old; with nothing
+  left to mark it starts the tab over with no toast. Not in the spec;
+  without it, a card seen on scroll just before Mark all was undone by
+  Mark all's Undo.
+- **PR3b's flows and smoke states that count unseen stories with cards
+  or the marker on screen now hold the page's clock.** Found by building
+  with `SEEN_DWELL_MS = 50` and running every flow and state: in real time
+  the end rule (or a scroll past) used their cards up after a step that
+  took over a second. Held: `caught-up`, `not-seen-row`, `earlier-open`
+  (smoke states), `flow-auto-append`, `flow-new-arrival-appends`,
+  `flow-arrival-batch-edge`, and `flow-caught-up` (rewritten, below).
+  `flow-h1-keepalive` queued its view from a card drawn on load; it now
+  waits twice the dwell in real time and scrolls a card off the top.
+- **`flow-caught-up` counts with the end rule.** Flung to its end (clock
+  held) it still reads "40 not seen"; after the dwell the k cards on
+  screen with the marker are used up, and the rest of the flow (two
+  opens, Mark as read, Undo, Earlier) runs with 40 − k, 38 − k and
+  "Earlier (2 + k)". k is read from the page (3 at 390×844).
+- **One flow beyond the spec's list:** `flow-saved-open-only` (Saved
+  scrolled through marks nothing and sends no view). Search and Brief
+  have no Column, so nothing there can register.
+- `flows.cjs` reads `SEEN_DWELL_MS` and `SEEN_BATCH_MS` from
+  `src/lib/seen.ts`, so a Gate 1 retune is one edit.
+
+## Tests
+
+- Unit `frontend/scripts/unit/seen.test.ts` (25 cases): the thresholds;
+  qualify then off the top; a fling; an interrupted dwell; a card taller
+  than the list (half of the list, not of itself); leaving through the
+  bottom; zero rects (display:none, a zero-height list); a detached
+  target; a hidden page; `modalOpen` true; a closed always-mounted dialog
+  that does not pause (a fake `document` holds an `aria-modal` element;
+  only App's boolean counts); covered and uncovered (a dwell the hide cut
+  in two starts over; a card and the marker that came on screen while
+  covered start theirs once uncovered); the end rule (every qualified
+  card on screen; one that qualifies while the marker stays; it stops
+  when the marker leaves; a new marker element starts over); seen once
+  per observer; one callback, one `onSeen`; a root change (disconnect,
+  timers and dwell gone, old entries dropped); a dwell under way when the
+  observer goes; the hook case (register, tear the observer down, a card
+  registered meanwhile, recreate it: both observed, and marks happen); a
+  late detach; `takeRecords`; the collector.
+- pytest `test_slice21_column_memo.py`: `[trackSeen]`.
+- New flows (390, the page's clock installed and held, moved with
+  `runFor`): `flow-scroll-marks-seen`, `flow-view-on-seen`,
+  `flow-seen-flush-on-hide`, `flow-saved-open-only`,
+  `flow-landscape-no-marks`. The README has each step.
+- Changed flows: `flow-caught-up` (the flung-card case and the end rule),
+  `flow-auto-append`, `flow-new-arrival-appends`,
+  `flow-arrival-batch-edge` (clock held), `flow-h1-keepalive` (its view
+  comes from a card seen on scroll). Smoke states `caught-up`,
+  `not-seen-row`, `earlier-open`: clock held from the tap on the tab.
+- Flow helpers: `holdClock`, `observersSettled` (a fresh
+  IntersectionObserver's first report comes in the same task as every
+  older one's, so the app's have run; no animation frame needed, which a
+  held clock never delivers), `listCards`, `scrollListBy`,
+  `scrollCardToTop`, `dwell`, `writeSeen`, `requestsSettled` (every
+  preference and interaction request answered, so a check that nothing
+  was written can follow; found when a mutant survived a negative check
+  that ran before its PATCH reached the route).
+
+## Verification
+
+Local loop on `stack-pr3c`, on `claude/ux-pr3b` at 45aac1e (fetched before
+the commit: it had not moved, and main doesn't hold PR3b yet), the
+frontend's `node_modules` linked in, Postgres 16 database
+`popping_test_f2`, `vite preview` on 127.0.0.1:4174.
+
+- `npm run lint`: 0 errors (the 4 react-refresh warnings main has).
+  `npm run build` (tsc, then vite): clean. `git diff --exit-code
+  package.json package-lock.json`: clean.
+- Unit tests (`node --experimental-strip-types --test
+  'scripts/unit/*.test.ts'`): 218 of 218 (`seen.test.ts`: 25).
+- Backend pytest, the whole suite: 1713 passed, 13 failed; the 13 are
+  exactly the container's DNS-only baseline (slice 21 with `[trackSeen]`,
+  slice 19 and the other tests that read frontend source pass).
+- Strict smoke (`--csp --strict`), every state and flow, on the final
+  build: 0 failures, 0 warnings (176 runs, 503 s). Run again after the
+  two last flow edits: one failure, `flow-fb-address-commits-on-leave`
+  ("expected 1 PATCH after Enter and a blur, saw 2"; a feed-editor flow
+  this unit doesn't touch, with the load average at 6 on 4 CPUs while
+  other sessions ran); run alone three times after: ok each time.
+- The same suite on a build with `SEEN_DWELL_MS = 50`: 0 failures (176
+  runs), after the fixes under "Flow determinism".
+- The PR3c flows and every flow and state this unit changed or that
+  leans on the read model (`flow-scroll-marks-seen`, `flow-view-on-seen`,
+  `flow-seen-flush-on-hide`, `flow-saved-open-only`,
+  `flow-landscape-no-marks`, `flow-caught-up`, `flow-auto-append`,
+  `flow-new-arrival-appends`, `flow-arrival-batch-edge`,
+  `flow-h1-keepalive`, `flow-open-marks-seen`,
+  `flow-return-after-10-min`, `flow-mark-all-read`, `flow-badge-cap`,
+  `flow-scroller-rotate`, and `caught-up`, `not-seen-row`, `earlier-open`
+  at 390 and 320): 21 runs, looped 5 times, 0 failures each time (79 to
+  87 s a loop); the two flows edited after that, 5 more times each: 0
+  failures.
+- The PR3c flows at `SEEN_DWELL_MS` 700 and 1500 (the Gate 1 retunes):
+  pass.
+- Mutation checks: 32 mutants (table below); 31 fail where expected, one
+  survives by design (a second guard behind it), and its double mutant
+  fails.
+- Security checklist: no route, fetch or server-side read changes. Scroll
+  marks go through PR2b's PATCH (`addIds`) under PR2a's allowlisted
+  `seen:` prefix, like an open; views go through the existing interaction
+  batch.
+- Self-review on the unit's three lenses before the commit: the
+  observer's lifecycle (tab switch, rotation, a root not yet in state,
+  React's effect order, stale entries after `disconnect`), visibility and
+  the flush order (the leave flush runs `takeRecords` and the collector
+  before reading the queue; dwells stop while covered), and flow
+  determinism (held clocks, `observersSettled`, `requestsSettled`, the
+  50 ms and retune runs). The unit's review agents run after this.
+- WebKit results come only from CI.
+
+### Mutation checks (test → broken line → failing rule)
+
+Each was a scratch edit, then a rebuild, `--only` on the flows (or the
+unit file, or the pytest), and a restore compared byte for byte. The last
+full run was on the final code; the two flows edited after it were run
+again against the mutants that reach them (F1-F4, F7, F11, F13, F15).
+Unit cases are by their place in `seen.test.ts`.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| unit | `leftThroughTop` without `isConnected` | 8 (a detached target) |
+| unit | `leftThroughTop` without the zero-height guards | 7 (zero rects) |
+| unit | no pause check when a card's dwell fires | 9, 10 (hidden page, sheet open) |
+| unit | the pause read from `[aria-modal="true"]` | 10, 13 (the closed always-mounted dialog) |
+| unit | `detach` keeps the dwell | 19 (a root change) |
+| unit | `attach` observes nothing registered | 19, 21 (the hook case) |
+| unit | no end rule | 12, 14, 15, 16, 23 |
+| unit | half of the card, not of min(card, list) | 5 (a tall card; strengthened after it first survived: 1500px showing 800 passed both ways, 2000px doesn't) |
+| unit | entries from a detached observer taken | 19 |
+| unit | leaving through the bottom counts | 6 |
+| unit | the batch waits from the last story (debounce) | 25 |
+| unit | a card qualifying under the end rule waits | 15 |
+| unit | `setCovered` does nothing | 11, 12 |
+| unit | a dwell starts while covered | 12 |
+| unit | uncovering restarts no card | 11, 12 |
+| `flow-scroll-marks-seen`, `flow-caught-up` | `markSeen` never adds to the collector | SCROLL-SEEN: "scrolling [602,603,7001,7002] off the top sent []"; CAUGHT-UP: the end row reads "40 not seen", expected "37 not seen" |
+| `flow-scroll-marks-seen` | `modalOpen` always false | SCROLL-SEEN: "a card scrolled off straight after the Menu, which was open through the dwell, was marked: [601]" |
+| `flow-scroll-marks-seen` | `modalOpen` also true while `[aria-modal="true"]` exists (the closed Drawer) | SCROLL-SEEN: "scrolling [602,603,7001,7002] off the top sent []" |
+| `flow-scroll-marks-seen`, `flow-caught-up` | a card qualifies on sight (no dwell) | SCROLL-SEEN: 601 marked, the fling's cards marked; CAUGHT-UP: "34 not seen", expected "37 not seen" |
+| `flow-view-on-seen` | Card's on-mount `view` back | VIEW-ON-SEEN: "views sent for cards only drawn: [601,602,603,7001,…]" |
+| `flow-view-on-seen` | `markSeen` records no `view` | VIEW-ON-SEEN: "story 601 was seen on scroll and no view was sent" |
+| `flow-seen-flush-on-hide` | the before-flush does nothing | SEEN-HIDE: "hiding right after a card left the top sent no keepalive PATCH of seen:nhl"; "story 601 … never reached the store" |
+| `flow-seen-flush-on-hide` | the hook never covers the list | SEEN-HIDE: "[7004,7005,7006,7007] counted on a dwell the hide cut in two" (it first survived: the check ran before the PATCH reached the route; `requestsSettled` came from that) |
+| `flow-landscape-no-marks` | a new observer doesn't observe the registered cards | LANDSCAPE: "back at 390, two cards scrolled off the top sent []" |
+| `flow-landscape-no-marks` | the phone list kept as the root on the desktop, and the zero-rect guards gone | LANDSCAPE: "sideways, a seen: PATCH went: … add [601,602,603]" |
+| `flow-caught-up` | no end rule | CAUGHT-UP: "the end row reads "40 not seen · Mark as read", expected "37 not seen · Mark as read"" |
+| `flow-caught-up` | the marker never registers | CAUGHT-UP: the same |
+| `flow-scroll-marks-seen` | Mark all without the collector flush | SCROLL-SEEN: "no "Marked 31 as read" toast"; "Mark all's Undo took back story 7012, seen on scroll before it" |
+| `flow-scroll-marks-seen` | Column registers no card | SCROLL-SEEN: "scrolling [602,603,7001,7002] off the top sent []" |
+| `flow-saved-open-only` | `trackSeen` on Saved, alone | **survives**: `markSeen` looks ids up in the phone tab's partition and Saved has none, a second guard |
+| `flow-saved-open-only` | `trackSeen` on Saved, and a lookup that finds Saved's stories | SAVED-OPEN-ONLY: "scrolling Saved marked stories: … add [7001,7002] …"; "scrolling Saved sent views" |
+| pytest | the comparator ignores `trackSeen` | `test_column_comparator_checks_prop[trackSeen]` |
+
+### Flow determinism
+
+PR3c makes time on screen matter on the phone, so every flow and state
+was also run against a build with `SEEN_DWELL_MS = 50`: a flow that passes
+there doesn't depend on how long its steps take. The first such run
+found the PR3b flows and states listed under Deviations; they hold the
+clock now. The PR3c flows were also run at 700 and 1500 (the Gate 1
+retunes; `flows.cjs` reads the constant from `seen.ts`). Two steps were
+tied to 1000 and are fixed: the 50 ms run failed the cut-in-two step
+(600 / 500 ms, now scaled from the constant), and the 1500 run failed the
+fling (it counted on `writeSeen`'s 1.45 s as a dwell; it now runs an
+explicit `dwell` first).
+
+## Open items for later units
+
+- PR5a: the card's ActionSheet open state joins `modalOpen` (App, the
+  marked place). A card hidden with the left swipe leaves the partition,
+  unmounts and unregisters; nothing else to do.
+- PR8a: the TabSheet joins `modalOpen`. Custom tabs are phone Columns:
+  `trackSeen` stays `key !== SAVED_KEY`, and their stories are looked up in
+  their own partition.
+- PR6b: a pull moves the list down from its top, so nothing leaves
+  through the top; `resetSnapshot()` on a check remounts what changes
+  group and re-registers it.
+- Gate 1: a retune of `SEEN_DWELL_MS` is one edit in `src/lib/seen.ts`;
+  the flows read it.
+- Known limit: a `view` recorded by the hide's `takeRecords` waits in the
+  interaction queue until the page is back (the interaction module's own
+  hide handler runs before the preferences' leave flush). Views are
+  advisory; the seen mark itself goes in the keepalive PATCH.
+- The desktop records no `view` from cards any more (open only, C2): the
+  ranking's viewed signal comes from the phone.
+- `ARCHITECTURE.md`: no change. The tracker, the registry and the
+  collector are browser memory; nothing server-side.
+
+## Data compatibility and rollback
+
+- Scroll marks are ordinary `seen:<category>` marks (PR3b's key, PATCH
+  only, cap 1000, pruned against the keep set). Nothing new is stored.
+- Revert leaves PR3b's model: open or Mark all only. The marks made by
+  scrolling stay valid and keep counting as seen.
+- As a git revert PR3c stands alone; it deploys with PR3b (D33).

@@ -101,6 +101,7 @@ def test_column_comparator_function_exists():
     "unseenCount",
     "nextTab",
     "generation",
+    "trackSeen",
     "sourcesById",
     "sourcesByName",
     "selectedId",

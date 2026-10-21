@@ -173,14 +173,19 @@ function briefNeedsAiState(name, { brief, collapse }) {
 
 // PR3b: the NHL tab with `seen` stored as seen, Earlier opened or not.
 // The rows under the last unseen card are 44px, never role="status", and
-// never a <section>.
+// never a <section>. The page's timers are held from the tap on the tab:
+// the tab's few cards are on screen with the marker, and on the phone
+// they would be used up a second later (PR3c's end rule), so the state
+// is the tab as it opens.
 function readModelState(name, seen, openEarlier) {
   return {
     name,
-    before: async ({ context }) => {
+    before: async ({ page, context }) => {
       if (seen.length) prefMock(context).seed({ 'seen:nhl': seen })
+      await page.clock.install({ time: F.NOW })
     },
     setup: async ({ page }) => {
+      await page.clock.pauseAt((await page.evaluate(() => Date.now())) + 1000)
       await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').filter({ hasText: /^Nhl/ }).first().click()
       await page.locator(`${MOBILE_MAIN} [data-caught-up]`).waitFor({ state: 'visible' })
       if (openEarlier) {
