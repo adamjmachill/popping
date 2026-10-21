@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { reinsert, savedStories, savedToFetch } from '../../src/lib/saved.ts'
+import { reinsert, reinsertAll, savedStories, savedToFetch } from '../../src/lib/saved.ts'
 
 type Story = { id: number; title: string }
 const story = (id: number): Story => ({ id, title: `story ${id}` })
@@ -52,4 +52,17 @@ test('reinsert: the story goes back at its place, clamped to the list', () => {
 test('reinsert: a list that holds the story already comes back as it is', () => {
   const list = [story(1), story(9)]
   assert.equal(reinsert(list, story(9), 0), list)
+})
+
+test('reinsertAll: stories put back together each land at their own place', () => {
+  // Hidden from [1, 2, 3, 4, 5, 6] at 1 (2) and 4 (5); given in any order.
+  const list = [story(1), story(3), story(4), story(6)]
+  assert.deepEqual(ids(reinsertAll(list, [{ item: story(5), at: 4 }, { item: story(2), at: 1 }])), [1, 2, 3, 4, 5, 6])
+  // One a poll already brought back is skipped, the rest still go in.
+  assert.deepEqual(ids(reinsertAll([story(1), story(2), story(3)], [{ item: story(2), at: 1 }, { item: story(9), at: 0 }])), [9, 1, 2, 3])
+  // Nothing to put back, or all there already: the same list.
+  assert.equal(reinsertAll(list, []), list)
+  assert.equal(reinsertAll(list, [{ item: story(3), at: 0 }]), list)
+  // The input list is never changed.
+  assert.deepEqual(ids(list), [1, 3, 4, 6])
 })

@@ -41,8 +41,13 @@ it.
     (`starredEntries` changes) and is fetched; a save a poll stops
     returning is fetched then. Ids the server no longer returns go into
     `savedGoneRef` (the negative cache), so no poll asks for them again.
-    An unsave drops the id from the cache and the negative cache, and a
-    response that lands after an unsave isn't kept.
+    An unsave drops the id from the negative cache but keeps the story
+    in the by-id cache (review fix), so the unsave's Undo draws it again
+    at once, with no request and offline too; a response that lands
+    after an unsave is kept the same way. Saved draws only saved ids, so
+    a cached unsaved story isn't drawn. The cache is bounded lazily:
+    once it holds more than `MAX_STARRED` (1000, the saves' own cap)
+    stories, the unsaved ones leave it.
   - Each save is drawn from the tabs' copy (the freshest), else the
     cache, else the copy drawn last time, so a save a poll just dropped
     doesn't blink out while its fetch is out. Hidden saves stay out
@@ -50,10 +55,16 @@ it.
     server deletes a feed's stories with it, and the tabs already drop
     them). While the same stories are drawn the same array comes back,
     so a poll that changed nothing in Saved doesn't redraw it.
-  - **Hide Undo:** a hide (`hideEntry`, `toggleHideEntry`) keeps the
-    story and its index in `entries` and in `forYou`
-    (`hiddenStoriesRef`, the latest 100). The Undo (`restoreHiddenEntry`,
-    and `toggleHideEntry`'s unhide) puts it back there with `reinsert`.
+  - **Hide Undo:** every hide (`hideEntries`; `hideEntry` and
+    `toggleHideEntry` for one story, Settings › Voted's "Hide all
+    downvoted" for many) keeps each story and its index in `entries`
+    and in `forYou` (`keepHiddenStories`, `hiddenStoriesRef`: the latest
+    `KEPT_HIDDEN` = 100, and never fewer than the hide's own, so a bulk
+    hide keeps all of its stories and pushes out none of the 100 before
+    it). Every Undo (`restoreHiddenEntries`; `restoreHiddenEntry`,
+    `toggleHideEntry`'s unhide, Settings' Hidden list, and the bulk
+    hide's Undo) puts them back there with `reinsertAll` (each at its
+    own index, lowest first).
     For two minutes (`SOURCE_CHANGE_TTL_MS`, the same window
     `sourceChangesRef` uses for feeds) `refresh` lays a put-back story
     over a poll that doesn't return it yet (the server answered before
@@ -75,8 +86,10 @@ it.
     store's `hidden_entries`, as the server has since PR4b.
 - `frontend/scripts/iphone-audit/flows.cjs`: `flow-saved-by-id` and
   `flow-hide-undo-after-poll` (new), `flow-saved-order` (rewritten), and
-  a `phoneIds(page)` helper.
-- `frontend/scripts/iphone-audit/README.md`: the three flows and the
+  a `phoneIds(page)` helper; with the review fixes also
+  `flow-saved-drops-hidden-and-deleted`, `flow-hide-all-downvoted-undo`
+  and a `keepOutOfTabs(page, ids)` helper.
+- `frontend/scripts/iphone-audit/README.md`: the flows and the
   mock's by-ids and hidden rules.
 
 ## Deviations from the spec
@@ -96,10 +109,11 @@ it.
   is also laid over polls for two minutes, as feeds are: a poll sent
   between the Undo and its PATCH (a 1 s batch) would otherwise drop the
   story again until the next poll.
-- **Keep set.** `starredEntries` has been in the keep set since PR3b,
-  and the by-id cache only ever holds saved ids (an unsave drops the
-  id), so adding the cache changes nothing today; it is there as the
-  spec asks, so the rule holds if the cache ever outlives a save.
+- **Keep set.** `starredEntries` has been in the keep set since PR3b.
+  Since the review fixes the by-id cache also holds recently unsaved
+  stories (bounded at 1000), so the cache in the keep set now also keeps
+  those stories' seen marks from being pruned first while they may
+  still come back through an Undo.
 - **Mock fidelity.** The spec asks only for the by-ids projection. The
   mock now also leaves hidden stories out of `/api/entries` and
   `/api/foryou`, which the server has done since PR4b; without it no
@@ -176,17 +190,108 @@ unit file), a restore from a backup copy and a byte compare (`cmp`).
 | `saved.test.ts` | `savedStories` ignores `isRemoved` | "hide wins over saved" |
 
 The keep-set wiring in App (`savedById.keys()` passed to `keepSet`) has
-no failing test when removed: the saves are in the keep set anyway
-(Deviations).
+no failing test when removed: no flow fills a `seen:` key past its cap
+of 1000 marks.
+
+## Review fixes (second commit, "PR4c: review fixes")
+
+Review step: /code-review medium. Five findings, four distinct (two
+reported the same bulk-hide gap); all fixed, none skipped.
+
+1. **An unsave dropped the story from the by-id cache**, so its Undo
+   had to fetch it again and drew nothing offline. The by-id effect no
+   longer evicts on an unsave: Saved draws only saved ids
+   (`savedStories` walks `starredEntries`), so a cached unsaved story is
+   never drawn. The cache is bounded lazily instead: past `MAX_STARRED`
+   (1000) stories the unsaved ones go. A by-id response that lands after
+   an unsave is kept the same way (it was dropped before), and the
+   effect no longer reads `latestPrefs`.
+2. **"Hide all downvoted" (Settings › Voted) didn't keep or put back
+   its stories** (two findings). `keepHiddenStory` /
+   `putBackHiddenStory` became `keepHiddenStories` /
+   `putBackHiddenStories` (lists), behind `hideEntries` /
+   `restoreHiddenEntries`; `hideEntry`, `restoreHiddenEntry` and
+   `toggleHideEntry` call them with one id, and the bulk hide and its
+   Undo with `added`. The keep cap is `KEPT_HIDDEN` (100) plus the
+   hide's own count, so a bulk hide keeps all of its stories and pushes
+   out none of the 100 kept before it (the toast is a single slot, so
+   only Settings' Hidden list could still restore those). Stories put
+   back together go in with the new pure `reinsertAll` (lowest index
+   first, so each lands at its own place); `refresh`'s lay-over of
+   put-back stories uses it too.
+3. **The first device check failed falsely when a save is also
+   hidden**: Settings › Saved lists hidden saves, the Saved tab doesn't
+   (hide wins). The line in `docs/DEVICE_CHECKS.md` (and below) now
+   excepts "any you also hid".
+4. **No test guarded App's Saved filter** (hide wins over saved; a
+   deleted feed's saves leave). New flow
+   `flow-saved-drops-hidden-and-deleted`.
+
+### Tests added or changed
+
+- `flow-saved-by-id`: after the unsave of 503 (held only by the by-id
+  cache), by-ids is made to fail (`route.abort`), Undo is tapped, and
+  Saved must show 503 again with no new by-ids request; then 503 is
+  unsaved again and the old poll checks run. The Undo's place is
+  either the top or 503's old place (whether the unsave was sent before
+  the Undo; Risks), so the flow accepts both.
+- `flow-saved-drops-hidden-and-deleted` (new): saves 103, 105 and 503
+  (503 kept out of the tabs by the page's fetch, as in
+  `flow-saved-by-id`; the helper is now `keepOutOfTabs`). Hiding 105
+  from its card in Saved takes it out before and after a poll; deleting
+  feed 14 in the store (another device) takes 503 out after the next
+  poll.
+- `flow-hide-all-downvoted-undo` (new): Settings › Voted with 101 and
+  103 downvoted, Hide all downvoted, a poll without them, Undo, a poll
+  before the Undo's batch, then News shows 101 and 103 and the store
+  loses both hides.
+- `saved.test.ts`: `reinsertAll` (any input order, one already back,
+  nothing to do, input unchanged).
+
+### Mutation checks (review fixes)
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `flow-saved-by-id` | the old eviction (`savedById.size > MAX_STARRED &&` dropped) | SAVED-BY-ID: "offline, after the unsave's Undo Saved shows 402,105,103"; "the unsave's Undo asked by-ids again: [\"999999,503\",\"402\",\"503\"]" |
+| `flow-hide-all-downvoted-undo` | the bulk Undo only `removeIds` (no put-back) | HIDE-ALL-UNDO: "News shows 102,104,…,112, without 101 and 103" |
+| `flow-hide-all-downvoted-undo` | the bulk hide only `addIds` (nothing kept) | the same |
+| `flow-saved-drops-hidden-and-deleted` | `visibleStarred`'s `hiddenSet.has(e.id)` → `false` | SAVED-DROPS: "after hiding 105 Saved shows 503,105,103", and the same after the poll |
+| `flow-saved-drops-hidden-and-deleted` | the `sourcesById` clause dropped | SAVED-DROPS: "after its feed was deleted Saved shows 503,103" |
+| `saved.test.ts` | `reinsertAll` without its sort | "reinsertAll: stories put back together each land at their own place" |
+
+Each was a scratch edit, a rebuild, `--only` on the flow (or the unit
+file), then a restore from a copy and `cmp`. The `+ added` in the keep
+cap has no failing test: no flow hides more than 100 stories.
+
+### Verification (review fixes)
+
+- `npm run lint`: 0 errors (the base's 4 warnings). `npm run build`
+  passes. Unit tests: 203 of 203 (202 plus `reinsertAll`).
+- `git diff --exit-code package.json package-lock.json`: clean.
+- Backend pytest, the 10 files that read frontend source plus
+  `test_entries_by_ids_projection.py`: 187 passed and 2 failed, both
+  in the DNS-only baseline list
+  (`test_reserved_category_names.py`, `/root/popping-env/baseline.txt`).
+  No backend file changed.
+- The five Saved and hide flows (`flow-saved-by-id`,
+  `flow-saved-drops-hidden-and-deleted`, `flow-hide-all-downvoted-undo`,
+  `flow-hide-undo-after-poll`, `flow-saved-order`): 0 failures, and the
+  four timing ones looped 5 times, 0 failures each.
+- Full strict smoke (`--csp --strict`, CI fonts) on the final build: 175
+  states and flows, 0 failures, 0 warnings (539 s). It ran on port 4176:
+  port 4175 was taken by a review agent's leftover `vite preview` of a
+  scratch copy (its mutated build), which this session didn't start and
+  left running.
 
 ## Risks and data-compatibility notes
 
 - Revert is safe: Saved falls back to the stories the tabs loaded, by
   date. Nothing new is stored; `starred_entries` keeps its shape.
-- Undo on an unsave ("Removed from Saved · Undo") saves the story again,
-  which appends it: it comes back at the top of Saved, not at its old
-  place. Putting it back in place would need a whole-list write of a set
-  key, which PR2b removed.
+- Undo on an unsave ("Removed from Saved · Undo") saves the story again.
+  If the unsave was already sent (a 1 s batch), the save appends it and
+  it comes back at the top of Saved; if not, the two cancel out and it
+  stays in its old place. Putting it back in place every time would need
+  a whole-list write of a set key, which PR2b removed.
 - A device with many old saves no tab holds fetches them once per load,
   200 per request (1000 saves at most, the key's cap: 5 requests).
 - Saved stories fetched by id keep the copy fetched (score, comment
@@ -210,7 +315,7 @@ no failing test when removed: the saves are in the keep set anyway
 Added under Pending in `docs/DEVICE_CHECKS.md` (`#<pr>` until the PR has
 a number):
 
-- Open Menu → Settings → Saved and note the stories it lists, then close Settings and open the Saved tab. Pass: the tab lists the same stories, each with its picture where it has one, including ones older than anything in the other tabs.
+- Open Menu → Settings → Saved and note the stories it lists, then close Settings and open the Saved tab. Pass: the tab lists the same stories, except any you also hid, each with its picture where it has one, including ones older than anything in the other tabs.
 - Save one story, then another, then open Saved. Pass: the second one is at the top, the first right under it.
 - In Saved, tap the bookmark on a story to remove it, then force-quit and reopen the app. Pass: it is gone from Saved and stays gone.
 - On For You, hide a story and tap Undo on the toast, then open that story's category tab. Pass: the story is back in For You and in its tab.

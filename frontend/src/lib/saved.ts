@@ -59,3 +59,13 @@ export function reinsert<E extends Story>(list: E[], item: E, at: number): E[] {
   const i = Math.max(0, Math.min(at, list.length))
   return [...list.slice(0, i), item, ...list.slice(i)]
 }
+
+/** ``list`` with each of ``items`` back at its index ``at`` (``reinsert``),
+ *  lowest index first, so stories put back together (a bulk hide's Undo)
+ *  each land at their own place. ``list`` itself when every one is
+ *  already there. */
+export function reinsertAll<E extends Story>(list: E[], items: readonly { item: E; at: number }[]): E[] {
+  let out = list
+  for (const { item, at } of [...items].sort((a, b) => a.at - b.at)) out = reinsert(out, item, at)
+  return out
+}
