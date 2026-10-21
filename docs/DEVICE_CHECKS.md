@@ -67,6 +67,11 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #46 · Scroll slowly through Saved, and through a search's results. Pass: no tab's badge changes; only opening a story from there counts it as seen.
 - [ ] #46 · (If you have a desktop) On the laptop, scroll slowly down a column past several stories. Pass: its "N new" doesn't change; on the desktop only opening a story counts it as seen.
 - [ ] #46 · On the phone, read a few screens down a tab with a badge, then, with a story on screen, tap Refresh at the top. Pass: the tab goes back to its top with that story first (after any new ones), the badge counts it as not seen yet, and the stories you scrolled past are under "Earlier".
+- [ ] #<pr> · Open Menu → Settings → Saved and note the stories it lists, then close Settings and open the Saved tab. Pass: the tab lists the same stories, each with its picture where it has one, including ones older than anything in the other tabs.
+- [ ] #<pr> · Save one story, then another, then open Saved. Pass: the second one is at the top, the first right under it.
+- [ ] #<pr> · In Saved, tap the bookmark on a story to remove it, then force-quit and reopen the app. Pass: it is gone from Saved and stays gone.
+- [ ] #<pr> · On For You, hide a story and tap Undo on the toast, then open that story's category tab. Pass: the story is back in For You and in its tab.
+- [ ] #<pr> · (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

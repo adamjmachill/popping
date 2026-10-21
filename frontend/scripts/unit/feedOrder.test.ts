@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { BASELINE_MS, countUnseen, nextTab, partitionTab, seenKey, seenTest } from '../../src/lib/feedOrder.ts'
+import { BASELINE_MS, countUnseen, keepSet, nextTab, partitionTab, seenKey, seenTest } from '../../src/lib/feedOrder.ts'
+import { pruneIds } from '../../src/lib/prefSync.ts'
 import type { Item, Partition } from '../../src/lib/feedOrder.ts'
 
 const T0 = Date.parse('2026-10-20T12:00:00Z')
@@ -283,4 +284,26 @@ test('nextTab (C8): the next shown tab with new stories, wrapping, never the cur
   // A current tab that isn't in the list (hidden) starts from the first.
   assert.equal(nextTab(tabs, 'cat:gone')?.key, 'cat:deals')
   assert.equal(nextTab([], 'cat:news'), null)
+})
+
+test('keepSet: every id App holds, from stories and bare ids, each once', () => {
+  const cache = new Map([[3, story(3)]])
+  const keep = keepSet([story(10), story(11)], [story(11), story(12)], [12, 20], cache.keys())
+  assert.deepEqual([...keep].sort((a, b) => a - b), [3, 10, 11, 12, 20])
+  assert.equal(keepSet().size, 0)
+})
+
+test('keepSet (PR4c): an old save only the Saved-by-id cache holds keeps its seen mark when the key is pruned', () => {
+  // Story 3 is an old save: no tab holds it, Saved fetched it by id.
+  const tabs = [story(900), story(901)]
+  const savedById = new Map([[3, story(3)]])
+  const marks = [3, 5, 7, 900, 901]
+  // seen:news over its cap (4 here) by one: the smallest mark outside the
+  // keep set goes, and 3 stays.
+  const kept = pruneIds(marks, keepSet(tabs, [], savedById.keys()), 4)
+  assert.deepEqual(kept.dropped, [5])
+  assert.deepEqual(kept.ids, [3, 7, 900, 901])
+  // Without the cache in the keep set, 3 (the smallest) would go first,
+  // and the save would count as unseen again wherever it shows.
+  assert.deepEqual(pruneIds(marks, keepSet(tabs, []), 4).dropped, [3])
 })

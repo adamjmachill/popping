@@ -538,6 +538,10 @@ async function putPrefs(page, rows) {
   await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
 }
 
+// The ids of the cards the phone draws now, in order, joined by commas.
+const phoneIds = (page) =>
+  page.locator(`${MOBILE_MAIN} article[data-card-id]`).evaluateAll((els) => els.map((el) => el.getAttribute('data-card-id')).join(','))
+
 // Every interaction event the app POSTs (one or a batch) from now on,
 // in page._events; they go on to the mock.
 async function recordInteractions(page) {
@@ -1852,37 +1856,112 @@ module.exports = [
     },
   }),
 
-  // Saved lists saves newest first by published, else fetched time: a
-  // page with no publish date fetched a minute ago leads; stories with
-  // neither date come last, the higher id first.
+  // Saved lists saves newest save first (PR4c): the order they were
+  // saved in, latest first, whatever their stories' dates (by date they
+  // would read 101,103,105,111).
   dashFlow('flow-saved-order', {
-    before: async ({ page }) => {
-      // The mock is a context route, so a page route can't edit what it
-      // answers; the page's fetch drops the dates on the way in instead.
-      await page.addInitScript((undated) => {
+    run: async ({ page, fail }) => {
+      await putPrefs(page, { starred_entries: [103, 105, 111, 101] })
+      await tap(page, phoneTab(page, /^saved/i))
+      const want = '101,111,105,103'
+      if (!(await waitFor(async () => (await phoneIds(page)) === want, 3000))) fail('SAVED-ORDER', `Saved shows ${await phoneIds(page)}, expected ${want}`)
+    },
+  }),
+
+  // Saved by id (PR4c, D5): Saved lists every save, whatever the tabs
+  // loaded. Here 503 and 402 never reach a tab (the page's fetch drops
+  // them from /api/entries and /api/foryou), so only GET
+  // /api/entries/by-ids brings them: once, for just the ids no tab holds
+  // (103 and 105 are held), newest save first. 999999 has no row: it is
+  // asked for once and never again, poll after poll. A save made on
+  // another device arrives with the preferences' resync and is fetched
+  // too; an unsave takes the story out.
+  dashFlow('flow-saved-by-id', {
+    before: async ({ page, context }) => {
+      prefMock(context).seed({ starred_entries: [103, 503, 999999, 105] })
+      await page.addInitScript((away) => {
         const orig = window.fetch
         window.fetch = async (...args) => {
           const res = await orig(...args)
           const path = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href).pathname
-          if (path !== '/api/entries' && path !== '/api/entries/by-ids') return res
+          if (path !== '/api/entries' && path !== '/api/foryou') return res
           const rows = await res.clone().json()
           if (!Array.isArray(rows)) return res
-          const out = rows.map((e) => (undated[e.id] ? { ...e, ...undated[e.id] } : e))
+          const out = rows.filter((e) => !away.includes(e.id))
           return new Response(JSON.stringify(out), { status: res.status, statusText: res.statusText, headers: res.headers })
         }
-      }, {
-        110: { published_at: null, fetched_at: new Date(F.NOW - 60000).toISOString() },
-        111: { published_at: null, fetched_at: null },
-        112: { published_at: null, fetched_at: null },
-      })
+      }, [503, 402])
+      page._byIds = []
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries/by-ids',
+        (route) => {
+          page._byIds.push(new URL(route.request().url()).searchParams.get('ids'))
+          return route.fallback()
+        },
+      )
     },
-    run: async ({ page, fail }) => {
-      await putPrefs(page, { starred_entries: [105, 111, 103, 112, 110] })
-      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^saved/i.test(t)), 3000))) return fail('SAVED-ORDER', 'no Saved tab')
+    run: async ({ page, context, fail, shot }) => {
+      const asked = () => JSON.stringify(page._byIds)
       await tap(page, phoneTab(page, /^saved/i))
-      const want = '110,103,105,112,111'
-      const ids = () => page.locator(`${MOBILE_MAIN} article[data-card-id]`).evaluateAll((els) => els.map((el) => el.getAttribute('data-card-id')).join(','))
-      if (!(await waitFor(async () => (await ids()) === want, 3000))) fail('SAVED-ORDER', `Saved shows ${await ids()}, expected ${want}`)
+      if (!(await waitFor(async () => (await phoneIds(page)) === '105,503,103', 3000))) return fail('SAVED-BY-ID', `Saved shows ${await phoneIds(page)}, expected 105,503,103`)
+      // The story fetched by id is a full card: its thumbnail loads.
+      const thumb = page.locator(`${MOBILE_MAIN} article[data-card-id="503"] img[src="/assets/thumbs/503.jpg"]`)
+      if (!(await waitFor(() => thumb.evaluate((img) => img.complete && img.naturalWidth > 0).catch(() => false), 3000))) fail('SAVED-BY-ID', 'story 503 shows no thumbnail')
+      if (asked() !== JSON.stringify(['999999,503'])) fail('SAVED-BY-ID', `by-ids was asked for ${asked()}, expected only the saves no tab holds, newest first`)
+      await shot('saved')
+
+      // A save made on another device: the next resync brings it, and
+      // Saved fetches it (and only it) at the top.
+      prefMock(context).seed({ starred_entries: [103, 503, 999999, 105, 402] })
+      const polled = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await polled
+      if (!(await waitFor(async () => (await phoneIds(page)) === '402,105,503,103', 3000))) fail('SAVED-BY-ID', `after the other device's save Saved shows ${await phoneIds(page)}, expected 402 first`)
+      if (asked() !== JSON.stringify(['999999,503', '402'])) fail('SAVED-BY-ID', `after a poll by-ids was asked for ${asked()}, expected 402 alone (999999 not again)`)
+
+      // An unsave takes the story out, and nothing is asked again.
+      await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="503"] button[aria-label="remove from saved"]`))
+      if (!(await waitFor(async () => (await phoneIds(page)) === '402,105,103', 3000))) fail('SAVED-BY-ID', `after unsaving 503 Saved shows ${await phoneIds(page)}`)
+      const polledAgain = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await polledAgain
+      await sleep(300)
+      if (asked() !== JSON.stringify(['999999,503', '402'])) fail('SAVED-BY-ID', `after the unsave and a poll by-ids was asked for ${asked()}`)
+      if ((await phoneIds(page)) !== '402,105,103') fail('SAVED-BY-ID', `after the last poll Saved shows ${await phoneIds(page)}`)
+    },
+  }),
+
+  // A hide's Undo puts the story back everywhere (PR4c). From PR4b the
+  // server leaves hidden stories out of its lists (the mock too), so a
+  // poll between the hide and the Undo drops the story: the Undo puts it
+  // back in the stories the tabs are built from, and a poll the server
+  // answered before the Undo's change reached it doesn't take it out
+  // again. News isn't on screen during either poll, so only those
+  // stories can bring 101 back there.
+  dashFlow('flow-hide-undo-after-poll', {
+    run: async ({ page, context, fail }) => {
+      const card = (id) => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"]`)
+      const hidden = () => prefMock(context).value('hidden_entries') || []
+      if (!(await waitFor(async () => /^for you/i.test(await selectedTab(page)), 3000))) return fail('HIDE-UNDO', `the phone opened on ${JSON.stringify(await selectedTab(page))}`)
+      await card(101).first().waitFor({ state: 'visible' })
+      await tap(page, card(101).locator('button[aria-label="hide"]'))
+      if (!(await waitFor(async () => (await card(101).count()) === 0, 3000))) return fail('HIDE-UNDO', 'the hidden story is still drawn')
+      if (!(await waitFor(() => hidden().includes(101), 3000))) return fail('HIDE-UNDO', 'the hide never reached the store')
+      // A poll while hidden: the server leaves 101 out.
+      let polled = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await polled
+      await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
+      if (!(await waitFor(async () => (await card(101).count()) === 1, 3000))) fail('HIDE-UNDO', 'Undo did not bring 101 back to For You')
+      // A poll right away, before the Undo's change is sent (a 1 s batch):
+      // the server still has 101 hidden and leaves it out.
+      polled = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      const res = await polled
+      if ((await res.json()).some((e) => e.id === 101)) return fail('HIDE-UNDO', 'the second poll already returned 101; the flow needs it left out')
+      await tap(page, phoneTab(page, /^news/i))
+      if (!(await waitFor(async () => (await card(101).count()) === 1, 3000))) fail('HIDE-UNDO', `after Undo and a poll that left it out, News shows ${await phoneIds(page)}, without 101`)
+      if (!(await waitFor(() => !hidden().includes(101), 3000))) fail('HIDE-UNDO', 'the Undo never reached the store')
     },
   }),
 

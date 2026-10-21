@@ -178,6 +178,17 @@ export function seenKey(category: string): `seen:${string}` {
   return `seen:${category}`
 }
 
+/** The keep set a ``seen:`` key is pruned against (``pruneIds`` drops the
+ *  marks outside it first): the id of every story App holds, so pruning
+ *  never brings a story on screen back as unseen. App passes the tabs'
+ *  stories, For You, the saves and the Saved-by-id cache (PR4c); PR4d
+ *  adds every wider tab's rows. Each group is stories or bare ids. */
+export function keepSet(...groups: Iterable<Item | number>[]): Set<number> {
+  const out = new Set<number>()
+  for (const group of groups) for (const x of group) out.add(typeof x === 'number' ? x : x.id)
+  return out
+}
+
 export type TabCount = { key: string; label: string; count: number }
 
 /** C8: the first tab after ``current`` in strip order (wrapping round)

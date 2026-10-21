@@ -242,7 +242,9 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-brief-needs-ai` | PR1c, `/api/llm/status` saying `configured: false`: the phone Brief's four Generate / Regenerate states (no brief expanded and collapsed, then one brief expanded and collapsed) each read "Brief needs an AI provider · Set up" (44px); Set up opens Settings › AI; with a provider set up, closing Settings brings Regenerate back; with it gone again, coming back to the front reads the status again, and at 1280 (`setViewportSize`) the header's Brief is the same Set up, which opens Settings › AI, and comes back as Brief after Done |
 | `flow-bookmark-on-save` | PR1c: ☆ on a story sends one `bookmark` interaction; ☆ again (unsave) sends none |
 | `flow-bookmark-on-save-desktop` | PR1c, 1280: the card menu's Save for later sends one `bookmark`, its Unsave none; keyboard `b` on the selected card (save, then unsave) sends one in all. PR7a: the arrow keys walk the grid's columns, the first of which is the now empty Saved, so ArrowRight comes first |
-| `flow-saved-order` | PR1c: Saved lists saves newest first by published, else fetched time (a page fetched a minute ago with no publish date leads, then the dated saves, then the two with neither date, the higher id first) |
+| `flow-saved-order` | PR1c, rewritten in PR4c: Saved lists saves newest save first, in the order they were saved, latest first, whatever their stories' dates (saved as 103, 105, 111, 101, it reads 101, 111, 105, 103; by date it would read 101, 103, 105, 111) |
+| `flow-saved-by-id` | PR4c, D5: 503 and 402 never reach a tab (the page's fetch drops them from `/api/entries` and `/api/foryou`). Saved still lists 105, 503, 103 (newest save first) with 503's thumbnail loaded, from one `GET /api/entries/by-ids` for just the saves no tab holds, `999999,503` (999999 has no row). A save made on another device (seeded in the store, then a return to the front) shows at the top after one more request for `402` alone; an unsave takes 503 out; poll after poll, 999999 is never asked for again |
+| `flow-hide-undo-after-poll` | PR4c: on For You, 101 is hidden (its PATCH reaches the store) and a poll comes back without it (the mock leaves hidden stories out, as the server does since PR4b); Undo brings it back, and a poll sent at once, before the Undo's 1 s batch, also leaves it out. News, opened only then, still shows 101: the Undo put the story back in the stories the tabs are built from, and the poll didn't take it out again; the store loses the hide |
 | `flow-reset-keeps-saves` | PR1c: with saves, hides, votes, a saved view and News's seen marks (PR3b: `seen:news` and the legacy `read_entries:news`), last visit, prefs and section folds stored, Reset reading state deletes the reading-state rows and `history_group_by` but never `starred_entries`, `hidden_entries`, `voted_entries` or `filter_presets`; after the reload the server holds only those four and the Saved tab is back. PR2b: of a save and a seen mark (PR3b: a story opened) still queued (the clock paused inside their 1 s batch) when Reset is tapped, the save goes before the DELETEs and is stored next to 103, and the seen mark is dropped: no write for a key Reset deletes, before or after the DELETEs |
 | `flow-prefs-resync` | PR2b, sync rule 5: a hide's PATCH is held; a full GET answered meanwhile (the store without it) leaves the story hidden, and so does a GET sent while it was held but answered with the old set only after the PATCH's answer was taken in; a GET sent after that is taken in as is |
 | `flow-visibility-flush` | PR2b: a save inside its 1 s batch (clock paused), then the page hides: one PATCH of it goes at once with `keepalive`, and it is in the store |
@@ -430,6 +432,12 @@ flows the store: seed rows before the page loads, read them, and queue
 faults (see Helpers). Answering `GET /api/preferences` with a fixed body
 from a flow would bring it back on every poll and every return to the
 front, which re-read the preferences since PR2b; seed the store instead.
+As the server since PR4b, `GET /api/entries` (without `q`) and
+`GET /api/foryou` leave out the stories the store's `hidden_entries`
+holds. `GET /api/entries/by-ids` answers like the real route (PR4c): at
+most 200 ids, in the order asked, ids with no row or whose feed is gone
+dropped, and each row the card projection (`_CARD_COLUMNS`, never `meta`)
+plus `source_name`.
 
 `capture.cjs` and `probe.cjs` open Settings the way a person does since PR5:
 the Menu (`open menu`), then its Settings row.
