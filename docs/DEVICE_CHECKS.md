@@ -18,7 +18,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
    - Never pin a tag in `.env`.
    - Frontend-only rollback: `cd /opt/popping && POPPING_IMAGE_TAG=sha-<last good> docker compose up -d --no-deps frontend`. `--no-deps` keeps the backend on its current image: without it, compose recreates the backend on the old tag too, and from PR9a on a backend image older than PR9a can't start against the database (Rollback in `docs/ux-notes/PR9a.md`). After that, no `popping-update` until the revert is merged and green.
 
-**Last good:** `sha-619000f` (2026-10-21: backend and frontend on 619000f, the #38 merge; checks below passed).
+**Last good:** `sha-e1f0390` (2026-10-21: the #43 merge; the phone checks below passed. The #39 feed probe on this build is still open).
 
 ## Pending
 
@@ -30,8 +30,8 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #31 · Pause a feed that has a story in For You, then force-quit and reopen the app and open For You. Pass: none of that feed's stories are in For You (resume the feed afterwards).
 - [ ] #32 · After the next frontend deploy, leave the home-screen app in the background for 10 minutes or more without force-quitting it, then come back to it. Pass: it reloads by itself once, and Settings → Reset shows the new build; a desktop tab that was hidden as long shows "New version · Reload" instead.
 - [ ] #35 · An hour after deploying, run `cd /opt/popping && docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT name, last_attempt_at, last_item_count, last_new_count, left(last_error, 30) AS error FROM sources ORDER BY last_attempt_at DESC NULLS LAST LIMIT 15"'`. Pass: the feeds checked since the deploy show a `last_attempt_at` after it, and the ones without an error show both counts.
-- [ ] #36 · Open Saved and remove its only story. Pass: the phone moves to the tab next to it; saving a story from there brings Saved back without moving the phone.
-- [ ] #36 · On a tab other than For You, force-quit the home-screen app and reopen it. Pass: it opens on the same tab.
+- [ ] #37 · After the deploy, on the phone save a story, hide one and upvote one, then reload the desktop tab. Pass: the desktop shows all three, and neither device shows "Couldn't save".
+- [ ] #37 · If any device or tab still runs a build from before PR2b, save a story there. Pass: it shows "Couldn't save…", and after a reload of that device your saves from the phone are all still there and saving works.
 - [ ] #38 · Open For You's ⋯. Pass: Best is chosen; tapping Newest puts the most recent stories first, and Best puts back the order it had.
 - [ ] #38 · With a saved view chip showing, set News to Best and tap the chip. Pass: News stays on Best.
 - [ ] #38 · Only if no AI provider is set up: open the Brief tab. Pass: it shows "Brief needs an AI provider · Set up" on one line; Set up opens Settings › AI. (With a provider set up: Generate or Regenerate shows as before.)
@@ -39,20 +39,12 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #39 · 3 hours after deploying this PR (a website feed is checked every 2 hours by default), run the baseline's command again. Pass: every website feed has a `last_attempt_at` after the deploy, and each one with no error in the baseline still shows none (its `listed` count can be lower than before, because About, tag and shop pages no longer count); write `fail: <feed name>` for one that now shows `[no list]`, `[blocked]` or `[not found]`.
 - [ ] #39 · A day or more after deploying this PR, and before deploying anything else, run the baseline's command once more: `since_deploy` counts only the stories each feed brought since the backend was deployed. Pass: each website feed with stories in the baseline's `stories_7d` has a `since_deploy` above 0, unless its site published nothing since the deploy; write `fail: <feed name>` for one whose `since_deploy` is 0 while its site kept publishing. `listed` is no signal on its own: a check with nothing new lists 0 too.
 - [ ] #39 · A day after deploying, open the tab of a website feed that used to pull pages that aren't articles. Pass: the stories that arrived since the deploy are its articles, with no About, Contact, tag, author or shop pages.
-- [ ] #40 · After deploying, force-quit and reopen the home-screen app, reload the desktop tab, and open Menu → Settings → Reset on each. Pass: both show the same "Build …" line, with this deploy's time. PR2c merges only after this line is ticked.
 - [ ] #40 · With Popping open on the phone, save a story on the laptop, then wait a minute. Pass: the story shows as saved on the phone without a reload.
 - [ ] #40 · Hide a story on the phone and, within a few seconds, save a different story on the laptop; then force-quit and reopen the phone app and reload the laptop. Pass: on both, the hidden story stays hidden and the saved one stays saved.
-- [ ] #40 · Save a story on the phone and switch to another app straight away; force-quit Popping from the app switcher and reopen it. Pass: the story is still in Saved, on the laptop too.
-- [ ] #40 · In the Settings app, turn on airplane mode. Come back to Popping and save a story, then switch to the Settings app, turn airplane mode off, wait for Wi-Fi to reconnect, and switch back to Popping. Pass: after a reload of the laptop tab, or its next poll (up to a minute), the story shows as saved.
-- [ ] #42 · On the phone, tap Edit at the end of the tab strip, tap ↑ on News, then Done. Pass: News moves one place left in the strip; after a force-quit and reopen, and on the laptop after a reload, the strip and the desktop columns keep the new order.
-- [ ] #42 · Tap Edit, then Move to top on the last tab, then Done. Pass: that tab is now right after Brief.
-- [ ] #42 · Tap Edit, turn off Show for one category, then Done. Pass: its tab is gone from the strip, from Menu → Jump to column and from the laptop's columns, and its stories still show in For You; turning Show back on puts the tab back where it was.
-- [ ] #42 · Open Saved and remove its only story. Pass: Saved stays in the strip and says "No stories yet", and the phone stays on it. This replaces #36's line about Saved moving the phone.
 - [ ] #42 · After moving any tab, give a feed a new category (Menu → Settings → Feeds, open the feed, New category). Pass: the new category's tab is last in the strip, and the feed's category list follows the tab order.
 - [ ] #42 · With VoiceOver on, open Edit and tap ↑ on a tab. Pass: VoiceOver reads the tab's name and new place, such as "News, 5 of 9", and focus stays on that ↑.
 - [ ] #42 · Turn on Airplane Mode, force-quit the home-screen app and open it again. Pass: the red error line shows, and no tab offers "Add your first feed".
 - [ ] #43 · (If you have a desktop) On the laptop, make the browser window shorter than the For You row, then scroll down with the trackpad or mouse wheel. Pass: everything under the header (Brief, For You and the columns) scrolls as one page, the header stays at the top, and the columns under For You show their stories at full height, not as a thin strip.
-- [ ] #43 · On the phone, open a tab with more than 30 stories and scroll steadily to its end. Pass: more stories appear before you reach the bottom, with no tap and no visible jump, and the list ends with the tab's last story.
 - [ ] #43 · (If you have a desktop) On the laptop, scroll down past the 30th story of a column with more than 30. Pass: the next stories appear as you near the end of the column.
 - [ ] #43 · With rotation unlocked, open the home-screen app with the phone held sideways, on a tab with more than 30 stories, then turn it upright. Pass: scrolling the tab to its end loads more stories, and tapping the tab again takes the list back to its top.
 
@@ -84,6 +76,20 @@ Opens when PR6c merges.
 
 ## Checked
 
+- 2026-10-21, build e1f0390 (the phone shows "Build b6bd7e7f · 20 Oct, 21:09"):
+  - [x] #36 · On a tab other than For You, force-quit the home-screen app and reopen it. Pass: it opens on the same tab.
+  - [x] (phone only) #40 · After deploying, force-quit and reopen the home-screen app, reload the desktop tab, and open Menu → Settings → Reset on each. Pass: both show the same "Build …" line, with this deploy's time. PR2c merges only after this line is ticked.
+  - [x] (phone only) #40 · Save a story on the phone and switch to another app straight away; force-quit Popping from the app switcher and reopen it. Pass: the story is still in Saved, on the laptop too.
+  - [x] (phone only) #40 · In the Settings app, turn on airplane mode. Come back to Popping and save a story, then switch to the Settings app, turn airplane mode off, wait for Wi-Fi to reconnect, and switch back to Popping. Pass: after a reload of the laptop tab, or its next poll (up to a minute), the story shows as saved.
+  - [x] (phone only) #42 · On the phone, tap Edit at the end of the tab strip, tap ↑ on News, then Done. Pass: News moves one place left in the strip; after a force-quit and reopen, and on the laptop after a reload, the strip and the desktop columns keep the new order.
+  - [x] #42 · Tap Edit, then Move to top on the last tab, then Done. Pass: that tab is now right after Brief.
+  - [x] (phone only) #42 · Tap Edit, turn off Show for one category, then Done. Pass: its tab is gone from the strip, from Menu → Jump to column and from the laptop's columns, and its stories still show in For You; turning Show back on puts the tab back where it was.
+  - [x] #42 · Open Saved and remove its only story. Pass: Saved stays in the strip and says "No stories yet", and the phone stays on it. This replaces #36's line about Saved moving the phone.
+  - [x] #43 · On the phone, open a tab with more than 30 stories and scroll steadily to its end. Pass: more stories appear before you reach the bottom, with no tap and no visible jump, and the list ends with the tab's last story.
+  - #40 build line: checked on the phone only. The owner uses Popping only as the home-screen app (no desktop or browser tab), so this is the build line PR2c waits on.
+  - (phone only): the laptop halves of these lines were not checked.
+  - Replaced, not run: #36 · Open Saved and remove its only story. Pass: the phone moves to the tab next to it; saving a story from there brings Saved back without moving the phone. (#42's Saved line above replaces it.)
+  - Not yet run: #32's auto-reload line (leave the app in the background 10 minutes or more after a deploy).
 - 2026-10-21, build 619000f (backend and frontend; revision check OK):
   - [x] (phone only) #32 · After the first deploy with PR1r, force-quit and reopen the home-screen app, reload the desktop tab, and open Menu → Settings → Reset on each. Pass: both show the same "Build <8 characters> · <day> <month>, <time>" line, with the time the image was built.
   - [x] #35 · After `popping-update` (read the PR's rollback note first), run `cd /opt/popping && docker compose exec backend alembic current`. Pass: it prints `0031 (head)`.

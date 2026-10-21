@@ -48,7 +48,9 @@ function json(route, body, status = 200) {
 }
 
 const log = []
-// The set keys (routes/preferences.py SET_KEY_CAPS): PATCH only.
+// The set keys (routes/preferences.py SET_KEYS, from SET_KEY_CAPS): PATCH
+// only. A PUT of one is a 409 with this detail and changes nothing.
+const SET_KEY_PUT_DETAIL = 'Popping was updated. Reload to keep saving.'
 const SET_KEY_RE = /^(?:starred_entries|hidden_entries|voted_entries|(?:read_entries|seen):[\s\S]+)$/
 // Their caps, as SET_KEY_CAPS: the most a row holds, and the most ids one
 // PATCH list may carry.
@@ -105,12 +107,15 @@ const prefMock = (context) => PREF_MOCKS.get(context)
 // `remove` on the id lists and `set` on voted_entries (422 for the wrong
 // pairing, and for a body the server's schema refuses), `remove` before
 // `add`, `null` clears a vote, and the list is trimmed to its cap
-// smallest id first. Each write's updated_at is F.NOW
-// plus a counter, so they stay in order under the frozen clock.
+// smallest id first. A PUT of a set key is a 409 (SET_KEY_PUT_DETAIL)
+// and leaves the stored row alone, as on the server from PR2c. Each
+// write's updated_at is F.NOW plus a counter, so they stay in order under
+// the frozen clock.
 // onUnmocked({ method, path, url }) is called for any request under
 // /api, /auth or /assets that no branch below answers (smoke.cjs rule C8),
 // and onSetKeyPut({ key }) for any whole-list PUT of a set key (rule C17:
-// from PR2b no code path PUTs them; PR2c makes the server refuse it).
+// from PR2b no code path PUTs them; from PR2c the server refuses them, and
+// so does this mock, after reporting).
 // prefMock(context) is the flows' handle on the store (see below).
 function mockApi(context, opts = {}) {
   const onUnmocked = typeof opts.onUnmocked === 'function' ? opts.onUnmocked : null
@@ -279,7 +284,13 @@ function mockApi(context, opts = {}) {
         return row ? json(route, row) : json(route, { detail: `preference '${key}' not set for user` }, 404)
       }
       if (m === 'PUT') {
-        if (onSetKeyPut && SET_KEY_RE.test(key)) onSetKeyPut({ key })
+        if (SET_KEY_RE.test(key)) {
+          if (onSetKeyPut) onSetKeyPut({ key })
+          // As the server does (SET_KEYS, routes/preferences.py): set keys
+          // change only by PATCH, and a whole-list PUT of one is refused
+          // without touching the stored row.
+          return json(route, { detail: SET_KEY_PUT_DETAIL }, 409)
+        }
         return json(route, prefRow(key, (req.postDataJSON() || {}).value ?? null))
       }
       if (m === 'PATCH') {

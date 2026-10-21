@@ -149,7 +149,7 @@ and reports with `fail(rule, detail)`.
 | C14 | A box with `text-overflow: ellipsis` is at least `min(96px, its scrollWidth)` wide. |
 | C15 | No visible `input[type=search]`. |
 | C16 | The top bar's title (`header h1`) is not cut off (`scrollWidth <= clientWidth`). |
-| C17 | Every state and flow: no `PUT /api/preferences/<key>` of a set key (`starred_entries`, `hidden_entries`, `voted_entries`, `read_entries:*`, `seen:*`). From PR2b they change only by PATCH; PR2c makes the server refuse the PUT. The mock reports it (`onSetKeyPut`). |
+| C17 | Every state and flow: no `PUT /api/preferences/<key>` of a set key (`starred_entries`, `hidden_entries`, `voted_entries`, `read_entries:*`, `seen:*`). From PR2b they change only by PATCH; PR2c makes the server refuse the PUT. The mock reports it (`onSetKeyPut`) and answers the server's 409. |
 
 "Visible" means: has client rects, not `visibility: hidden`, no ancestor at
 opacity 0, not inside `[inert]` or `[aria-hidden="true"]`, not inside the
@@ -266,7 +266,7 @@ for it. `flows.cjs` must not require `smoke.cjs` (smoke requires it).
 | `flow-h1-touch-drag` | the harness: `touchDrag` does nothing off Chromium; on Chromium an upward drag scrolls the phone list and counts 1 |
 | `flow-h1-set-hidden` | the harness: `setHidden` sets `visibilityState` and `hidden`; coming back runs the app's quiet poll |
 | `flow-h1-keepalive` | the harness: the fetch log shows the load-time `GET /api/preferences` without keepalive, and the views still queued when the page hides (beacon refused) sent with it |
-| `flow-h1-pref-store` | the mock: a preference PUT reads back in the list, with `since` and by key; DELETE removes it; PATCH applies `remove` before `add`, `set` with null clears a vote, takes `seen:` keys with a `/`, answers 400 for a key that isn't a set key and 422 for the wrong change or a body the server's schema refuses (an id of 0 or a string, an unknown field, a vote other than up / down / null, a non-canonical vote id); a queued fault answers once; a reload loads the rows with one GET and still sees them |
+| `flow-h1-pref-store` | the mock: a preference PUT reads back in the list, with `since` and by key; DELETE removes it; PATCH applies `remove` before `add`, `set` with null clears a vote, takes `seen:` keys with a `/`, answers 400 for a key that isn't a set key and 422 for the wrong change or a body the server's schema refuses (an id of 0 or a string, an unknown field, a vote other than up / down / null, a non-canonical vote id); a queued fault answers once; a reload loads the rows with one GET and still sees them; a PUT of a set key (`hidden_entries`, `seen:News/Tech`) is a 409 with the server's detail, leaves the stored row as it was, creates none, and is still reported through `onSetKeyPut` (PR2c; sent from a second context with the same mock, so C17 doesn't fail this flow) |
 | `flow-h1-desktop` | the harness at 1280: a mouse desktop with the desktop grid; a card's Copy link and Open in new tab land in the clipboard and `window.open` stubs |
 | `flow-reload-on-new-build` | PR1r, the phone, with a new build served (`newBuild`): back after 9 min nothing is checked; back after 11 min it is not checked when the page hid right after opening a story; a key pressed during the check, a 404 for the new entry script, the Menu being open, or text in the search field stops the reload; a check cut off by a hide doesn't keep the next return from checking; a save (PATCH) refused with 400 is not retried or resent and the next return reloads, and so does a pending save that hiding sends and the server refuses with 409 (each on its own build); a pending save that hiding sends and the server can't take (503), sent again on the return and by the flush, keeps the page, and so does the same save failing again on the next hide and return; once the server takes it (the save sent by the hide still fails), the return sends it and reloads only once it is saved (each hide waits for the answer: one still unanswered on the return is given up on, not sent again, sync rule 4); a pending save that every PATCH answers with 405 (a server rolled back to before PATCH) is sent again on the return and by the flush, and the page still reloads; the reloaded page checks again but doesn't reload for the same build |
 | `flow-reload-desktop-button` | PR1r at 1280: back after 11 min with a new build and no input, the desktop shows "New version · Reload" and doesn't reload by itself; back with its own build served, the button goes; back with a new build again, a scroll and a key during the check don't stop the button; clicking it reloads, and the button is gone after |
@@ -373,8 +373,11 @@ or for a body `schemas.UserPreferencePatchIn` refuses,
 first); `GET /api/preferences` lists the rows (only those updated after
 `since` when it is given) and `GET /api/preferences/<key>` returns one or 404.
 `updated_at` is `F.NOW` plus one millisecond per write. Any other method on a
-preference key is unmocked (C8). A PUT of a set key is stored but reported
-through `onSetKeyPut({ key })` (smoke rule C17). `prefMock(context)` gives
+preference key is unmocked (C8). A PUT of a set key (`starred_entries`,
+`hidden_entries`, `voted_entries`, `read_entries:*`, `seen:*`) is reported
+through `onSetKeyPut({ key })` (smoke rule C17) and answered 409 "Popping was
+updated. Reload to keep saving." without storing anything, as on the server
+(`SET_KEYS`, PR2c). `prefMock(context)` gives
 flows the store: seed rows before the page loads, read them, and queue
 faults (see Helpers). Answering `GET /api/preferences` with a fixed body
 from a flow would bring it back on every poll and every return to the

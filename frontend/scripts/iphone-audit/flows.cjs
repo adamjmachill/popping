@@ -39,7 +39,7 @@
 'use strict'
 
 const F = require('./fixtures.cjs')
-const { prefMock } = require('./capture.cjs')
+const { mockApi, prefMock } = require('./capture.cjs')
 
 const SETTINGS = '[role="dialog"][aria-label="settings"]'
 const FEED_TABS = `${SETTINGS} [role="tablist"][aria-label="feed manager tabs"]`
@@ -2597,7 +2597,9 @@ module.exports = [
   // key), a DELETE removes it, and a reload still sees what was written.
   // PATCH changes a set key as the server does (PR2b): `remove` before
   // `add`, `set` with null clearing a vote, 400 for a key that isn't a
-  // set key, 422 for the wrong change; a queued fault answers once.
+  // set key, 422 for the wrong change; a queued fault answers once. A
+  // PUT of a set key is a 409 and changes nothing, as on the server
+  // (PR2c), and is still reported for C17.
   dashFlow('flow-h1-pref-store', {
     // The read after DELETE is a 404 on purpose, and so are the refused
     // PATCHes.
@@ -2657,6 +2659,37 @@ module.exports = [
       if (loaded !== 1) fail('H1-PREFS', `the reload sent ${loaded} GET /api/preferences`)
       const kept = 'filter_presets,seen:News/Tech,starred_entries,voted_entries'
       if (keys(await call('GET', '/api/preferences')) !== kept) fail('H1-PREFS', 'the store did not survive a reload')
+
+      // A whole-list PUT of a set key, as an old bundle sends it: 409 with
+      // the server's detail, the stored row untouched, no row created. It
+      // runs in a context of its own with the same mock, because in this
+      // one smoke reports the PUT as C17 (as it should when the app sends
+      // it); here onSetKeyPut records it instead.
+      const probe = await context.browser().newContext()
+      try {
+        const reported = []
+        await mockApi(probe, { onSetKeyPut: ({ key }) => reported.push(key) })
+        prefMock(probe).seed({ hidden_entries: [101, 102] })
+        const stored = JSON.stringify(prefMock(probe).value('hidden_entries'))
+        const probePage = await probe.newPage()
+        await probePage.goto(new URL('/api/preferences', page.url()).href)
+        const put = (key) =>
+          probePage.evaluate(async (k) => {
+            const r = await fetch(`/api/preferences/${encodeURIComponent(k)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: [999] }) })
+            return { status: r.status, body: await r.json() }
+          }, key)
+        for (const key of ['hidden_entries', 'seen:News/Tech']) {
+          const res = await put(key)
+          if (res.status !== 409 || res.body.detail !== 'Popping was updated. Reload to keep saving.') {
+            fail('H1-PREFS', `PUT of the set key ${key} answered ${res.status} ${JSON.stringify(res.body)}, expected 409`)
+          }
+        }
+        if (JSON.stringify(prefMock(probe).value('hidden_entries')) !== stored) fail('H1-PREFS', `the refused PUT changed hidden_entries to ${JSON.stringify(prefMock(probe).value('hidden_entries'))}`)
+        if (prefMock(probe).keys().join() !== 'hidden_entries') fail('H1-PREFS', `the refused PUTs left the store holding ${prefMock(probe).keys().join()}`)
+        if (reported.join() !== 'hidden_entries,seen:News/Tech') fail('H1-PREFS', `onSetKeyPut reported ${JSON.stringify(reported)}`)
+      } finally {
+        await probe.close().catch(() => {})
+      }
     },
   }),
 
