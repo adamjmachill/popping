@@ -111,6 +111,8 @@ def test_column_comparator_function_exists():
     "hiddenSet",
     "votedMap",
     "sectionsCollapsed",
+    "sentinelRoot",
+    "scrollerRef",
 ])
 def test_column_comparator_checks_prop(prop):
     """The comparator must compare each data-driven prop by reference.

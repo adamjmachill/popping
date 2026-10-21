@@ -163,10 +163,26 @@ type Props = {
   // The phone only: a callback ref for the story list, which is the
   // phone's real scroller (this section is h-full inside App's
   // wrapper). The list it lands on is marked ``data-scroller``. Pass a
-  // stable function (App passes its state setter); the memo comparator
-  // ignores it like the other callbacks.
+  // stable function (App passes its state setter, or undefined while
+  // the phone layout is hidden on a desktop). The memo comparator
+  // compares it, so crossing 768px re-renders the list and moves the
+  // ref and ``data-scroller`` with it.
   scrollerRef?: (el: HTMLElement | null) => void
+  // The scroller the "load more" sentinel is observed against: this
+  // Column's own list on the phone (the element ``scrollerRef`` hands
+  // App), App's one desktop wrapper on the desktop. Not the viewport:
+  // a margin on the viewport doesn't reach past the phone list's
+  // clipped edge. Not this list on the desktop either: there it grows
+  // to fit its cards, so it would always hold the sentinel. Null until
+  // App has the element; nothing more loads until then.
+  sentinelRoot?: HTMLElement | null
 }
+
+// Cards render 30 at a time. A ``[data-more]`` sentinel after the last
+// one adds the next 30 once it is within 600px of the bottom of
+// ``sentinelRoot``.
+const BATCH = 30
+const MORE_MARGIN = '0px 0px 600px 0px'
 
 // Slice 21: renamed ``Column`` to ``ColumnInner`` and added a
 // ``React.memo`` wrap with a custom comparator (``_columnPropsEqual``,
@@ -174,12 +190,13 @@ type Props = {
 // comparator ignores the per-card callback props (``onMarkEntryRead``,
 // ``onHideEntry``, ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
 // ``onToggleSummary``, ``onToggleSection``, ``onPrefsChange``,
-// ``onMarkRead``, ``onRefresh``), the per-card ``cardRefs`` and the
-// phone's ``scrollerRef`` (a stable setter) —
+// ``onMarkRead``, ``onRefresh``) and the per-card ``cardRefs`` —
 // they're inherently per-render at the App layer; the data-driven
 // props (``sections``, ``sourcesById``, ``sourcesByName``,
 // ``starredSet``, ``hiddenSet``, ``votedMap``, ``prefs``,
-// ``sectionsCollapsed``) are what we actually re-render against.
+// ``sectionsCollapsed``, ``sentinelRoot``) and the phone's
+// ``scrollerRef`` (a stable setter or undefined, so comparing it costs
+// no render) are what we actually re-render against.
 //
 // Trade-off: if a callback's logic changes without the data
 // changing, this Column won't re-render. That can't happen in
@@ -229,8 +246,14 @@ export function ColumnInner({
   sectionsCollapsed,
   onToggleSection,
   scrollerRef,
+  sentinelRoot,
 }: Props) {
   const [popoverOpen, setPopoverOpen] = useState(false)
+  // How many cards render, counted over the open sections in order
+  // (Fresh, then History). It only grows: the phone remounts its Column
+  // per tab, which starts it at 30 again.
+  const [limit, setLimit] = useState(BATCH)
+  const [sentinel, setSentinel] = useState<HTMLElement | null>(null)
   const sortLabelId = useId()
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const prefsButtonRef = useRef<HTMLButtonElement | null>(null)
@@ -290,6 +313,26 @@ export function ColumnInner({
     return () => document.removeEventListener('keydown', onKey)
   }, [popoverOpen])
 
+  // Load more: the sentinel near the bottom of ``sentinelRoot`` adds 30
+  // cards. A fresh observer per ``limit`` (hence the dependency): its
+  // first callback reports where the sentinel is now, so a batch that
+  // still leaves the sentinel inside the margin loads the next one too,
+  // and one that pushes it out waits for the next scroll. The observer
+  // stops after one batch, so a second callback can't add 60.
+  useEffect(() => {
+    if (!sentinel || !sentinelRoot) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return
+        io.disconnect()
+        setLimit((n) => n + BATCH)
+      },
+      { root: sentinelRoot, rootMargin: MORE_MARGIN },
+    )
+    io.observe(sentinel)
+    return () => io.disconnect()
+  }, [sentinel, sentinelRoot, limit])
+
   // Header tap on desktop marks the column read. On mobile the same
   // element exists (the column header is visible on touch layouts
   // too — the swipe changes the visible column but the header is
@@ -343,6 +386,28 @@ export function ColumnInner({
   const entryCount = sections.new.length + sections.history.length
   const visible = totalCount ?? entryCount
   const showTotal = totalCount != null && totalCount !== entryCount
+
+  // Batching. The cards the list draws, in order: Fresh (unless it is
+  // collapsed), then History (unless it is collapsed). The first
+  // ``limit`` of them render.
+  const freshOpen = !(sections.history.length > 0 && (sectionsCollapsed?.new ?? false))
+  const historyOpen = !(sectionsCollapsed?.history ?? false)
+  const freshDrawn = freshOpen ? sections.new.length : 0
+  const drawn = freshDrawn + (historyOpen ? sections.history.length : 0)
+  // The keyboard-selected card always renders, so App can scroll to it
+  // (ArrowDown walks past the batch): the limit grows, by whole
+  // batches, to reach it.
+  let selectedAt = -1
+  if (selectedId != null) {
+    const i = freshOpen ? sections.new.findIndex((e) => e.id === selectedId) : -1
+    const j = i < 0 && historyOpen ? sections.history.findIndex((e) => e.id === selectedId) : -1
+    selectedAt = i >= 0 ? i : j >= 0 ? freshDrawn + j : -1
+  }
+  if (selectedAt >= limit) setLimit(Math.ceil((selectedAt + 1) / BATCH) * BATCH)
+  const shown = Math.max(limit, selectedAt + 1)
+  const freshShown = sections.new.slice(0, Math.min(freshDrawn, shown))
+  const historyShown = sections.history.slice(0, Math.max(0, shown - freshDrawn))
+  const hasMore = drawn > shown
 
   return (
     <section className="flex flex-col h-full overflow-visible">
@@ -562,7 +627,7 @@ export function ColumnInner({
                 showHeader={sections.history.length > 0}
                 collapsed={sections.history.length > 0 && (sectionsCollapsed?.new ?? false)}
                 onToggle={onToggleSection ? () => onToggleSection('new') : undefined}
-                entries={sections.new}
+                entries={freshShown}
                 // All entries in the Fresh section are unread
                 // by construction \u2014 that's the membership
                 // predicate App uses to build the slice. Pass
@@ -607,15 +672,17 @@ export function ColumnInner({
                 read entries. The empty state
                 (``sections.history.length === 0``) is
                 handled by the parent \u2014 no
-                "HISTORY (0)" line. */}
+                "HISTORY (0)" line. It waits until every
+                open Fresh card has rendered, so its header
+                never sits above Fresh cards still to load. */}
 
-            {sections.history.length > 0 && (
+            {sections.history.length > 0 && shown >= freshDrawn && (
               <ColumnSection
                 label="History"
                 count={sections.history.length}
                 collapsed={sectionsCollapsed?.history ?? false}
                 onToggle={onToggleSection ? () => onToggleSection('history') : undefined}
-                entries={sections.history}
+                entries={historyShown}
                 // All entries in the History section are
                 // read by construction \u2014 they were
                 // sorted OUT of the fresh set by the
@@ -643,6 +710,10 @@ export function ColumnInner({
                 onSourceTap={onSourceTap}
               />
             )}
+
+            {/* Load more. A div, never a <section>: smoke asserts one
+                section per <main>. */}
+            {hasMore && <div ref={setSentinel} data-more aria-hidden="true" className="h-px" />}
           </>
         )}
       </div>
@@ -952,7 +1023,15 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     prev.starredSet === next.starredSet &&
     prev.hiddenSet === next.hiddenSet &&
     prev.votedMap === next.votedMap &&
-    prev.sectionsCollapsed === next.sectionsCollapsed
+    prev.sectionsCollapsed === next.sectionsCollapsed &&
+    // The element changes on every phone tab remount and once App has
+    // the desktop wrapper; the sentinel's observer rebinds to it.
+    prev.sentinelRoot === next.sentinelRoot &&
+    // App's setter on the phone, undefined while the phone layout is
+    // hidden on a desktop. Both are stable, so this only differs when
+    // the width crosses 768px; without it the list would keep (or
+    // never get) the ref and ``data-scroller`` after the flip.
+    prev.scrollerRef === next.scrollerRef
   )
 }
 

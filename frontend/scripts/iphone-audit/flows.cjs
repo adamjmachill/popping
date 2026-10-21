@@ -583,6 +583,51 @@ async function newHockeyCategory(page, fail, id) {
   return true
 }
 
+// --- PR3a: desktop single scroller and batching --------------------------------
+
+// `n` more stories from nhl_news (16) beyond the fixture's 3, ids from
+// 7001, each a few minutes older than the last, so the NHL tab holds
+// 3 + n stories.
+const moreNhl = (n) => {
+  const like = F.ENTRIES.find((e) => e.id === 602)
+  return Array.from({ length: n }, (_, i) => {
+    const at = new Date(F.NOW - (500 + i * 3) * 60000).toISOString()
+    return { ...like, id: 7001 + i, title: `NHL story ${i + 1}`, url: `https://example.com/16/more-${7001 + i}`, published_at: at, fetched_at: at }
+  })
+}
+
+// Adds `extra` to every story list the app loads for its tabs (not
+// search or a filter). The mock is a context route, so the page's own
+// fetch appends them on the way in, as flow-saved-order does.
+async function withStories(page, extra) {
+  await page.addInitScript((rows) => {
+    const orig = window.fetch
+    window.fetch = async (...args) => {
+      const res = await orig(...args)
+      const u = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href)
+      if (u.pathname !== '/api/entries' || u.searchParams.get('q') || u.searchParams.getAll('source').length) return res
+      const got = await res.clone().json()
+      if (!Array.isArray(got)) return res
+      return new Response(JSON.stringify([...got, ...rows]), { status: res.status, statusText: res.statusText, headers: res.headers })
+    }
+  }, extra)
+}
+
+// The cards a Column has rendered so far.
+const cardCount = (column) => column.locator('article[data-card-id]').count()
+// Scrolls the sentinel's scroller (the nearest `[data-scroller]` around
+// it) until the sentinel sits `px` below the scroller's visible bottom:
+// inside the 600px margin, still out of sight. False when the column
+// has no sentinel.
+const sentinelBelow = (column, px) =>
+  column.evaluate((col, d) => {
+    const el = col.querySelector('[data-more]')
+    const sc = el && el.closest('[data-scroller]')
+    if (!sc) return false
+    sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().bottom - d
+    return true
+  }, px)
+
 module.exports = [
   flow('flow-fj-youtube-handle', {
     before: async ({ page }) => {
@@ -3346,6 +3391,161 @@ module.exports = [
         return fail('FILTER-STATUS', `the empty one-feed filter does not show the feed's last error: ${JSON.stringify(text)}`)
       }
       await shot('status')
+    },
+  }),
+  // --- PR3a: desktop single scroller and batching ----------------------------
+
+  // The desktop scrolls as one page. With 25 For You cards (a row taller
+  // than the window) the grid keeps its height instead of shrinking to
+  // its padding, the document never scrolls, and the one data-scroller
+  // is the wrapper around it all. A 70-story column renders 30 cards,
+  // then 30 more once the wrapper scrolls to within 600px of its end.
+  dashFlow('flow-desktop-layout', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page }) => {
+      await withStories(page, moreNhl(67))
+      const forYou = F.ENTRIES.slice(0, 25)
+      await page.route((u) => new URL(u).pathname === '/api/foryou', (route) => route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(forYou) }))
+    },
+    run: async ({ page, fail, shot }) => {
+      const row = page.locator('section').filter({ visible: true, has: page.locator('header h2', { hasText: /^For You$/ }) })
+      if (!(await waitFor(async () => (await cardCount(row)) === 25, 5000))) return fail('DESK-LAYOUT', `the For You row has ${await cardCount(row)} cards, expected 25`)
+      const scrollers = await page.evaluate(() =>
+        [...document.querySelectorAll('[data-scroller]')].map((el) => ({ grid: !!el.querySelector('main.grid'), shown: el.getClientRects().length > 0 })),
+      )
+      if (scrollers.length !== 1 || !scrollers[0].grid || !scrollers[0].shown) fail('DESK-LAYOUT', `data-scroller is on ${JSON.stringify(scrollers)}, expected only the wrapper around the grid`)
+      const box = await page.evaluate(() => {
+        const sc = document.querySelector('[data-scroller]')
+        const fy = [...document.querySelectorAll('section')].find((s) => s.getClientRects().length && s.querySelector('h2')?.textContent?.trim() === 'For You')
+        return {
+          grid: document.querySelector('main.grid').getBoundingClientRect().height,
+          forYou: fy ? fy.getBoundingClientRect().height : 0,
+          doc: document.scrollingElement.scrollHeight - innerHeight,
+          scroller: sc ? sc.scrollHeight - sc.clientHeight : 0,
+        }
+      })
+      if (box.forYou <= 800) fail('DESK-LAYOUT', `the For You row is ${box.forYou}px tall; the flow needs one taller than the window`)
+      if (box.grid <= 300) fail('DESK-LAYOUT', `the grid is ${box.grid}px tall under a ${box.forYou}px For You row, expected more than 300px`)
+      if (box.doc > 1) fail('DESK-LAYOUT', `the document scrolls by ${box.doc}px; only the wrapper should`)
+      if (box.scroller <= 0) fail('DESK-LAYOUT', 'the wrapper has nothing to scroll')
+
+      const nhl = page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: /^nhl$/i }) })
+      if ((await nhl.count()) !== 1) return fail('DESK-LAYOUT', 'no NHL column in the grid')
+      await sleep(500)
+      const before = await cardCount(nhl)
+      if (before !== 30) fail('DESK-LAYOUT', `the 70-story NHL column renders ${before} cards before any scroll, expected 30`)
+      // The sentinel 300px under the wrapper's bottom edge: the next 30
+      // load before the end of the column comes into view.
+      if (!(await sentinelBelow(nhl, 300))) return fail('DESK-LAYOUT', 'the NHL column has no "load more" sentinel')
+      if (!(await waitFor(async () => (await cardCount(nhl)) === 60, 3000))) return fail('DESK-LAYOUT', `with the wrapper scrolled to 300px above the column's end it renders ${await cardCount(nhl)} cards, expected 60`)
+      await sleep(500)
+      const after = await page.evaluate(() => ({ win: scrollY, wrapper: document.querySelector('[data-scroller]').scrollTop }))
+      if ((await cardCount(nhl)) !== 60) fail('DESK-LAYOUT', `the column went on to ${await cardCount(nhl)} cards without another scroll`)
+      if (after.win !== 0 || after.wrapper <= 0) fail('DESK-LAYOUT', `the scroll moved the window by ${after.win}px and the wrapper by ${after.wrapper}px; only the wrapper should move`)
+      await shot('scrolled')
+    },
+  }),
+
+  // A long tab grows as you scroll: 30 cards, then 60 once the list is
+  // within 600px of its end, then all 70, with no "load more" row left.
+  dashFlow('flow-auto-append', {
+    before: async ({ page }) => {
+      await withStories(page, moreNhl(67))
+    },
+    run: async ({ page, fail, shot }) => {
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!/^nhl/i.test(await selectedTab(page))) return fail('AUTO-APPEND', 'could not select the NHL tab')
+      const column = page.locator(`${MOBILE_MAIN} section`)
+      const list = page.locator(`${MOBILE_MAIN} section [data-scroller]`)
+      const toEnd = () => list.evaluate((el) => el.scrollTo(0, el.scrollHeight))
+      if (!(await waitFor(async () => (await cardCount(column)) >= 30, 3000))) return fail('AUTO-APPEND', `the NHL tab renders ${await cardCount(column)} cards`)
+      await sleep(500)
+      if ((await cardCount(column)) !== 30) fail('AUTO-APPEND', `before any scroll the NHL tab renders ${await cardCount(column)} cards, expected 30`)
+      // 300px short of the end: the next 30 load before the end shows.
+      if (!(await sentinelBelow(column, 300))) return fail('AUTO-APPEND', 'the NHL list has no "load more" sentinel')
+      if (!(await waitFor(async () => (await cardCount(column)) === 60, 3000))) return fail('AUTO-APPEND', `scrolled to 300px above the end, the list has ${await cardCount(column)} cards, expected 60`)
+      await sleep(500)
+      if ((await cardCount(column)) !== 60) fail('AUTO-APPEND', `the list went on to ${await cardCount(column)} cards without another scroll`)
+      await toEnd()
+      if (!(await waitFor(async () => (await cardCount(column)) === 70, 3000))) return fail('AUTO-APPEND', `after a second scroll to the end the list has ${await cardCount(column)} cards, expected 70`)
+      if (await column.locator('[data-more]').count()) fail('AUTO-APPEND', 'the "load more" sentinel is still there with every card rendered')
+      // The last batch went in below the scroll position: scroll to the
+      // end again so the shot shows the last card, where the sentinel was.
+      await toEnd()
+      await sleep(300)
+      const last = await list.evaluate((el) => {
+        const cards = el.querySelectorAll('article[data-card-id]')
+        const r = cards[cards.length - 1].getBoundingClientRect()
+        const box = el.getBoundingClientRect()
+        return r.bottom > box.top && r.top < box.bottom
+      })
+      if (!last) fail('AUTO-APPEND', 'the end shot does not show the last card')
+      await shot('end')
+    },
+  }),
+  // Crossing 768px hands the scroller over without a remount: the phone
+  // list carries data-scroller (and is the sentinel root and the
+  // tap-to-top target) only on the phone, the wrapper only on the
+  // desktop. The stored section row keeps the Column's memo holding
+  // across the flip, as on any tab whose Fresh or History was ever
+  // toggled, so only a prop the memo compares can re-render it.
+  dashFlow('flow-scroller-rotate', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page, context }) => {
+      await withStories(page, moreNhl(67))
+      await page.addInitScript(() => localStorage.setItem('popping.v1.mobileTab', 'cat:nhl'))
+      prefMock(context).seed({ 'column_sections:nhl': {} })
+    },
+    run: async ({ page, fail }) => {
+      const scrollers = () =>
+        page.evaluate(() => [...document.querySelectorAll('[data-scroller]')].map((el) => (el.querySelector('main.grid') ? 'wrapper' : el.closest('main.md\\:hidden') ? 'phone' : 'other')))
+      const one = (want) => waitFor(async () => JSON.stringify(await scrollers()) === JSON.stringify([want]), 3000)
+      if (!(await one('wrapper'))) fail('ROTATE', `at 1280 data-scroller is on ${JSON.stringify(await scrollers())}, expected only the wrapper`)
+
+      await page.setViewportSize({ width: 390, height: 844 })
+      if (!(await one('phone'))) return fail('ROTATE', `after 1280 → 390 data-scroller is on ${JSON.stringify(await scrollers())}, expected only the phone list`)
+      if (!/^nhl/i.test(await selectedTab(page))) return fail('ROTATE', `the phone shows ${JSON.stringify(await selectedTab(page))}, expected the NHL tab`)
+      const column = page.locator(`${MOBILE_MAIN} section`)
+      const list = page.locator(`${MOBILE_MAIN} section [data-scroller]`)
+      if (!(await sentinelBelow(column, 300))) return fail('ROTATE', 'the NHL list has no "load more" sentinel')
+      if (!(await waitFor(async () => (await cardCount(column)) === 60, 3000))) fail('ROTATE', `after 1280 → 390, scrolled to 300px above the end, the list has ${await cardCount(column)} cards, expected 60`)
+      const top = () => list.evaluate((el) => el.scrollTop)
+      if ((await top()) <= 200) return fail('ROTATE', 'the NHL list did not scroll down')
+      // A click: this context (a desktop one) has no touch.
+      await phoneTab(page, /^nhl/i).click()
+      if (!(await waitFor(async () => (await top()) === 0, 3000))) fail('ROTATE', `after 1280 → 390 a tap on the shown tab left the list at ${await top()}`)
+
+      await page.setViewportSize({ width: 1280, height: 800 })
+      if (!(await one('wrapper'))) fail('ROTATE', `after 390 → 1280 data-scroller is on ${JSON.stringify(await scrollers())}, expected only the wrapper`)
+    },
+  }),
+  // ArrowDown past the first 30 cards: the selected card is rendered
+  // (the batch grows to reach it), selected and scrolled into view.
+  dashFlow('flow-desktop-keys-past-batch', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page }) => {
+      await withStories(page, moreNhl(67))
+    },
+    run: async ({ page, fail }) => {
+      const grid = await gridLabels(page)
+      const at = grid.findIndex((l) => /^nhl$/i.test(l))
+      if (at < 0) return fail('KEYS-BATCH', `no NHL column in ${JSON.stringify(grid)}`)
+      for (let i = 0; i < at; i++) await page.keyboard.press('ArrowRight')
+      for (let i = 0; i < 31; i++) await page.keyboard.press('ArrowDown')
+      const nhl = page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: /^nhl$/i }) })
+      const sel = nhl.locator('article[data-card-id][tabindex="0"]')
+      if (!(await waitFor(async () => (await sel.count()) === 1, 3000))) return fail('KEYS-BATCH', `after 31 ArrowDowns no NHL card is selected (${await cardCount(nhl)} rendered)`)
+      const ids = await nhl.locator('article[data-card-id]').evaluateAll((els) => els.map((el) => el.getAttribute('data-card-id')))
+      const id = await sel.getAttribute('data-card-id')
+      if (ids.indexOf(id) !== 30) fail('KEYS-BATCH', `the selected card is number ${ids.indexOf(id) + 1} of the column, expected 31`)
+      if (ids.length !== 60) fail('KEYS-BATCH', `the column renders ${ids.length} cards, expected 60 (the batch grown to reach the selection)`)
+      if (!(await waitFor(() => sel.evaluate((el) => {
+        const r = el.getBoundingClientRect()
+        return r.top >= 0 && r.bottom <= innerHeight
+      }), 3000))) fail('KEYS-BATCH', 'the selected card was not scrolled into view')
     },
   }),
 ]

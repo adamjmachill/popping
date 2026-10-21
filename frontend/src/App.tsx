@@ -569,6 +569,10 @@ export function App() {
   // Column's ``scrollerRef``, so it changes on every tab remount and
   // hooks that need it take it as an effect dependency.
   const [phoneScroller, setPhoneScroller] = useState<HTMLElement | null>(null)
+  // The desktop's one scroller: the wrapper around Brief, the chips, For
+  // You, FramingWatch and the grid. Each desktop Column observes its
+  // "load more" sentinel against it.
+  const [desktopScroller, setDesktopScroller] = useState<HTMLElement | null>(null)
   // The wrapper that scrolls the Brief tab.
   const phoneBodyRef = useRef<HTMLDivElement | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -2922,213 +2926,410 @@ export function App() {
         </div>
       )}
 
-      {/* Desktop keeps the Brief inline at the top — there's room for
-          it. Mobile moves it into its own tab (see the mobile main
-          below) so the column content isn't pushed below the fold
-          by a card the user has to scroll past every time. */}
-      {isDesktop && (
-        <div>
-          <BriefCard
-            brief={brief}
-            onBriefChange={setBrief}
-            tone={briefTone}
-            onToneChange={setBriefTone}
-            triggerGenerate={triggerBriefGenerate}
-            llmConfigured={llmConfigured}
-            onOpenSettings={openSettings}
-          />
-        </div>
-      )}
+      {/* The desktop scrolls as one page: this wrapper is its only
+          scroller (``data-scroller``), from Brief down to the grid, and
+          nothing inside it scrolls on its own. It is ``min-h-0`` so it
+          takes the height under the header; before, the grid was that
+          flex scroller and a For You row taller than the window
+          squeezed it to its padding while the document scrolled. On a
+          phone it is ``contents``, so the chips, the search results and
+          the phone ``<main>`` stay this column's own flex items. Always
+          the same element, so crossing 768px remounts nothing. */}
+      <div
+        ref={isDesktop ? setDesktopScroller : undefined}
+        data-scroller={isDesktop ? '' : undefined}
+        className={isDesktop ? 'flex-1 min-h-0 overflow-y-auto overscroll-contain' : 'contents'}
+      >
+        {/* Desktop keeps the Brief inline at the top — there's room for
+            it. Mobile moves it into its own tab (see the mobile main
+            below) so the column content isn't pushed below the fold
+            by a card the user has to scroll past every time. */}
+        {isDesktop && (
+          <div>
+            <BriefCard
+              brief={brief}
+              onBriefChange={setBrief}
+              tone={briefTone}
+              onToneChange={setBriefTone}
+              triggerGenerate={triggerBriefGenerate}
+              llmConfigured={llmConfigured}
+              onOpenSettings={openSettings}
+            />
+          </div>
+        )}
 
-      <PresetChips
-        presets={filterPresets}
-        onApply={applyPreset}
-        onDelete={deletePreset}
-        onRename={renamePreset}
-        onUpdate={updatePreset}
-      />
+        <PresetChips
+          presets={filterPresets}
+          onApply={applyPreset}
+          onDelete={deletePreset}
+          onRename={renamePreset}
+          onUpdate={updatePreset}
+        />
 
-      {showSearchView ? (
-        <main className="flex-1 overflow-y-auto overscroll-contain py-3 sm:py-4 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:pl-[max(1rem,env(safe-area-inset-left))] sm:pr-[max(1rem,env(safe-area-inset-right))]">
-          <SearchResults
-            query={searchQuery}
-            entries={searchResults.filter((e) => !hiddenSet.has(e.id))}
-            sourcesById={sourcesById}
-            error={searchError}
-            searching={searching}
-            categoriesBySourceId={categoriesBySourceId}
-            faviconBySourceId={faviconBySourceId}
-            readIds={globalReadIds}
-            expandedSummaries={expandedSummaries}
-            onToggleSummary={toggleSummary}
-            onMarkRead={(entryId) => toggleEntryRead('Search', entryId)}
-            onHide={(entryId) => {
-              hideEntry(entryId)
-              toast('Entry hidden.', {
-                kind: 'info',
-                action: {
-                  label: 'Undo',
-                  onClick: () => restoreHiddenEntry(entryId),
-                },
-              })
-            }}
-            onHideToggle={(entryId) => toggleHideEntry('Search', entryId)}
-            hiddenSet={hiddenSet}
-            onStar={(entryId) => {
-              const wasStarred = toggleStarEntry(entryId)
-              toast(
-                wasStarred
-                  ? 'Removed from Saved.'
-                  : 'Saved for later — see the Saved column.',
-                {
+        {showSearchView ? (
+          <main className={`${isDesktop ? '' : 'flex-1 overflow-y-auto overscroll-contain '}py-3 sm:py-4 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))] sm:pl-[max(1rem,env(safe-area-inset-left))] sm:pr-[max(1rem,env(safe-area-inset-right))]`}>
+            <SearchResults
+              query={searchQuery}
+              entries={searchResults.filter((e) => !hiddenSet.has(e.id))}
+              sourcesById={sourcesById}
+              error={searchError}
+              searching={searching}
+              categoriesBySourceId={categoriesBySourceId}
+              faviconBySourceId={faviconBySourceId}
+              readIds={globalReadIds}
+              expandedSummaries={expandedSummaries}
+              onToggleSummary={toggleSummary}
+              onMarkRead={(entryId) => toggleEntryRead('Search', entryId)}
+              onHide={(entryId) => {
+                hideEntry(entryId)
+                toast('Entry hidden.', {
                   kind: 'info',
                   action: {
                     label: 'Undo',
-                    onClick: () => setStarred(entryId, wasStarred),
+                    onClick: () => restoreHiddenEntry(entryId),
                   },
-                },
-              )
-            }}
-            starredSet={starredSet}
-            onVote={voteEntry}
-            votedMap={votedMap}
-          />
-        </main>
-      ) : !firstRefreshDone ? (
-        // First load in flight: the tabs would otherwise show empty for
-        // a moment before the very first response lands. Saved and For
-        // You are in the strip from the first render, so the columns are
-        // never empty; an empty tab says so itself ("No stories yet").
-        <div className="flex-1 overflow-y-auto overscroll-contain">
-          <SkeletonGrid />
-        </div>
-      ) : (
-        <>
-          {/* Desktop. The view is two surfaces stacked:
-              1. For You row — only in 'all' view, whenever its tab is
-                 shown (Edit tabs), empty or not, as the phone's For You
-                 tab is: Jump to column lands on it. Full-width card grid;
-                 no column chrome so the personal feed reads as the "front
-                 page". Empty, it says "No stories yet", with the
-                 first-feed button while every feed is a built-in.
-              2. By-category grid — the All Subs columns. Skipped in
-                 'multisub' view because the multi-sub column is the
-                 whole dashboard there. */}
-          {isDesktop && viewKind === 'all' && !hiddenTabs.has(FORYOU_KEY) && (
-            <section ref={setColumnRef(FORYOU_KEY)} className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
-              <header className="flex items-center justify-between mb-2">
-                <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
-                  For You
-                </h2>
-                {visibleForYou.length > 0 && (
-                  <span className="text-ios-caption text-label-tertiary">
-                    {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
-                  </span>
+                })
+              }}
+              onHideToggle={(entryId) => toggleHideEntry('Search', entryId)}
+              hiddenSet={hiddenSet}
+              onStar={(entryId) => {
+                const wasStarred = toggleStarEntry(entryId)
+                toast(
+                  wasStarred
+                    ? 'Removed from Saved.'
+                    : 'Saved for later — see the Saved column.',
+                  {
+                    kind: 'info',
+                    action: {
+                      label: 'Undo',
+                      onClick: () => setStarred(entryId, wasStarred),
+                    },
+                  },
+                )
+              }}
+              starredSet={starredSet}
+              onVote={voteEntry}
+              votedMap={votedMap}
+            />
+          </main>
+        ) : !firstRefreshDone ? (
+          // First load in flight: the tabs would otherwise show empty for
+          // a moment before the very first response lands. Saved and For
+          // You are in the strip from the first render, so the columns are
+          // never empty; an empty tab says so itself ("No stories yet").
+          <div className={isDesktop ? undefined : 'flex-1 overflow-y-auto overscroll-contain'}>
+            <SkeletonGrid />
+          </div>
+        ) : (
+          <>
+            {/* Desktop. The view is two surfaces stacked:
+                1. For You row — only in 'all' view, whenever its tab is
+                   shown (Edit tabs), empty or not, as the phone's For You
+                   tab is: Jump to column lands on it. Full-width card grid;
+                   no column chrome so the personal feed reads as the "front
+                   page". Empty, it says "No stories yet", with the
+                   first-feed button while every feed is a built-in.
+                2. By-category grid — the All Subs columns. Skipped in
+                   'multisub' view because the multi-sub column is the
+                   whole dashboard there. */}
+            {isDesktop && viewKind === 'all' && !hiddenTabs.has(FORYOU_KEY) && (
+              <section ref={setColumnRef(FORYOU_KEY)} className="pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 pb-3 border-b border-hairline">
+                <header className="flex items-center justify-between mb-2">
+                  <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
+                    For You
+                  </h2>
+                  {visibleForYou.length > 0 && (
+                    <span className="text-ios-caption text-label-tertiary">
+                      {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
+                    </span>
+                  )}
+                </header>
+                {visibleForYou.length === 0 && (
+                  <div className="px-1 space-y-3">
+                    <p className="text-ios-body text-label-secondary">No stories yet</p>
+                    {noOwnFeeds && <FirstFeedButton onClick={openFeeds} />}
+                  </div>
                 )}
-              </header>
-              {visibleForYou.length === 0 && (
-                <div className="px-1 space-y-3">
-                  <p className="text-ios-body text-label-secondary">No stories yet</p>
-                  {noOwnFeeds && <FirstFeedButton onClick={openFeeds} />}
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {visibleForYou.map((e) => {
+                    // Per-card engagement props. The For You
+                    // row was previously read-only — no
+                    // mark-read, no hide, no star. The user
+                    // could see the personal feed but
+                    // couldn't engage with it. Now every
+                    // card has the full set of per-card
+                    // actions wired to App-level callbacks
+                    // so the user can mark-read, hide, or
+                    // star a For You card the same way
+                    // they would in a category column.
+                    //
+                    // ``unread`` reflects ``globalReadIds``, the
+                    // union of every column's manual read-set —
+                    // so marking this card read here also dims
+                    // it in its category column, and marking it
+                    // read there dims it here too. The per-column
+                    // lastViewed isn't used here (the For You row
+                    // has no "mark all read" button).
+                    //
+                    // ``selected`` / ``onActivate`` /
+                    // ``cardRef`` are not passed because
+                    // keyboard nav is per-column, not
+                    // per-row, and the For You row is
+                    // not a "column" the user can scroll
+                    // into.
+                    const isRead = globalReadIds.has(e.id)
+                    return (
+                      <Card
+                        key={e.id}
+                        entry={e}
+                        sourceName={sourcesById.get(e.source_id)}
+                        sourceFaviconPath={faviconBySourceId.get(e.source_id)}
+                        category={categoriesBySourceId.get(e.source_id)}
+                        unread={!isRead}
+                        expanded={expandedSummaries.has(e.id)}
+                        onToggleSummary={() => toggleSummary(e.id)}
+                        onMarkRead={() => toggleEntryRead('For You', e.id)}
+                        onHide={() => {
+                          hideEntry(e.id)
+                          toast('Entry hidden.', {
+                            kind: 'info',
+                            action: {
+                              label: 'Undo',
+                              onClick: () => restoreHiddenEntry(e.id),
+                            },
+                          })
+                        }}
+                        onHideToggle={() => toggleHideEntry('For You', e.id)}
+                        hidden={hiddenSet.has(e.id)}
+                        onStar={() => {
+                          const wasStarred = toggleStarEntry(e.id)
+                          toast(
+                            wasStarred
+                              ? 'Removed from Saved.'
+                              : 'Saved for later — see the Saved column.',
+                            {
+                              kind: 'info',
+                              action: {
+                                label: 'Undo',
+                                onClick: () => setStarred(e.id, wasStarred),
+                              },
+                            },
+                          )
+                        }}
+                        starred={starredSet.has(e.id)}
+                        onVote={(dir) => voteEntry(e.id, dir)}
+                        vote={votedMap.get(e.id) ?? null}
+                        onSourceTap={onSourceTap}
+                      />
+                    )
+                  })}
                 </div>
-              )}
-              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                {visibleForYou.map((e) => {
-                  // Per-card engagement props. The For You
-                  // row was previously read-only — no
-                  // mark-read, no hide, no star. The user
-                  // could see the personal feed but
-                  // couldn't engage with it. Now every
-                  // card has the full set of per-card
-                  // actions wired to App-level callbacks
-                  // so the user can mark-read, hide, or
-                  // star a For You card the same way
-                  // they would in a category column.
-                  //
-                  // ``unread`` reflects ``globalReadIds``, the
-                  // union of every column's manual read-set —
-                  // so marking this card read here also dims
-                  // it in its category column, and marking it
-                  // read there dims it here too. The per-column
-                  // lastViewed isn't used here (the For You row
-                  // has no "mark all read" button).
-                  //
-                  // ``selected`` / ``onActivate`` /
-                  // ``cardRef`` are not passed because
-                  // keyboard nav is per-column, not
-                  // per-row, and the For You row is
-                  // not a "column" the user can scroll
-                  // into.
-                  const isRead = globalReadIds.has(e.id)
-                  return (
-                    <Card
-                      key={e.id}
-                      entry={e}
-                      sourceName={sourcesById.get(e.source_id)}
-                      sourceFaviconPath={faviconBySourceId.get(e.source_id)}
-                      category={categoriesBySourceId.get(e.source_id)}
-                      unread={!isRead}
-                      expanded={expandedSummaries.has(e.id)}
-                      onToggleSummary={() => toggleSummary(e.id)}
-                      onMarkRead={() => toggleEntryRead('For You', e.id)}
-                      onHide={() => {
-                        hideEntry(e.id)
+              </section>
+            )}
+            {isDesktop && viewKind === 'all' && <FramingWatch />}
+            {isDesktop && (
+              <main className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 py-4 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] overflow-x-clip">
+                {keyColumns.map((col) => (
+                  <div key={col.key} ref={setColumnRef(col.key)} className="contents">
+                    <Column
+                      columnKey={col.key}
+                      label={col.label}
+                      sourceName={col.sourceName}
+                      sentinelRoot={desktopScroller}
+                      sections={sectionsByColumn.get(col.key) ?? { new: [], history: [] }}
+                      sourcesById={sourcesById}
+                      sourcesByName={sourcesByName}
+                      noOwnFeeds={noOwnFeeds}
+                      onAddFeed={openFeeds}
+                      newCount={newCountByColumn.get(col.key)}
+                      onRefresh={manualRefresh}
+                      onSourceTap={onSourceTap}
+                      selectedId={col.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined}
+                      cardRefs={cardRefs}
+                      onMarkRead={() => markColumnRead(col.name)}
+                      onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
+                      onHideEntry={(entryId) => {
+                        hideEntry(entryId)
                         toast('Entry hidden.', {
                           kind: 'info',
                           action: {
                             label: 'Undo',
-                            onClick: () => restoreHiddenEntry(e.id),
+                            onClick: () => restoreHiddenEntry(entryId),
                           },
                         })
                       }}
-                      onHideToggle={() => toggleHideEntry('For You', e.id)}
-                      hidden={hiddenSet.has(e.id)}
-                      onStar={() => {
-                        const wasStarred = toggleStarEntry(e.id)
+                      onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
+                      hiddenSet={hiddenSet}
+                      onStarEntry={(entryId) => {
+                        const wasStarred = toggleStarEntry(entryId)
                         toast(
-                          wasStarred
-                            ? 'Removed from Saved.'
-                            : 'Saved for later — see the Saved column.',
-                          {
-                            kind: 'info',
-                            action: {
-                              label: 'Undo',
-                              onClick: () => setStarred(e.id, wasStarred),
+                            wasStarred
+                              ? 'Removed from Saved.'
+                              : 'Saved for later — see the Saved column.',
+                            {
+                              kind: 'info',
+                              action: {
+                                label: 'Undo',
+                                onClick: () => setStarred(entryId, wasStarred),
+                              },
                             },
-                          },
-                        )
+                          )
                       }}
-                      starred={starredSet.has(e.id)}
-                      onVote={(dir) => voteEntry(e.id, dir)}
-                      vote={votedMap.get(e.id) ?? null}
-                      onSourceTap={onSourceTap}
+                      starredSet={starredSet}
+                      onVoteEntry={voteEntry}
+                      votedMap={votedMap}
+                      prefs={prefsFor(col)}
+                      onPrefsChange={(next) => setPrefsFor(col.name, next)}
+                      totalCount={col.totalCount}
+                      categoriesBySourceId={categoriesBySourceId}
+                      faviconBySourceId={faviconBySourceId}
+                      expandedSummaries={expandedSummaries}
+                      onToggleSummary={toggleSummary}
+                      sectionsCollapsed={sectionsCollapsedFor(col.name)}
+                      onToggleSection={(key) => setColumnSection(col.name, key)}
                     />
-                  )
-                })}
+                  </div>
+                ))}
+              </main>
+            )}
+
+            <main className="md:hidden flex-1 min-h-0 flex flex-col py-3 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))]">
+              {/* Tab bar. Replaces the old swipe-to-change-column
+                  gesture — that gesture had no direction lock (any
+                  60px-plus horizontal touch delta fired it, scroll
+                  wobble included) and it collided with the new
+                  per-card swipe actions in Card.tsx, which now own
+                  the horizontal-drag gesture on mobile. Tabs are the
+                  explicit, discoverable replacement; "Brief" is a tab
+                  here (not inline above the column, like on desktop)
+                  so it doesn't push the column below the fold on a
+                  small screen. Horizontally scrollable — a source
+                  list with 6+ categories won't fit every tab label on
+                  a phone-width screen. */}
+              {/* The strip, and the Edit pill pinned at its trailing edge,
+                  outside the tablist. */}
+              <div className="shrink-0 flex items-start gap-1.5 -mx-1">
+                <div
+                  ref={stripRef}
+                  role="tablist"
+                  aria-label="dashboard sections"
+                  data-hscroll
+                  className="min-w-0 flex-1 flex gap-1.5 overflow-x-auto pb-1 px-1"
+                >
+                  {/* Each tab is a 44px button around a smaller pill, so the
+                      strip stays compact while every tab is easy to hit. */}
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={shownTab === BRIEF_KEY}
+                    onClick={() => onPhoneTabTap(BRIEF_KEY)}
+                    className="group shrink-0 min-h-[44px] flex items-center"
+                  >
+                    <span
+                      className={`rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
+                        shownTab === BRIEF_KEY
+                          ? 'bg-accent text-white'
+                          : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
+                      }`}
+                    >
+                      Brief
+                    </span>
+                  </button>
+                  {columns.map((c) => {
+                    const newCount = newCountByColumn.get(c.key)
+                    const shown = c.key === shownTab
+                    return (
+                      // Navigation, not mark-read. Merely peeking at a
+                      // column shouldn't drop its "+N new" chip — that
+                      // violates the universal-inbox rule. The column
+                      // header (desktop) and the per-card ✓ button are
+                      // the explicit mark-read affordances.
+                      <button
+                        type="button"
+                        key={c.key}
+                        role="tab"
+                        aria-selected={shown}
+                        onClick={() => onPhoneTabTap(c.key)}
+                        className="group shrink-0 min-h-[44px] flex items-center"
+                      >
+                        <span
+                          className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
+                            shown
+                              ? 'bg-accent text-white'
+                              : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
+                          }`}
+                        >
+                          {c.label}
+                          {!!newCount && (
+                            <span
+                              className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
+                                shown ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
+                              }`}
+                            >
+                              {newCount}
+                            </span>
+                          )}
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+                <button
+                  ref={editPillRef}
+                  type="button"
+                  aria-label="Edit tabs"
+                  data-edit-tabs
+                  onClick={() => openTabsEditor('pill')}
+                  className="group shrink-0 min-h-[44px] flex items-center pr-1"
+                >
+                  <span className="rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap bg-bg-surface text-accent group-active:bg-bg-elevated">
+                    Edit
+                  </span>
+                </button>
               </div>
-            </section>
-          )}
-          {isDesktop && viewKind === 'all' && <FramingWatch />}
-          {isDesktop && (
-            <main className="grid grid-cols-[repeat(auto-fit,minmax(280px,1fr))] gap-4 py-4 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] flex-1 overflow-x-clip overflow-y-auto">
-              {keyColumns.map((col) => (
-                <div key={col.key} ref={setColumnRef(col.key)} className="contents">
+
+              {/* Scrolls only the Brief tab: a Column fills it (h-full) and
+                  scrolls its own list, the phone's ``data-scroller``. */}
+              <div ref={phoneBodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
+                {!phoneCol ? (
+                  <BriefCard
+                    brief={brief}
+                    onBriefChange={setBrief}
+                    tone={briefTone}
+                    onToneChange={setBriefTone}
+                    triggerGenerate={triggerBriefGenerate}
+                    llmConfigured={llmConfigured}
+                    onOpenSettings={openSettings}
+                    startExpanded
+                  />
+                ) : (
                   <Column
-                    columnKey={col.key}
-                    label={col.label}
-                    sourceName={col.sourceName}
-                    sections={sectionsByColumn.get(col.key) ?? { new: [], history: [] }}
+                    // A new list per tab: it starts at the top, and the
+                    // scroller hooks rebind to it.
+                    key={phoneCol.key}
+                    // The phone list is the phone's scroller, and its own
+                    // sentinel root. While this layout is hidden on a
+                    // desktop it holds neither: the desktop's one
+                    // ``data-scroller`` is the wrapper above.
+                    scrollerRef={isDesktop ? undefined : setPhoneScroller}
+                    sentinelRoot={phoneScroller}
+                    columnKey={phoneCol.key}
+                    label={phoneCol.label}
+                    sourceName={phoneCol.sourceName}
+                    sections={sectionsByColumn.get(phoneCol.key) ?? { new: [], history: [] }}
                     sourcesById={sourcesById}
                     sourcesByName={sourcesByName}
                     noOwnFeeds={noOwnFeeds}
                     onAddFeed={openFeeds}
-                    newCount={newCountByColumn.get(col.key)}
+                    newCount={newCountByColumn.get(phoneCol.key)}
                     onRefresh={manualRefresh}
                     onSourceTap={onSourceTap}
-                    selectedId={col.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined}
+                    selectedId={
+                      phoneCol.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined
+                    }
                     cardRefs={cardRefs}
-                    onMarkRead={() => markColumnRead(col.name)}
-                    onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
+                    onMarkRead={() => markColumnRead(phoneCol.name)}
+                    onMarkEntryRead={(entryId) => toggleEntryRead(phoneCol.name, entryId)}
                     onHideEntry={(entryId) => {
                       hideEntry(entryId)
                       toast('Entry hidden.', {
@@ -3139,218 +3340,42 @@ export function App() {
                         },
                       })
                     }}
-                    onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
+                    onHideToggle={(entryId) => toggleHideEntry(phoneCol.name, entryId)}
                     hiddenSet={hiddenSet}
                     onStarEntry={(entryId) => {
                       const wasStarred = toggleStarEntry(entryId)
                       toast(
-                          wasStarred
-                            ? 'Removed from Saved.'
-                            : 'Saved for later — see the Saved column.',
-                          {
-                            kind: 'info',
-                            action: {
-                              label: 'Undo',
-                              onClick: () => setStarred(entryId, wasStarred),
-                            },
-                          },
-                        )
+                                wasStarred
+                                  ? 'Removed from Saved.'
+                                  : 'Saved for later — see the Saved column.',
+                                {
+                                  kind: 'info',
+                                  action: {
+                                    label: 'Undo',
+                                    onClick: () => setStarred(entryId, wasStarred),
+                                  },
+                                },
+                              )
                     }}
                     starredSet={starredSet}
                     onVoteEntry={voteEntry}
                     votedMap={votedMap}
-                    prefs={prefsFor(col)}
-                    onPrefsChange={(next) => setPrefsFor(col.name, next)}
-                    totalCount={col.totalCount}
+                    prefs={prefsFor(phoneCol)}
+                    onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
+                    totalCount={phoneCol.totalCount}
                     categoriesBySourceId={categoriesBySourceId}
                     faviconBySourceId={faviconBySourceId}
                     expandedSummaries={expandedSummaries}
                     onToggleSummary={toggleSummary}
-                    sectionsCollapsed={sectionsCollapsedFor(col.name)}
-                    onToggleSection={(key) => setColumnSection(col.name, key)}
+                    sectionsCollapsed={sectionsCollapsedFor(phoneCol.name)}
+                    onToggleSection={(key) => setColumnSection(phoneCol.name, key)}
                   />
-                </div>
-              ))}
-            </main>
-          )}
-
-          <main className="md:hidden flex-1 min-h-0 flex flex-col py-3 pl-[max(0.75rem,env(safe-area-inset-left))] pr-[max(0.75rem,env(safe-area-inset-right))]">
-            {/* Tab bar. Replaces the old swipe-to-change-column
-                gesture — that gesture had no direction lock (any
-                60px-plus horizontal touch delta fired it, scroll
-                wobble included) and it collided with the new
-                per-card swipe actions in Card.tsx, which now own
-                the horizontal-drag gesture on mobile. Tabs are the
-                explicit, discoverable replacement; "Brief" is a tab
-                here (not inline above the column, like on desktop)
-                so it doesn't push the column below the fold on a
-                small screen. Horizontally scrollable — a source
-                list with 6+ categories won't fit every tab label on
-                a phone-width screen. */}
-            {/* The strip, and the Edit pill pinned at its trailing edge,
-                outside the tablist. */}
-            <div className="shrink-0 flex items-start gap-1.5 -mx-1">
-              <div
-                ref={stripRef}
-                role="tablist"
-                aria-label="dashboard sections"
-                data-hscroll
-                className="min-w-0 flex-1 flex gap-1.5 overflow-x-auto pb-1 px-1"
-              >
-                {/* Each tab is a 44px button around a smaller pill, so the
-                    strip stays compact while every tab is easy to hit. */}
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={shownTab === BRIEF_KEY}
-                  onClick={() => onPhoneTabTap(BRIEF_KEY)}
-                  className="group shrink-0 min-h-[44px] flex items-center"
-                >
-                  <span
-                    className={`rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                      shownTab === BRIEF_KEY
-                        ? 'bg-accent text-white'
-                        : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
-                    }`}
-                  >
-                    Brief
-                  </span>
-                </button>
-                {columns.map((c) => {
-                  const newCount = newCountByColumn.get(c.key)
-                  const shown = c.key === shownTab
-                  return (
-                    // Navigation, not mark-read. Merely peeking at a
-                    // column shouldn't drop its "+N new" chip — that
-                    // violates the universal-inbox rule. The column
-                    // header (desktop) and the per-card ✓ button are
-                    // the explicit mark-read affordances.
-                    <button
-                      type="button"
-                      key={c.key}
-                      role="tab"
-                      aria-selected={shown}
-                      onClick={() => onPhoneTabTap(c.key)}
-                      className="group shrink-0 min-h-[44px] flex items-center"
-                    >
-                      <span
-                        className={`flex items-center gap-1 rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap transition ${
-                          shown
-                            ? 'bg-accent text-white'
-                            : 'bg-bg-surface text-label-secondary group-active:bg-bg-elevated'
-                        }`}
-                      >
-                        {c.label}
-                        {!!newCount && (
-                          <span
-                            className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
-                              shown ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
-                            }`}
-                          >
-                            {newCount}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                  )
-                })}
+                )}
               </div>
-              <button
-                ref={editPillRef}
-                type="button"
-                aria-label="Edit tabs"
-                data-edit-tabs
-                onClick={() => openTabsEditor('pill')}
-                className="group shrink-0 min-h-[44px] flex items-center pr-1"
-              >
-                <span className="rounded-full px-3 py-1.5 text-ios-caption font-medium whitespace-nowrap bg-bg-surface text-accent group-active:bg-bg-elevated">
-                  Edit
-                </span>
-              </button>
-            </div>
-
-            {/* Scrolls only the Brief tab: a Column fills it (h-full) and
-                scrolls its own list, the phone's ``data-scroller``. */}
-            <div ref={phoneBodyRef} className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
-              {!phoneCol ? (
-                <BriefCard
-                  brief={brief}
-                  onBriefChange={setBrief}
-                  tone={briefTone}
-                  onToneChange={setBriefTone}
-                  triggerGenerate={triggerBriefGenerate}
-                  llmConfigured={llmConfigured}
-                  onOpenSettings={openSettings}
-                  startExpanded
-                />
-              ) : (
-                <Column
-                  // A new list per tab: it starts at the top, and the
-                  // scroller hooks rebind to it.
-                  key={phoneCol.key}
-                  scrollerRef={setPhoneScroller}
-                  columnKey={phoneCol.key}
-                  label={phoneCol.label}
-                  sourceName={phoneCol.sourceName}
-                  sections={sectionsByColumn.get(phoneCol.key) ?? { new: [], history: [] }}
-                  sourcesById={sourcesById}
-                  sourcesByName={sourcesByName}
-                  noOwnFeeds={noOwnFeeds}
-                  onAddFeed={openFeeds}
-                  newCount={newCountByColumn.get(phoneCol.key)}
-                  onRefresh={manualRefresh}
-                  onSourceTap={onSourceTap}
-                  selectedId={
-                    phoneCol.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined
-                  }
-                  cardRefs={cardRefs}
-                  onMarkRead={() => markColumnRead(phoneCol.name)}
-                  onMarkEntryRead={(entryId) => toggleEntryRead(phoneCol.name, entryId)}
-                  onHideEntry={(entryId) => {
-                    hideEntry(entryId)
-                    toast('Entry hidden.', {
-                      kind: 'info',
-                      action: {
-                        label: 'Undo',
-                        onClick: () => restoreHiddenEntry(entryId),
-                      },
-                    })
-                  }}
-                  onHideToggle={(entryId) => toggleHideEntry(phoneCol.name, entryId)}
-                  hiddenSet={hiddenSet}
-                  onStarEntry={(entryId) => {
-                    const wasStarred = toggleStarEntry(entryId)
-                    toast(
-                              wasStarred
-                                ? 'Removed from Saved.'
-                                : 'Saved for later — see the Saved column.',
-                              {
-                                kind: 'info',
-                                action: {
-                                  label: 'Undo',
-                                  onClick: () => setStarred(entryId, wasStarred),
-                                },
-                              },
-                            )
-                  }}
-                  starredSet={starredSet}
-                  onVoteEntry={voteEntry}
-                  votedMap={votedMap}
-                  prefs={prefsFor(phoneCol)}
-                  onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
-                  totalCount={phoneCol.totalCount}
-                  categoriesBySourceId={categoriesBySourceId}
-                  faviconBySourceId={faviconBySourceId}
-                  expandedSummaries={expandedSummaries}
-                  onToggleSummary={toggleSummary}
-                  sectionsCollapsed={sectionsCollapsedFor(phoneCol.name)}
-                  onToggleSection={(key) => setColumnSection(phoneCol.name, key)}
-                />
-              )}
-            </div>
-          </main>
-        </>
-      )}
+            </main>
+          </>
+        )}
+      </div>
 
       <Drawer
         open={drawerOpen}
