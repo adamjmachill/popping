@@ -2088,6 +2088,62 @@ module.exports = [
     },
   }),
 
+  // The save's PATCH has gone (its 1 s batch ran) but not been answered
+  // when the story opens, with nothing else queued. Hiding the page sends
+  // the save again with keepalive, which gets through; the first request
+  // only fails after the return (iOS cut it off), when sync rule 4 has
+  // given it up. The save is stored, and nothing more goes.
+  dashFlow('flow-prefs-hide-while-sending', {
+    expectedFailedLoads: ['/api/preferences/starred_entries'],
+    before: async ({ page }) => {
+      await installClock(page)
+      page._held = []
+      page._holdPatch = false
+      await page.route(
+        (u) => new URL(u).pathname === '/api/preferences/starred_entries',
+        async (route) => {
+          if (route.request().method() !== 'PATCH' || !page._holdPatch) return route.fallback()
+          page._holdPatch = false
+          await new Promise((r) => page._held.push(r))
+          return route.abort('failed')
+        },
+      )
+    },
+    run: async ({ page, context, fail }) => {
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      const patches = () => harnessLog(page).then((h) => h.fetches.filter((f) => f.method === 'PATCH' && f.path === '/api/preferences/starred_entries'))
+      const card = page.locator(`${MOBILE_MAIN} article[data-card-id]`).first()
+      const id = Number(await card.getAttribute('data-card-id'))
+      const saved = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="remove from saved"]`).count().then((c) => c > 0)
+      const stored = () => (prefMock(context).value('starred_entries') || []).includes(id)
+      page._holdPatch = true
+      await tap(page, card.locator('button[aria-label="save for later"]'))
+      await page.clock.runFor(1000)
+      if (!(await waitFor(() => page._held.length === 1, 3000))) return fail('PREFS-HIDE-SENDING', 'the save sent no PATCH after its batch')
+      const [first] = await patches()
+      if (first.keepalive) return fail('PREFS-HIDE-SENDING', 'the batch PATCH was sent with keepalive')
+      await setHidden(page, true)
+      if (!(await waitFor(async () => (await patches()).length === 2, 3000))) return fail('PREFS-HIDE-SENDING', 'hiding the page did not send the save on its way again')
+      if (!(await patches())[1].keepalive) fail('PREFS-HIDE-SENDING', 'the second PATCH has no keepalive')
+      if (!(await waitFor(stored, 3000))) return fail('PREFS-HIDE-SENDING', `story ${id} is not in the store after the keepalive PATCH`)
+      if (!(await waitFor(() => answered(page, 'PATCH', '/api/preferences/starred_entries'), 3000))) return fail('PREFS-HIDE-SENDING', 'the keepalive PATCH was never answered')
+      await setHidden(page, false)
+      await page.clock.runFor(2000)
+      await sleep(300)
+      // The first request fails only now.
+      page._held[0]()
+      await sleep(300)
+      await page.clock.runFor(35_000)
+      await sleep(500)
+      const n = (await patches()).length
+      if (n !== 2) fail('PREFS-HIDE-SENDING', `${n} PATCHes of one save, expected 2`)
+      if (!stored()) fail('PREFS-HIDE-SENDING', `story ${id} is no longer in the store`)
+      if (!(await saved())) fail('PREFS-HIDE-SENDING', `story ${id} doesn't show as saved after the return`)
+      if (await page.getByText(/^Couldn't save/).count()) fail('PREFS-HIDE-SENDING', 'an error toast for a save that got through')
+    },
+  }),
+
   dashFlow('flow-fn-quiet-poll', {
     before: async ({ page }) => {
       await installClock(page)

@@ -465,6 +465,8 @@ type Flight = {
   // the hide it was sent in, it is no longer waited for (sync rule 4).
   epoch: number
   whileHidden: boolean
+  // Sent with ``keepalive`` (the leave flush, Reset): it outlives the page.
+  keepalive: boolean
   done: Promise<void>
   // How it settled, once it has, and the row it was answered with when
   // that was OK (a DELETE's answer has none).
@@ -505,9 +507,15 @@ export function createPrefSync(deps: SyncDeps) {
   // Writes given up on (sync rule 4), folded per key: still shown, never
   // sent again, until the next answer about the key replaces them.
   const limbo = new Map<string, Write>()
-  // Per key, the ids that a write sent since base was last set added (or,
-  // for votes, voted on): the server may hold them although base doesn't.
-  const sentAdds = new Map<string, Set<string>>()
+  // Per key, the ids that a write added (or, for votes, voted on), each
+  // with the number of the request that last sent it: the server may hold
+  // them although base doesn't, until an answer read after that request
+  // is adopted (``adopted``).
+  const sentAdds = new Map<string, Map<string, number>>()
+  // Per key, the ids that a write given up on (rule 4) added or voted on.
+  // That write may land at any time, after any answer, so these are never
+  // forgotten: removing one of them always goes to the server.
+  const lateAdds = new Map<string, Set<string>>()
   const retries = new Map<string, { attempt: number; timer: unknown | null }>()
   // When each key's latest write settled (or was given up on), as a
   // request number: a GET sent before that is ignored for the key.
@@ -574,13 +582,20 @@ export function createPrefSync(deps: SyncDeps) {
     if (out) emit(out)
   }
 
-  // The server's value for `key` was just adopted, from a request sent
-  // after anything given up on: that settles what was given up on, and
-  // the adds sent before it are in it or gone. (A write the leave flush
-  // folded into a later one may still land after it; see ``settleStale``.)
-  const adopted = (key: string) => {
+  // The server's value for `key` was just adopted, from the answer to
+  // request `at`, sent after anything given up on: that answer takes the
+  // place of the given-up writes on screen, and the adds of the requests
+  // up to `at` are in it or gone. A later request's adds aren't (its
+  // answer may be lost: ``unfold``), nor a given-up write's, which may
+  // land after this answer was read (``lateAdds``). (A write the leave
+  // flush folded into a later one may still land after it; see
+  // ``settleStale``.)
+  const adopted = (key: string, at: number) => {
     limbo.delete(key)
-    if (!busy(key)) sentAdds.delete(key)
+    const sent = sentAdds.get(key)
+    if (!sent) return
+    for (const [id, by] of sent) if (by <= at) sent.delete(id)
+    if (!sent.size) sentAdds.delete(key)
   }
 
   const setBase = (key: string, value: unknown, at: number) => {
@@ -589,7 +604,7 @@ export function createPrefSync(deps: SyncDeps) {
     else next[key] = normalizeValue(key, value)
     base = next
     baseSeq.set(key, at)
-    adopted(key)
+    adopted(key, at)
   }
 
   // Off the list: whatever its request answers later is ignored.
@@ -675,6 +690,12 @@ export function createPrefSync(deps: SyncDeps) {
   const toLimbo = (f: Flight) => {
     const l = limbo.get(f.key)
     limbo.set(f.key, l ? foldWrite(l, f.write) : f.write)
+    const ids = f.write.op === 'patch' ? addedIds(f.write.delta) : []
+    if (ids.length) {
+      const late = lateAdds.get(f.key) ?? new Set<string>()
+      for (const id of ids) late.add(id)
+      lateAdds.set(f.key, late)
+    }
     needFullAfter = seq
   }
 
@@ -701,36 +722,41 @@ export function createPrefSync(deps: SyncDeps) {
   }
 
   // A change as the server can take it. A remove (or a cleared vote) of
-  // an id that is neither in base nor added by a write sent since base was
-  // set is dropped: that id was added and taken back, or pruned, before
-  // it ever went, so removing it changes nothing. Without this, a key at
-  // its cap whose writes keep failing would grow ``remove`` by one pruned
-  // id per add, past what one PATCH may carry.
+  // an id that is not in base, and that no write the server may still be
+  // holding added (``sentAdds``, ``lateAdds``), is dropped: that id was
+  // added and taken back, or pruned, before it ever went, so removing it
+  // changes nothing. Without this, a key at its cap whose writes keep
+  // failing would grow ``remove`` by one pruned id per add, past what one
+  // PATCH may carry. A remove kept when it wasn't needed costs nothing.
   const forServer = (key: string, delta: Delta): Delta => {
     const sent = sentAdds.get(key)
+    const late = lateAdds.get(key)
+    const mayHold = (id: string) => !!sent?.has(id) || !!late?.has(id)
     if (isVoteDelta(delta)) {
       const held = coerceVotes(base[key])
       let set: Record<string, Vote | null> | null = null
       for (const [id, v] of Object.entries(delta.set)) {
-        if (v != null || has(held, id) || sent?.has(id)) continue
+        if (v != null || has(held, id) || mayHold(id)) continue
         set ??= { ...delta.set }
         delete set[id]
       }
       return set ? { set } : delta
     }
     const held = new Set(coerceIds(base[key]))
-    const remove = delta.remove.filter((id) => held.has(id) || !!sent?.has(String(id)))
+    const remove = delta.remove.filter((id) => held.has(id) || mayHold(String(id)))
     return remove.length === delta.remove.length ? delta : { add: delta.add, remove }
   }
 
-  const noteSent = (key: string, delta: Delta) => {
-    const ids = isVoteDelta(delta)
-      ? Object.entries(delta.set).flatMap(([id, v]) => (v == null ? [] : [id]))
-      : delta.add.map(String)
+  // The ids a change adds, or votes on, as vote-map keys.
+  const addedIds = (delta: Delta): string[] =>
+    isVoteDelta(delta) ? Object.entries(delta.set).flatMap(([id, v]) => (v == null ? [] : [id])) : delta.add.map(String)
+
+  const noteSent = (key: string, delta: Delta, by: number) => {
+    const ids = addedIds(delta)
     if (!ids.length) return
     let s = sentAdds.get(key)
-    if (!s) sentAdds.set(key, (s = new Set()))
-    for (const id of ids) s.add(id)
+    if (!s) sentAdds.set(key, (s = new Map()))
+    for (const id of ids) s.set(id, by)
   }
 
   // The queued write for `key` goes out. A change goes as the server can
@@ -749,10 +775,10 @@ export function createPrefSync(deps: SyncDeps) {
         return null
       }
       write = { op: 'patch', delta: part }
-      noteSent(key, part)
     }
     const sent = write
-    const f: Flight = { key, write: sent, seq: ++seq, sentAt: now(), epoch: hideEpoch, whileHidden: !visible(), done: Promise.resolve() }
+    const f: Flight = { key, write: sent, seq: ++seq, sentAt: now(), epoch: hideEpoch, whileHidden: !visible(), keepalive, done: Promise.resolve() }
+    if (sent.op === 'patch') noteSent(key, sent.delta, f.seq)
     flights.set(key, [...(flights.get(key) ?? []), f])
     let req: Promise<unknown>
     try {
@@ -969,7 +995,7 @@ export function createPrefSync(deps: SyncDeps) {
     for (const key of keys) {
       if (skip.has(key)) continue
       baseSeq.set(key, g.seq)
-      adopted(key)
+      adopted(key, g.seq)
       writes.set(key, overlay(key))
     }
     base = mergeIncoming(base, rows, { skip, writes: new Map() }, { full: g.full })
@@ -1061,7 +1087,12 @@ export function createPrefSync(deps: SyncDeps) {
    *  earlier write is still on the way sends that change again, folded
    *  with the queued one, because the page may never come back to send
    *  it after the answer; the earlier request is kept as stale (``by``,
-   *  ``carries``), and how it settles is kept (``settleStale``). */
+   *  ``carries``), and how it settles is kept (``settleStale``). So does
+   *  a set key with nothing queued whose change is on the way in an
+   *  ordinary request: iOS may cut that fetch off, and if its failure
+   *  only comes after the return, rule 4 has given it up and nothing
+   *  would send it again. One already sent with ``keepalive`` outlives
+   *  the page, so a second leave flush doesn't send it a third time. */
   const leave = () => {
     runBeforeFlush()
     stopBatches()
@@ -1071,12 +1102,22 @@ export function createPrefSync(deps: SyncDeps) {
       followUp?.resolve()
       followUp = null
     }
+    for (const [key, fs] of flights) {
+      if (queue.has(key) || !isSetKey(key) || dropped(key) || fs.every((f) => f.keepalive)) continue
+      queue.set(key, { op: 'patch', delta: isVoteKey(key) ? { set: {} } : { add: [], remove: [] } })
+    }
     for (const key of Array.from(queue.keys())) {
       const older = flights.get(key) ?? []
       const q = queue.get(key)!
       if (older.length && q.op === 'patch') {
         let delta: Delta | null = null
-        for (const f of older) if (f.write.op === 'patch') delta = delta ? foldDelta(delta, f.write.delta) : f.write.delta
+        for (const f of older) {
+          // A request it carries that answered OK landed: its change
+          // doesn't go again (as in ``unfold``).
+          const known = (f.carries ?? []).filter((p) => p.outcome === 'ok').map((p) => p.write)
+          const w = known.length ? withoutOps(f.write, known) : f.write
+          if (w?.op === 'patch') delta = delta ? foldDelta(delta, w.delta) : w.delta
+        }
         if (delta) queue.set(key, { op: 'patch', delta: foldDelta(delta, q.delta) })
       }
       stopRetry(key)
@@ -1183,6 +1224,7 @@ export function createPrefSync(deps: SyncDeps) {
       stale.delete(key)
       limbo.delete(key)
       sentAdds.delete(key)
+      lateAdds.delete(key)
     }
     recompute(keys)
     let timer: unknown = null

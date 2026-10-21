@@ -891,6 +891,138 @@ test('another device changes a story while this page is hidden with its keepaliv
   assert.deepEqual(phone.rows().starred_entries, [])
 })
 
+// A write given up on (rule 4) may land after any answer about its key
+// was read. An Undo queued before such an answer was taken in still goes:
+// the id isn't in base then, but the server may be about to hold it.
+for (const kind of ['save', 'hide', 'vote'] as const) {
+  test(`a ${kind} given up on at its deadline that lands after the full GET was read: its Undo, made before that GET answered, still goes`, async () => {
+    const key = kind === 'save' ? 'starred_entries' : kind === 'hide' ? 'hidden_entries' : 'voted_entries'
+    const none = kind === 'vote' ? {} : []
+    const server = new FakeServer()
+    server.write(key, none)
+    const s = await loaded({ server })
+    s.auto.on = false
+    if (kind === 'vote') s.sync.setVotes({ 5: 'up' })
+    else s.sync.addIds(key, [5])
+    await s.advance(PATCH_BATCH_MS)
+    const stuck = s.writes()[0]
+    await s.advance(INFLIGHT_DEADLINE_MS)
+    // The next resync is full, and the Undo is made before it answers.
+    const full = s.sync.resync()
+    const g = s.gets().at(-1)!
+    assert.equal(g.since, null)
+    if (kind === 'vote') s.sync.setVotes({ 5: null })
+    else s.sync.removeIds(key, [5])
+    g.respond()
+    await full
+    assert.deepEqual(s.rows()[key], none)
+    // Only now does the given-up request land.
+    stuck.serve()
+    assert.notDeepEqual(server.value(key), none)
+    s.auto.on = true
+    await s.advance(PATCH_BATCH_MS)
+    assert.deepEqual(s.writes().slice(1).map(patchBody), [kind === 'vote' ? { set: { 5: null } } : { add: [], remove: [5] }], 'the Undo goes')
+    assert.deepEqual(server.value(key), none, 'the Undo stands')
+    await s.sync.resync({ full: true })
+    assert.deepEqual(s.rows()[key], none, 'and the next full GET shows it')
+  })
+}
+
+test('a save given up on at the return, landing after the full GET was read: the unsave made before that GET answered still goes', async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  let front = true
+  const phone = await loaded({ server, visible: () => front })
+  phone.auto.on = false
+  phone.sync.addIds('starred_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  // The story opens before the answer; on the return both requests for 5
+  // are given up on, and the full GET goes.
+  front = false
+  phone.sync.leave()
+  const sent = phone.writes().slice()
+  front = true
+  phone.sync.resume()
+  const full = phone.sync.resync({ full: true })
+  assert.deepEqual(phone.rows().starred_entries, [5], 'still shown')
+  // The Undo, then the GET answers (nothing has landed yet), then the
+  // keepalive request lands.
+  await phone.advance(300)
+  phone.sync.removeIds('starred_entries', [5])
+  phone.gets().at(-1)!.respond()
+  await full
+  sent.at(-1)!.serve()
+  assert.deepEqual(server.value('starred_entries'), [5])
+  phone.auto.on = true
+  await phone.advance(PATCH_BATCH_MS)
+  assert.deepEqual(phone.writes().slice(sent.length).map(patchBody), [{ add: [], remove: [5] }], 'the unsave goes')
+  assert.deepEqual(server.value('starred_entries'), [])
+  await phone.sync.resync({ full: true })
+  assert.deepEqual(phone.rows().starred_entries, [], 'not saved again on the next full GET')
+})
+
+test("a save given up on at the return, landing after a later save's answer: the unsave queued behind that save still goes", async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  let front = true
+  const phone = await loaded({ server, visible: () => front })
+  phone.auto.on = false
+  phone.sync.addIds('starred_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  front = false
+  phone.sync.leave()
+  const sent = phone.writes().slice()
+  front = true
+  phone.sync.resume()
+  void phone.sync.resync({ full: true })
+  // Save 6; unsave 5 while that PATCH is on the way (it waits, rule 1).
+  phone.sync.addIds('starred_entries', [6])
+  await phone.advance(PATCH_BATCH_MS)
+  const f2 = phone.writes()[sent.length]
+  assert.deepEqual(patchBody(f2), { add: [6], remove: [] })
+  phone.sync.removeIds('starred_entries', [5])
+  // 6's answer comes before the given-up request lands.
+  f2.respond()
+  await phone.settle()
+  sent.at(-1)!.serve()
+  assert.deepEqual(server.value('starred_entries'), [6, 5])
+  phone.auto.on = true
+  await phone.advance(PATCH_BATCH_MS)
+  assert.deepEqual(phone.writes().slice(sent.length + 1).map(patchBody), [{ add: [], remove: [5] }])
+  assert.deepEqual(server.value('starred_entries'), [6], 'the unsave stands')
+})
+
+test("a leave flush in front (beforeunload, the page stays): the carrying request lands but its answer is lost; an unsave of what it added still goes after the earlier request's answer", async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  const s = await loaded({ server })
+  s.auto.on = false
+  s.sync.addIds('starred_entries', [5])
+  await s.advance(PATCH_BATCH_MS)
+  const f1 = s.writes()[0]
+  s.sync.addIds('starred_entries', [6])
+  s.sync.leave()
+  const c = s.writes()[1]
+  assert.deepEqual(patchBody(c), { add: [5, 6], remove: [] })
+  f1.respond()
+  await s.settle()
+  // The keepalive request lands; its answer never arrives.
+  c.serve()
+  c.fail()
+  await s.settle()
+  assert.deepEqual(server.value('starred_entries'), [5, 6])
+  assert.deepEqual(s.rows().starred_entries, [5, 6])
+  // The earlier request's row ([5]) is base now. 6 is taken back before
+  // the retry.
+  s.sync.removeIds('starred_entries', [6])
+  s.auto.on = true
+  await s.advance(RETRY_MS[0])
+  assert.deepEqual(s.writes().slice(2).map(patchBody), [{ add: [], remove: [6] }], 'the unsave goes')
+  assert.deepEqual(server.value('starred_entries'), [5])
+  await s.sync.resync({ full: true })
+  assert.deepEqual(s.rows().starred_entries, [5])
+})
+
 test('back in front once the retries were used up: no second toast before anything is sent, and the next failure starts a new round', async () => {
   let front = true
   const s = await loaded({ visible: () => front })
@@ -1244,7 +1376,9 @@ test('leaving twice (visibilitychange, then pagehide) with requests on the way: 
   phone.sync.addIds('starred_entries', [7])
   phone.sync.leave()
   const c2 = phone.writes()[2]
-  assert.deepEqual(patchBody(c2), { add: [5, 6, 7], remove: [] })
+  // c1 is still on the way and goes again folded in, without the change
+  // of f1, which answered OK: that one landed.
+  assert.deepEqual(patchBody(c2), { add: [6, 7], remove: [] })
   c1.fail(503)
   c2.fail(503)
   await phone.settle()
@@ -1256,6 +1390,43 @@ test('leaving twice (visibilitychange, then pagehide) with requests on the way: 
   await phone.advance(RETRY_MS[0])
   assert.deepEqual(phone.writes().slice(3).map(patchBody), [{ add: [6, 7], remove: [] }])
   assert.deepEqual(server.value('starred_entries'), [6, 7], "the laptop's unsave stands")
+})
+
+test("leaving twice: the second leave flush doesn't send again what an earlier request's OK answer showed landed, so another device's change made since stands", async () => {
+  const server = new FakeServer()
+  server.write('starred_entries', [])
+  let front = true
+  const phone = await loaded({ server, visible: () => front })
+  const laptop = await loaded({ server })
+  phone.auto.on = false
+  phone.sync.addIds('starred_entries', [5])
+  await phone.advance(PATCH_BATCH_MS)
+  const f1 = phone.writes()[0]
+  // beforeunload, and the page stays (a mailto: link): the save on the
+  // way goes again with keepalive.
+  phone.sync.leave()
+  const c1 = phone.writes()[1]
+  assert.ok(c1.keepalive)
+  f1.respond()
+  await phone.settle()
+  c1.serve()
+  // The laptop sees 5 and unsaves it.
+  await laptop.sync.resync({ full: true })
+  laptop.sync.removeIds('starred_entries', [5])
+  await laptop.advance(PATCH_BATCH_MS)
+  assert.deepEqual(server.value('starred_entries'), [])
+  // A save of 6 waits for c1 (rule 1); then the page hides.
+  phone.sync.addIds('starred_entries', [6])
+  await phone.advance(PATCH_BATCH_MS)
+  assert.equal(phone.writes().length, 2)
+  front = false
+  phone.sync.leave()
+  const c2 = phone.writes()[2]
+  assert.deepEqual(patchBody(c2), { add: [6], remove: [] }, 'f1 answered OK, so 5 landed: it does not go again')
+  c2.respond()
+  c1.respond()
+  await phone.settle()
+  assert.deepEqual(server.value('starred_entries'), [6], "the laptop's unsave stands")
 })
 
 test('a request folded by the leave flush and given up on at the return: its late answer queues nothing, even when it landed last', async () => {
@@ -1294,6 +1465,65 @@ test('a request folded by the leave flush and given up on at the return: its lat
   assert.equal(phone.writes().length, 2, 'nothing more goes')
   assert.deepEqual(server.value('hidden_entries'), [5], "the laptop's hide stands")
 })
+
+// Save, the 1 s batch sends an ordinary PATCH, and the story opens before
+// its answer, with nothing queued. iOS may cut that fetch off, and its
+// failure can come after the return, when rule 4 has given it up and
+// ignores it; so the leave flush sends the change again with keepalive.
+for (const [kind, first] of [
+  ['ids', 'network error'],
+  ['ids', '503'],
+  ['votes', 'network error'],
+  ['ids', 'answered OK'],
+] as const) {
+  test(`leaving with a lone ordinary request on the way (${kind}): its change goes again with keepalive, once; the first one ${first === 'answered OK' ? 'answering OK costs nothing more' : `failing after the return (${first}) loses nothing`}`, async () => {
+    const key = kind === 'ids' ? 'starred_entries' : 'voted_entries'
+    const want = kind === 'ids' ? [5] : { 5: 'up' }
+    const server = new FakeServer()
+    server.write(key, kind === 'ids' ? [] : {})
+    let front = true
+    const phone = await loaded({ server, visible: () => front })
+    phone.auto.on = false
+    if (kind === 'ids') phone.sync.addIds(key, [5])
+    else phone.sync.setVotes({ 5: 'up' })
+    await phone.advance(PATCH_BATCH_MS)
+    const f1 = phone.writes()[0]
+    assert.ok(!f1.keepalive)
+    front = false
+    phone.sync.leave()
+    assert.equal(phone.writes().length, 2, 'the leave flush sends the change on the way again')
+    const c = phone.writes()[1]
+    assert.ok(c.keepalive)
+    assert.deepEqual(patchBody(c), patchBody(f1))
+    // pagehide's leave flush right after: the keepalive request outlives
+    // the page, so it isn't sent a third time.
+    phone.sync.leave()
+    assert.equal(phone.writes().length, 2, 'not a third time')
+    if (first === 'answered OK') {
+      f1.respond()
+      await phone.settle()
+    }
+    // The keepalive request gets through; the page comes back before its
+    // answer.
+    c.serve()
+    front = true
+    phone.sync.resume()
+    const full = phone.sync.resync({ full: true })
+    if (first === '503') f1.fail(503)
+    else if (first === 'network error') f1.fail()
+    await phone.settle()
+    phone.gets().at(-1)!.respond()
+    await full
+    c.respond()
+    await phone.settle()
+    phone.auto.on = true
+    await phone.advance(60_000)
+    assert.equal(phone.writes().length, 2, 'nothing more goes')
+    assert.deepEqual(server.value(key), want)
+    assert.deepEqual(phone.rows()[key], want)
+    assert.deepEqual(phone.errors, [])
+  })
+}
 
 test('leaving: before-flush collectors run first; a key still on the way resends its change folded with the queued one', async () => {
   const s = await loaded({ visible: () => false })
@@ -1404,7 +1634,16 @@ test('discardPending: drops what Reset deletes, sends the rest at once with keep
   await s.sync.resync({ full: true })
   await s.advance(60_000)
   s.sync.leave()
-  assert.deepEqual(s.writes().slice(2).map((r) => [r.method, r.key]), [['PATCH', 'starred_entries']])
+  // The save's PATCH is still on the way at the reload, so its leave
+  // flush sends it again with keepalive (the reload cuts the first off).
+  assert.deepEqual(
+    s.writes().slice(2).map((r) => [r.method, r.key, r.keepalive]),
+    [
+      ['PATCH', 'starred_entries', false],
+      ['PATCH', 'starred_entries', true],
+    ],
+  )
+  assert.deepEqual(patchBody(s.writes()[3]), { add: [5], remove: [] })
   assert.equal(s.gets().length, gets, 'no GET after the discard')
 })
 
@@ -1427,7 +1666,13 @@ test('discardPending: a write that never answers holds Reset up at most DISCARD_
   await discarding
   s.sync.addIds('read_entries:news', [4])
   s.sync.leave()
-  assert.equal(s.writes().length, 3, 'and sends nothing after for a key Reset deletes')
+  // The reload's leave flush: nothing for a key Reset deletes; the save
+  // still on the way in an ordinary request goes again with keepalive.
+  assert.deepEqual(
+    s.writes().slice(3).map((r) => [r.key, r.keepalive]),
+    [['starred_entries', true]],
+    'and sends nothing after for a key Reset deletes',
+  )
 
   // Sent before the last hide, with the page back in front.
   let front = true

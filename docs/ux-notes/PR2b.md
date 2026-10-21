@@ -199,9 +199,14 @@ work", finished the flows, and ran the local loop and the mutation checks.
 - Bodies within the server's limits: a PATCH carries at most the key's
   cap per list (1000 ids, 2000 votes), which is what
   `UserPreferencePatchIn` and the route allow. Before a change goes, a
-  remove (or a cleared vote) of an id that is neither in base nor added by
-  a write sent since base was last set is dropped: that id was added and
-  taken back, or pruned, before it ever reached the server. A change still
+  remove (or a cleared vote) of an id is dropped when the id is not in
+  base and no write the server may still hold added it: that id was added
+  and taken back, or pruned, before it ever reached the server. Each id a
+  write adds is kept with the number of the request that sent it until an
+  answer to that request or a later one is adopted (re-check: not just
+  any answer); the ids a write given up on (rule 4) adds are kept for
+  good, as it may land after any answer. A remove kept when it wasn't
+  needed costs nothing. A change still
   over the cap (a long failing stretch) goes in parts, one after the other
   under rule 1: removes and cleared votes first, adds last, so the server's
   trim after each part ends where one PATCH would. The rest stays queued.
@@ -210,7 +215,13 @@ work", finished the flows, and ran the local loop and the mutation checks.
   with `keepalive`, one key per request (a change over the cap sends its
   first part; the rest goes on the return). A key with a write still on
   the way sends that change again folded with the queued one: the page may
-  not come back to send it after the answer. The earlier request is kept
+  not come back to send it after the answer. A set key with nothing
+  queued whose change is on the way in an ordinary request (not
+  `keepalive`) sends it again the same way (re-check): iOS may cut that
+  fetch off, and a failure that only comes after the return is ignored
+  under rule 4. One already sent with `keepalive` isn't sent a third time
+  by a second leave flush, and a change that a carried request's OK
+  answer showed landed isn't folded in again. The earlier request is kept
   as stale (`by`; the keepalive request lists it in `carries`): its answer
   never sets base and never sends anything (final round: which of the two
   landed last can't be told, see Deviations). When the keepalive request
@@ -733,6 +744,168 @@ device; the failure cases (a backend restart during Reset, a rollback to
 before PATCH, two requests reordered on the network) can't be staged from
 the phone.
 
+## Review fixes (re-check)
+
+The re-check of the final round confirmed two findings: one major, one
+minor. The task named a fixer's WIP commit at HEAD; there was none (HEAD
+was the final-round commit, with a clean tree), so this round starts from
+it. Both are fixed; none was skipped. No server change.
+
+- **An unsave, unhide or cleared vote was dropped once a given-up write's
+  adds were forgotten** (major). `forServer` drops a remove (or a cleared
+  vote) of an id that is neither in base nor in `sentAdds`, the ids added
+  by writes the server may hold. `adopted()` cleared all of `sentAdds`
+  whenever an answer about the key was adopted and nothing was on the
+  way. A write given up on (rule 4) can land after that answer was read,
+  though. Save 5, open the story before the PATCH answers, and come back.
+  If the unsave is made before the full GET answers, and the GET is read
+  before the suspended request lands, the unsave was dropped, never sent,
+  and the next poll showed the story saved again on every device. The same
+  happened when the unsave waited behind another save's PATCH whose
+  answer came first, for hides and votes too, and after the 30 s deadline
+  with no hide at all. The same clearing in `unfold()` forgot the adds of
+  the later keepalive request when an earlier request's row became base.
+  Now each id in `sentAdds` keeps the number of the request that sent it,
+  and `adopted(key, at)` forgets only those sent by request `at` or
+  before it (a GET's number, or the request whose answer set base). The
+  ids a write given up on adds go into `lateAdds`, which `adopted` never
+  clears (only Reset, for the keys it deletes), and `forServer` keeps any
+  remove of an id in either set. A remove kept when it wasn't needed costs
+  nothing.
+- **A save on the way in an ordinary request when the page hid, with
+  nothing queued, was neither carried with keepalive nor sent again**
+  (minor). `leave()` went only through queued keys. Save a story, and
+  open it after the 1 s batch sent the PATCH but before the answer: iOS
+  cuts that fetch off, and on the return `resume()` gives the request up
+  before its failure (a network error or a 503) is delivered, so
+  `settle()` ignored it. The full GET then showed the story unsaved, and
+  nothing sent it again. Now `leave()` treats a set key whose writes on
+  the way include an ordinary (not `keepalive`) request like a queued key:
+  its change goes again at once with `keepalive`, and the earlier request
+  is kept as stale (`by`, `carries`), so the existing stale and `unfold`
+  handling covers both answers. A key whose requests on the way were all
+  sent with `keepalive` (the second leave flush, `pagehide` right after
+  `visibilitychange`) isn't sent a third time. `Flight` records
+  `keepalive`. This widens the fold window under Deviations to this case
+  (one extra request on such a hide, one round trip of exposure). It also
+  covers the reload after Reset: a kept save or hide still on the way in
+  an ordinary request (a retry sent after Reset's wait) when the page
+  unloads goes again with `keepalive` (the Reset fuzz's 8 other losses on
+  the final round were this).
+  With the copy in place, a second leave flush folded the copy's change in
+  again even when the earlier request's OK answer had shown it landed (in
+  the fuzz with changes made while hidden and failures on, resends of a
+  change known to have landed went from 3 seeds on the final round to 12
+  with the copy alone). The leave fold now leaves out what a carried
+  request's OK answer showed landed, as `unfold` does: 0 such seeds with
+  failures on, and 2 against the final round's 6 with none (in both, an
+  earlier request given up at its deadline while hidden, whose OK answer
+  rule 4 ignores).
+- What stays a rule-4 cost, under Deviations: a write given up on whose
+  request fails only later (past its 30 s deadline, or a desktop tab whose
+  request and keepalive copy both fail after the return). The reviewer's
+  fallback (record the lone-request case as a rule-4 cost) wasn't needed
+  for the iOS case.
+
+### Tests added or changed (re-check)
+
+`prefSync.test.ts`, now 68 tests (165 unit tests in all).
+
+- New, finding 1: a save, a hide and a vote given up on at the deadline,
+  landing after the full GET was read, with the Undo made before that GET
+  answered (the Undo goes, and the next full GET shows it); a save given
+  up on at the return, the same; the unsave queued behind a later save's
+  PATCH whose answer comes before the given-up request lands; a leave
+  flush with the page in front (`beforeunload` that doesn't unload), the
+  carrying request landing with its answer lost, and an unsave of what it
+  added made after the earlier request's row became base.
+- New, finding 2: a lone ordinary request on the way when the page hides,
+  for ids and votes: the change goes again with `keepalive`, once (a
+  second `leave()` sends nothing), and the first request failing after the
+  return with a network error or a 503, or answering OK, ends with the
+  change stored and shown, nothing more sent and no toast. A second leave
+  flush doesn't fold in again what an earlier request's OK answer showed
+  landed, so another device's unsave made since stands.
+- Changed: the two `discardPending` tests now expect the reload's leave
+  flush to send a kept save still on the way again with `keepalive` (and
+  still nothing for a key Reset deletes); "leaving twice" expects the
+  second keepalive request to carry 6 and 7, not 5 again (5's request
+  answered OK).
+- Flow `flow-prefs-hide-while-sending` (new, README row): the save's
+  batch PATCH is held when the page hides; the hide sends it again with
+  `keepalive`, which is stored and answered; the held request is aborted
+  only after the return. Two PATCHes in all, the save stays stored and
+  shown, no toast.
+
+### Verification (re-check)
+
+- `npm run lint`: 0 errors, 5 warnings (as before). `npm run build`
+  clean. Unit tests 165 of 165 (68 in `prefSync.test.ts`). `git diff
+  --exit-code` on `package.json` and the lockfile: clean. The
+  `node_modules` symlink was made for the loop and removed before the
+  commit.
+- Full strict smoke (`--csp --strict`, fonts-ci.conf, preview on 4173):
+  0 failures, 0 warnings, 870 s (other units were running on the
+  container).
+- The PR2b flows (`flow-prefs-resync`, `flow-visibility-flush`,
+  `flow-prefs-retry`, `flow-prefs-405`, `flow-prefs-fail-save-keeps-list`,
+  `flow-prefs-return-before-answer`, `flow-prefs-landed-unread`,
+  `flow-prefs-hide-while-sending`, `flow-reset-keeps-saves`,
+  `flow-h1-pref-store`, `flow-h1-keepalive`, `flow-reload-on-new-build`,
+  `flow-tab-stays-on-star`, `flow-unsave-last-saved`): 3 runs in a row,
+  14 of 14 each, 0 failures and 0 warnings (141, 135 and 132 s).
+- Backend `test_preferences_delta.py` and `test_preferences_anonymous.py`
+  (`popping_test_f`, they pin `prefSync.ts`): 89 passed. The backend is
+  unchanged.
+
+### Mutation checks (re-check)
+
+Unit mutations ran on a scratch copy of `prefSync.ts` with this test
+file. The flow mutation was built from a scratch copy of `frontend/` into
+the worktree's `dist`, served on 4173 and run alone; `dist` was rebuilt
+clean after.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `prefSync.test.ts` | all of this round's engine changes reverted (the final round's `prefSync.ts`) | the 11 new tests, the two changed `discardPending` tests, "leaving twice" |
+| `prefSync.test.ts` | `forServer` ignores `lateAdds` | the three deadline tests, "at the return", "behind a later save's PATCH" |
+| `prefSync.test.ts` | `toLimbo` doesn't fill `lateAdds` | the same five |
+| `prefSync.test.ts` | `adopted` clears `sentAdds` when nothing is on the way (the old rule) | "a leave flush in front ... answer is lost" |
+| `prefSync.test.ts` | `adopted` clears all of `sentAdds` | the same |
+| `prefSync.test.ts` | `leave()` doesn't carry a lone ordinary request | the four lone-request tests, the two `discardPending` tests, "leaving twice: the second leave flush doesn't send again ..." |
+| `prefSync.test.ts` | it carries one sent with `keepalive` too | the four lone-request tests ("not a third time"), "before-flush collectors", the `discardPending` cap test |
+| `prefSync.test.ts` | the leave fold keeps what a carried request's OK answer showed landed | "leaving twice", "leaving twice: the second leave flush doesn't send again ..." |
+| `flow-prefs-hide-while-sending` | `leave()` doesn't carry a lone ordinary request | PREFS-HIDE-SENDING: hiding the page did not send the save on its way again |
+
+One mutation survives and is equivalent: the empty change `leave()` queues
+for a vote key as `{add: [], remove: []}` instead of `{set: {}}`
+(`foldDelta` folds either onto the votes the same way).
+
+The re-check's fuzz (`fuzz.ts`: a single device, random answers, failures,
+lost answers, hides, returns, polls and deadlines; requests land in send
+order), run on the final round and on this round, seeds 1 to N:
+
+| Run | Final round | Re-check |
+|---|---|---|
+| 1 key, no failures (2000) | 9 seeds lose an op (all a dropped remove) | 0 |
+| 1 key, failures (2000) | 2 dropped removes, 47 given up then failed | 0 dropped, 41 given up then failed |
+| 3 keys, no failures (1500) | 15 dropped removes | 0 |
+| 3 keys, failures (1500) | 6 dropped removes, 157 given up then failed | 0 dropped, 144 given up then failed |
+| Reset, then the reload (1500) | 6 dropped removes, 8 other losses, 144 given up then failed | 0 dropped, 0 other, 124 given up then failed |
+| 3 keys, changes while hidden, failures (1500) | 6 dropped removes, 3 known-landed resends, 203 given up then failed | 0 dropped, 0 resends, 181 given up then failed |
+| 3 keys, changes while hidden, no failures (1500) | 18 dropped removes, 6 known-landed resends | 0 dropped, 2 resends |
+| no rule-4 cost (given-up requests never fail), 5000 seeds over the three shapes | 30 dropped removes, 3 known-landed resends | 0 |
+
+"Given up then failed" is the rule-4 cost under Deviations; with that
+cost taken out (the last row) nothing is lost or resurrected.
+
+Device checks: unchanged. The #40 line "save a story on the phone and
+switch to another app straight away" covers leaving inside the 1 s batch.
+Leaving within the round trip after it, or an unsave made in the second
+before the return's GET answers while a given-up request lands, can't be
+staged reliably from the phone; the unit tests and
+`flow-prefs-hide-while-sending` cover them.
+
 ## Deviations from the spec
 
 - The sync rules live in `lib/prefSync.ts` as an engine
@@ -765,7 +938,13 @@ the phone.
     again, so another device's change to the same story that lands
     between the two (about one round trip) is undone. Not carrying it
     would lose the change whenever the earlier request fails as the page
-    goes. (The two-device fuzz flags this one, seed 1363.)
+    goes. (The two-device fuzz flags this one, seed 1363.) Since the
+    re-check this window also opens with nothing queued: an ordinary
+    request still on the way when the page hides (a story opened within
+    one round trip of the 1 s batch) is sent again with `keepalive`. That
+    costs one extra request on such a hide, and the same one-round-trip
+    window; without it, iOS cutting the first request off lost the save
+    whenever its failure came after the return.
 - Rule 2 also retries 408 and 429, which are transient. After the third
   retry the change stays queued and on screen (one toast) instead of
   waiting only for a return: a later batch for the key, the reload flush
@@ -779,7 +958,17 @@ the phone.
   and on at the return; and a write sent while the page was hidden is
   given up on at the return too, since it is as likely to have been
   suspended. The cost, which the spec accepts: a keepalive that iOS never
-  delivered is lost.
+  delivered is lost. So is a write given up on whose request fails only
+  later (re-check): its late failure is ignored like any late answer, and
+  the change isn't sent again. The common case, an ordinary request on
+  the way when a story opens, now has a `keepalive` copy sent by the hide
+  (see the fold above). What is left: a request past its 30 s deadline
+  that then fails (a backend hang ending in a 5xx), and a desktop tab
+  hidden during a backend restart whose request and keepalive copy both
+  fail only after the return. In the re-check's single-device fuzz (2000
+  seeds, failures on), 41 seeds end with an op lost this way, against 47
+  on the final round; all of them are a request given up on that then
+  failed.
 - Rule 9 (final round): `discardPending` clears only the keys Reset
   deletes, not the whole queue the spec names. The rest (saves, hides,
   votes, saved views, which Reset keeps) is sent before the DELETEs and
@@ -851,9 +1040,11 @@ the phone.
 - PR7a (`category_layout`) and PR8a (`custom_tabs`) are PUT keys, covered
   by rules 1 and 5 as `column_prefs:*` is.
 - For the owner, a possible plan change: under rule 4 a keepalive that
-  never landed is lost. Resending it safely needs the server to say
-  whether it landed, for example a client write id that the PATCH stores
-  and the row echoes. A blind resend undoes other devices' changes.
+  never landed is lost, and so is a write given up on whose request fails
+  later (re-check, under Deviations). Resending either safely needs the
+  server to say whether it landed, for example a client write id that the
+  PATCH stores and the row echoes. A blind resend undoes other devices'
+  changes.
 - For the owner, next to that: the leave flush's overtaken case (under
   Deviations: an Undo made just before the hide, overtaken by its own
   keepalive request) needs the server to say which of two writes took the
