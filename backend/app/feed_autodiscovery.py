@@ -220,6 +220,7 @@ async def discover_sitemap_entries(
     input_is_sitemap: bool = False,
     owner_pattern: bool = False,
     failures: list[BaseException] | None = None,
+    empty: list[str] | None = None,
 ) -> list[Candidate]:
     """Return up to ``limit`` article candidates from ``page_url``'s
     sitemap, newest first, as ``Candidate(url, published, title,
@@ -247,6 +248,12 @@ async def discover_sitemap_entries(
     failed may have missed what that document says about them (a news
     sitemap's publication dates), so the plugin reads them once more
     when every document loads (``Plan.degraded``).
+
+    ``empty``: when given, the input sitemap's address is added to it
+    when it loaded as an XML sitemap (a urlset or a sitemap index) that
+    names no page or sitemap at all: a news sitemap between stories,
+    which lists only the last two days. The plugin reads that as a
+    quiet poll, not as a feed with no list (``plan_candidates``).
 
     Only entries that could be articles are kept
     (``article_detect.url_ok``), and only the sitemaps worth reading
@@ -291,6 +298,7 @@ async def discover_sitemap_entries(
                 input_is_sitemap=input_is_sitemap,
                 owner_pattern=owner_pattern,
                 failures=failures,
+                empty=empty,
             ),
             _TRAFILATURA_BUDGET,
         )
@@ -404,6 +412,16 @@ def _parse_sitemap_entries(
     return pages, nested
 
 
+def _is_sitemap_xml(text: str) -> bool:
+    """Whether ``text`` is an XML sitemap, a urlset or a sitemap index,
+    whatever it lists (an empty urlset is one)."""
+    try:
+        root = DefusedET.fromstring(text.lstrip())
+    except (DefusedET.ParseError, ValueError, DefusedXmlException):
+        return False
+    return _local(root.tag) in ("urlset", "sitemapindex")
+
+
 def _read_sitemap(
     text: str, site: str, path_prefix: str | None, room: int, owner_pattern: bool = False,
 ) -> tuple[list[_Entry], list[tuple[str, str | None]], bool]:
@@ -495,6 +513,7 @@ async def _crawl_sitemaps(
     input_is_sitemap: bool = False,
     owner_pattern: bool = False,
     failures: list[BaseException] | None = None,
+    empty: list[str] | None = None,
 ) -> list[Candidate]:
     """Find article candidates for ``page_url`` from its sitemap(s),
     using only SSRF-guarded fetches. ``page_url`` may be a sitemap
@@ -525,7 +544,8 @@ async def _crawl_sitemaps(
     ``failures`` collects every document that failed, robots.txt
     included unless it was refused (see ``discover_sitemap_entries``). A
     5xx on a document other than the input reads as empty, as before; it
-    is only collected.
+    is only collected. ``empty`` gets the input's address when it is an
+    empty sitemap (see ``discover_sitemap_entries``).
     """
     parsed = urlparse(page_url)
     host = (parsed.hostname or "").lower()
@@ -536,6 +556,8 @@ async def _crawl_sitemaps(
     network: list[BaseException] = []
     # Every document that failed (``failures``).
     failed: list[BaseException] = []
+    # The input loaded as an XML sitemap that names nothing (``empty``).
+    input_empty = False
 
     async def site_sitemaps() -> list[str]:
         """The site's sitemaps: robots.txt ``Sitemap:`` lines, else the
@@ -626,6 +648,8 @@ async def _crawl_sitemaps(
                 _MAX_SITEMAP_COLLECT - len(pages),
                 owner_pattern,
             )
+        if url == input_doc and not listed and text:
+            input_empty = await asyncio.to_thread(_is_sitemap_xml, text)
         if url == input_doc and not listed and not looks_like_sitemap(url):
             # The owner's sitemap_url names nothing and doesn't look like
             # a sitemap: it is likely the site's address or an HTML
@@ -647,6 +671,8 @@ async def _crawl_sitemaps(
 
     if failures is not None:
         failures.extend(failed)
+    if empty is not None and input_empty and not pages:
+        empty.append(page_url)
     if not pages and raise_errors:
         if own_failure is not None:
             raise own_failure

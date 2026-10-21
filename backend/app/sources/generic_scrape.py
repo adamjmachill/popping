@@ -33,7 +33,7 @@ import asyncio
 import datetime as dt
 import logging
 from collections import OrderedDict
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, Container, NamedTuple, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -218,12 +218,19 @@ async def plan_candidates(
     (``article_extract.most_telling_error``: a refusal, then the feed's
     own page or sitemap failing, then a network error), else
     ``NoArticleListError`` (``[no list]``). When one read finds
-    articles, the other's failure doesn't matter. Without it (``probe``,
-    the Test preview), nothing raises and an empty plan comes back.
+    articles, the other's failure doesn't matter. The one quiet empty
+    plan: the feed's own sitemap (its ``sitemap_url``, or an address
+    that looks like a sitemap) loaded as an empty sitemap and the page
+    read failed in no way. A news sitemap lists only the last two days,
+    so between stories it is an empty urlset, which main read as a poll
+    with nothing new. Without ``raise_errors`` (``probe``, the Test
+    preview), nothing raises and an empty plan comes back.
     """
     prefix = link_pattern or _section_prefix(url)
     # The sitemap documents that failed (``discover_sitemap_entries``).
     sitemap_failures: list[BaseException] = []
+    # The feed's own sitemap, when it loaded and named nothing.
+    empty_sitemap: list[str] = []
 
     async def read_sitemap() -> list[Candidate]:
         return await discover_sitemap_entries(
@@ -235,6 +242,7 @@ async def plan_candidates(
             input_is_sitemap=bool(sitemap_url),
             owner_pattern=bool(link_pattern),
             failures=sitemap_failures,
+            empty=empty_sitemap,
         )
 
     async def read_page() -> list[Candidate]:
@@ -264,7 +272,11 @@ async def plan_candidates(
             exc = most_telling_error(failures)
             if exc is not None:
                 raise exc
-            raise NoArticleListError("no sitemap or listing page with articles")
+            if not empty_sitemap:
+                raise NoArticleListError("no sitemap or listing page with articles")
+            logger.debug(
+                "generic_scrape: %s: its sitemap %s lists nothing yet", url, empty_sitemap[0]
+            )
         return Plan("", [], [])
     stored = await known_urls([c.url for c in found]) if known_urls is not None else set()
     degraded = mode == "sitemap" and bool(sitemap_failures)
@@ -680,7 +692,9 @@ class _Read(NamedTuple):
     unvouched: bool = False
 
 
-def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[str], bool]:
+def _backlog_rule(
+    plan: Plan, backlog_before: dt.datetime | None, read: Container[str] = frozenset(),
+) -> Callable[[str], bool]:
     """Whether an undated candidate of ``plan`` is old backlog
     (``GenericScrapePlugin._cap_undated``). It depends on what orders
     the list:
@@ -689,10 +703,13 @@ def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[s
       newest first, so a page listed below a stored story is older than
       it: backlog. Except for the stories pinned at its top (a sticky or
       featured post, stored long ago): when stored stories lead the list
-      and a story that isn't stored follows them, with a stored story
-      further down, the leading ones are pinned, and the line is the
-      first stored story below them. With no stored story further down,
-      the leading ones are the line, as for any listing.
+      and a story that isn't stored follows them, with a story stored or
+      already read (``read``: this plugin's ``_extracted_urls``) further
+      down, the leading ones are pinned, and the line is the first such
+      story below them. A first fetch that stores only the two sticky
+      posts (the undated cap) has read the posts below them. With no such
+      story further down, the leading ones are the line, as for any
+      listing (after a restart, ``read`` is empty).
     - A sitemap is ordered by ``<lastmod>``, which moves a stored story
       up whenever it is edited, so that order says nothing about age. A
       page last modified before ``backlog_before`` (the line
@@ -714,8 +731,13 @@ def _backlog_rule(plan: Plan, backlog_before: dt.datetime | None) -> Callable[[s
     first_stored = stored[0] if stored else None
     first_fresh = min((place[c.url] for c in plan.fresh), default=None)
     if plan.mode == "page" and stored and first_fresh is not None and stored[0] < first_fresh:
-        # Stored stories lead the listing: pinned, when one is stored below.
-        below = [p for p in stored if p > first_fresh]
+        # Stored stories lead the listing: pinned, when a story stored or
+        # already read comes below.
+        below = sorted(
+            place[c.url]
+            for c in plan.candidates
+            if (c.url not in fresh or c.url in read) and place[c.url] > first_fresh
+        )
         if below:
             first_stored = below[0]
 
@@ -937,7 +959,7 @@ class GenericScrapePlugin(SourcePlugin):
         # new: a story stored in the meantime and listed above it doesn't
         # make it backlog (``_cap_undated``).
         new_before = {c.url for c in batch if c.url in self._deferred_new}
-        backlog = _backlog_rule(plan, backlog_before)
+        backlog = _backlog_rule(plan, backlog_before, self._extracted_urls)
         # The pages the site answered with a page (``_extract_one``).
         served: set[str] = set()
 

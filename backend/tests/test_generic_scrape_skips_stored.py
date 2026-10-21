@@ -221,6 +221,30 @@ async def test_stored_stories_pinned_at_the_top_of_a_listing_are_not_the_line(mo
 
 @pytest.mark.no_db
 @pytest.mark.asyncio
+@pytest.mark.parametrize("restarted", [False, True])
+async def test_pages_read_and_passed_over_below_pinned_stories_mark_the_line(monkeypatch, restarted):
+    """Round 7: a first fetch that stores only the sticky posts at the top
+    (the undated cap) leaves no stored story further down, but the posts
+    below them were read and passed over. Those mark the sticky posts as
+    pinned too: the line is the first of them, so the new page above it
+    comes in and the page below them not read yet is backlog. After a
+    restart nothing has been read, and the leading stored stories are the
+    line again, as before."""
+    pinned, pinned2, new, read, read2, older = (
+        f"{SITE}/news/{s}" for s in ("pinned", "pinned2", "new", "read", "read2", "older")
+    )
+    _serve(monkeypatch, [pinned, pinned2, new, read, read2, older], dated=False, listing=True)
+    plugin = GenericScrapePlugin(_row(url=LISTING))
+    if not restarted:
+        plugin._mark_extracted(read)
+        plugin._mark_extracted(read2)
+    items = await plugin.fetch(known_urls=_known({pinned, pinned2}), max_undated=5)
+    assert [i["url"] for i in items] == ([] if restarted else [new])
+    assert {new, older} - {i["url"] for i in items} <= set(plugin._extracted_urls)
+
+
+@pytest.mark.no_db
+@pytest.mark.asyncio
 async def test_a_stored_story_at_the_top_of_a_sitemap_is_still_the_line(monkeypatch):
     """Pinning is a listing page's: a sitemap with no ``<lastmod>`` keeps
     "below any stored story is backlog", whatever leads it."""

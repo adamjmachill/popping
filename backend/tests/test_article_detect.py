@@ -228,6 +228,55 @@ def test_url_ok_keeps_its_other_rules_for_a_sitemap_entry(path):
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/news/council-approves-river-trail/index.html",
+        "/council-approves-river-trail/index.html",
+        "/news/20261020/index.html",
+        "/news/council-approves-river-trail/default.aspx",
+        "/news/council-approves-river-trail/index.php",
+        "/news/2026/council-approves-river-trail/index.html",
+        "/2026/10/20/politics/council-approves-river-trail/index.html",
+    ],
+)
+@pytest.mark.parametrize("sitemap_entry", [False, True])
+def test_url_ok_reads_a_folders_index_page_as_the_folder(path, sitemap_entry):
+    """Round 7: a static or exported site publishes each story as a folder
+    with its own index page. courlan reads an index page under a short
+    path as a home page, and it was shown the path above the page as
+    ``x/x/``, so ``/news/<slug>/index.html`` read as a home page and a
+    feed of them as ``[no list]``. The folder is judged instead, as
+    courlan judged the real path."""
+    assert url_ok("https://www.example.com" + path, SITE, sitemap_entry=sitemap_entry)
+
+
+@pytest.mark.parametrize(
+    ("path", "section"),
+    [
+        # The site's own index page is the home page.
+        ("/index.html", None),
+        ("/default.aspx", None),
+        # A folder that is no article's is judged as that folder.
+        ("/about/index.html", None),
+        ("/privacy/index.html", None),
+        ("/tag/parks/index.html", None),
+        ("/2026/10/index.html", None),
+        ("/blog/2026/index.html", None),
+        ("/category/news/index.html", "/category/news/"),
+        # With no web page's ending it is no folder's index page, and
+        # courlan judges it as before.
+        ("/library/home", None),
+        ("/blog/index", None),
+    ],
+)
+def test_url_ok_keeps_its_rules_for_a_folders_index_page(path, section):
+    url = "https://www.example.com" + path
+    assert not url_ok(url, SITE, section=section)
+    assert not url_ok(url, SITE, section=section, sitemap_entry=True)
+
+
+
+@pytest.mark.parametrize(
     "url",
     [
         "https://www.example.com/library/tag/python",
@@ -256,14 +305,25 @@ def test_url_ok_keeps_its_own_rules_under_the_owners_link_pattern(url):
         ("/about/press/2026/flu-shots-available", True),
         ("/about/media/news-releases/new-library-hours", True),
         ("/pages/blog/our-new-trail-map", True),
-        # ... but the section page itself, the static tree around it
-        # and the news section's own listings are not.
+        # ... and so are those of a section named like no news section
+        # (round 7): only a page directly under a static section is
+        # static. score_page judges the rest of the static tree, as main
+        # fetched every sitemap entry.
+        ("/about-us/news-and-media/council-approves-river-trail/", True),
+        ("/about/media-centre/council-approves-river-trail", True),
+        ("/about/press-room/new-library-hours", True),
+        ("/contact-us/notices/road-closure-on-main-street/", True),
+        ("/about/team/dana-smith", True),
+        ("/about/team/news", True),
+        # The section page itself, the pages directly under a static
+        # section and the news section's own listings are not.
         ("/about/news", False),
         ("/about/news/", False),
-        ("/about/team/dana-smith", False),
+        ("/about-us/news-and-media/", False),
         ("/about/history", False),
+        ("/about/team", False),
         ("/pages/our-story", False),
-        ("/about/team/news", False),
+        ("/policies/refund-policy", False),
         ("/about/news/page/2/", False),
         ("/about/news/tag/parks/", False),
         ("/about/news/2026/10/", False),
@@ -275,12 +335,35 @@ def test_url_ok_reads_a_news_section_under_a_static_section(path, ok):
 
 
 @pytest.mark.parametrize(
+    "path",
+    [
+        "/about/media-centre/council-approves-river-trail",
+        "/about-us/news-and-media/council-approves-river-trail/",
+        "/contact-us/notices/road-closure-on-main-street/",
+    ],
+)
+@pytest.mark.parametrize("section", [None, "static section", "subsection"])
+def test_url_ok_reads_a_page_deeper_in_a_static_section_with_or_without_its_section(path, section):
+    """Round 7: a page below a static section's subsection is a candidate
+    on every feed, not only on one that reads that subsection: a root
+    feed's sitemap and a listing page with another list of links on it
+    both find it."""
+    url = "https://www.example.com" + path
+    segments = path.strip("/").split("/")
+    own = {
+        "static section": f"/{segments[0]}/",
+        "subsection": f"/{segments[0]}/{segments[1]}/",
+    }.get(section)
+    assert url_ok(url, SITE, section=own)
+    assert url_ok(url, SITE, section=own, sitemap_entry=True)
+
+
+@pytest.mark.parametrize(
     ("path", "section", "owner_pattern"),
     [
-        ("/about/media-centre/council-approves-river-trail", "/about/media-centre/", False),
-        ("/about/media-centre/council-approves-river-trail", "/about/media-centre/", True),
         ("/shop/journal/new-trail-shoes", "/shop/journal/", False),
-        ("/contact-us/notices/road-closure-on-main-street/", "/contact-us/notices/", False),
+        ("/shop/journal/new-trail-shoes", "/shop/journal/", True),
+        ("/category/news/council-approves-river-trail", "/category/news/", False),
         ("/products/canvas-tote", "/products/", True),
         ("/members/dana", "/members/", True),
     ],
@@ -542,17 +625,31 @@ def test_classify_sitemap_edge_cases(url, cls):
         # A product or author sitemap is still one, and so is an
         # attachment sitemap ...
         ("attachment-sitemap.xml", "media"),
-        ("sitemap-media.xml", "media"),
         ("store-products-sitemap.xml", "product"),
         ("sitemap_products_1.xml", "product"),
         ("wp-sitemap-posts-product-1.xml", "product"),
         ("sitemap-authors.xml", "author"),
         # ... but a video or image sitemap lists the pages that show them
-        # (and a ``video`` post type's posts), as main read them.
+        # (and a ``video`` post type's posts), as main read them, and
+        # "media" names a site's media section (round 7).
         ("video-sitemap.xml", "other"),
         ("sitemap-images.xml", "other"),
-        # Words after "sitemap" count each.
+        ("sitemap-media.xml", "other"),
+        ("media/sitemap.xml", "other"),
+        # After "sitemap" the rest counts by its last word too, after
+        # WordPress core's provider word (round 7: a post type's name may
+        # hold a "-").
         ("sitemap-pt-post-2026-10.xml", "post"),
+        ("sitemap-media-releases.xml", "other"),
+        ("sitemap-tax-category.xml", "taxonomy"),
+        ("wp-sitemap-posts-media-release-1.xml", "post"),
+        ("wp-sitemap-posts-product-update-1.xml", "post"),
+        ("wp-sitemap-posts-user-story-1.xml", "post"),
+        ("wp-sitemap-posts-page-1.xml", "page"),
+        ("wp-sitemap-posts-product-1.xml", "product"),
+        ("wp-sitemap-taxonomies-event-region-1.xml", "taxonomy"),
+        ("wp-sitemap-users-1.xml", "author"),
+        ("?sitemap=posts&sitemap-subtype=media-release", "post"),
         ("blog-posts-sitemap.xml", "post"),
         # A name with no "sitemap" in it counts by its last word too, and
         # so does the section a sitemap is filed under.
@@ -815,6 +912,93 @@ def test_the_lists_date_dates_a_page_that_carries_none():
 def test_static_pages_and_listings_stay_rejected_with_the_wider_date_rule(fixture, url):
     score, reasons = score_page(_fixture(fixture), url)
     assert score < ACCEPT_SCORE, reasons
+
+
+_LONG_BODY = "<p>" + "The extension adds four kilometres of path along the north bank. " * 12 + "</p>"
+
+
+def _builder_post(meta: str, *, og_type: str = "website", title_wrap: str = "{}") -> str:
+    """A site builder's post page: no ``<article>``, no JSON-LD, no date
+    metadata; ``meta`` is what follows its ``<h1>``."""
+    head = "<title>Council approves the river trail | Example</title>"
+    if og_type:
+        head += f'<meta property="og:type" content="{og_type}">'
+    h1 = title_wrap.format("<h1 class='heading'>Council approves the river trail</h1>")
+    return (
+        f"<html><head>{head}</head><body><div class='navbar'><a href='/'>Example</a></div>"
+        f"<div class='section'><div class='container'>{h1}{meta}"
+        f"<div class='rich-text'>{_LONG_BODY}</div></div></div>"
+        "<div class='footer'><p>&copy; 2026 Example</p></div></body></html>"
+    )
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        # Webflow: the date printed as text right after the title.
+        "<div class='blog-date'>October 14, 2026</div>",
+        "<div class='blog-date'>Oct. 14th, 2026</div>",
+        "<div class='blog-date'>14 October 2026</div>",
+        "<div class='blog-date'>Wednesday, October 14, 2026</div>",
+        "<div class='blog-date'>Posted on October 14, 2026</div>",
+        "<p>2026-10-14</p>",
+        "<div class='meta'><span>October 14, 2026</span><span>5 min read</span></div>",
+        # A WordPress block theme: a plain <time> beside the title in
+        # its container, with no <article> around them.
+        "<div class='wp-block-post-date'><time datetime='2026-10-14T09:00:00+00:00'>Oct 14</time></div>",
+    ],
+)
+@pytest.mark.parametrize("og_type", ["website", None])
+def test_a_builder_post_dated_next_to_its_title_is_an_article(meta, og_type):
+    """Round 7: Webflow tags every page og:type=website and prints a post's
+    date as text, and a WordPress block theme prints it in a plain
+    ``<time>`` beside an ``<h1>`` with no ``<article>``. Both pages read
+    as undated, so a feed of them stored nothing, where main stored every
+    post."""
+    score, reasons = score_page(_builder_post(meta, og_type=og_type), STORY_URL)
+    assert "+1 dated 2026-10-14" in reasons
+    assert score >= ACCEPT_SCORE, reasons
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [
+        # Nothing next to the title, or no date there.
+        "",
+        "<p class='lead'>Who we are and how the gym started.</p>",
+        # An update is not when the page was published.
+        "<div class='meta'>Updated October 14, 2026</div>",
+        # A paragraph is no line of post meta, whatever it starts with.
+        "<p>" + "October 14, 2015 was the day we opened in a warehouse by the river. " * 3 + "</p>",
+        "<div><p>Founded</p><p>October 14, 2015</p></div>",
+        "<div class='meta'>Founded October 14, 2015</div>",
+        # A listing built of div cards: several <time>s beside its title.
+        "".join(
+            f"<div class='card'><h2><a href='/blog/post-{n}'>Post {n}</a></h2>"
+            f"<time datetime='2026-10-{14 - n:02d}'>Oct {14 - n}</time></div>"
+            for n in range(3)
+        ),
+        # Nor one that only looks like a date.
+        "<div class='blog-date'>Octember 14, 2026</div>",
+        "<div class='blog-date'>October 32, 2026</div>",
+    ],
+)
+def test_a_builder_page_with_no_date_next_to_its_title_stays_undated(meta):
+    score, reasons = score_page(_builder_post(meta), STORY_URL)
+    assert "-1 no date" in reasons
+    assert score < ACCEPT_SCORE, reasons
+
+
+def test_a_date_next_to_the_title_counts_only_on_a_page_of_one_title_and_no_article():
+    """A page with an ``<article>`` keeps the article's own date rules,
+    and a page with several ``<h1>`` is not one story."""
+    date = "<div class='blog-date'>October 14, 2026</div>"
+    in_article = _builder_post(date, title_wrap="<article>{}</article>")
+    _, reasons = score_page(in_article, STORY_URL)
+    assert "-1 no date" in reasons
+    two_titles = _builder_post(date, title_wrap="<h1>Example</h1>{}")
+    _, reasons = score_page(two_titles, STORY_URL)
+    assert "-1 no date" in reasons
 
 
 def test_home_page_redirect_is_rejected():
