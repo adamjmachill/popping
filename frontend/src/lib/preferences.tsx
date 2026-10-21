@@ -3,10 +3,14 @@
 // The dashboard keeps several user-visible pieces of state in
 // per-user server-backed storage:
 //
-//   - readEntries     per-column "I marked this card read" ids
+//   - seenEntries     per-category "I've seen this story" ids (PR3b)
+//   - readEntries     per-column "I marked this card read" ids, from
+//                     builds before PR3b: read, never written
 //   - lastViewed      per-column "I last saw this column at" ISO timestamps
+//                     (before PR3b; read only so Reset can delete them)
 //   - columnPrefs     per-column sort/min-score/max-age
-//   - columnSections  per-column Fresh/History section collapse
+//   - columnSections  per-column Fresh/History section collapse (before
+//                     PR3b; read only so Reset can delete them)
 //   - hiddenEntries   per-user "hide this entry" ids
 //   - starredEntries  per-user saved-for-later entry ids
 //   - votedEntries    per-user entry id -> up / down
@@ -51,7 +55,7 @@
 // ``PATCH  /api/preferences/{key}``   body: ``{add?, remove?}`` or ``{set?}`` -> the row
 // ``DELETE /api/preferences/{key}``   -> 204
 //
-// We use namespaced keys (``read_entries:<columnId>``,
+// We use namespaced keys (``seen:<category>``, ``read_entries:<columnId>``,
 // ``last_viewed:<columnId>``, ``column_prefs:<columnId>``,
 // ``column_sections:<columnId>``, ``hidden_entries``,
 // ``starred_entries``, ``voted_entries``, ``filter_presets``,
@@ -151,9 +155,13 @@ export type FilterPresetValue = {
  * rows (see ``decodeState``).
  */
 export type PreferencesState = {
-  // Per-column maps keyed by source id. Source ids are strings in
-  // the dashboard (e.g. ``"hacker-news-top"``) and we follow the
-  // same convention here.
+  // Seen marks, keyed by the story's category (``seen:<category>``):
+  // where every mark goes from PR3b on, wherever the story was seen.
+  seenEntries: Record<string, ReadEntriesValue>
+  // Per-column maps keyed by the column's name (a category, "For You",
+  // "Saved", "Search" ...). ``read_entries`` rows are the read marks of
+  // builds before PR3b: still read (a story marked there counts as
+  // seen), never written.
   readEntries: Record<string, ReadEntriesValue>
   lastViewed: Record<string, LastViewedValue>
   columnPrefs: Record<string, ColumnPrefsValue>
@@ -175,6 +183,7 @@ export type PreferencesState = {
 
 /** Helper: which server-side keys exist, and what TS type each holds. */
 export const PREFERENCE_KEYS = {
+  seen: 'seen',
   readEntries: 'read_entries',
   lastViewed: 'last_viewed',
   columnPrefs: 'column_prefs',
@@ -188,8 +197,8 @@ export const PREFERENCE_KEYS = {
 } as const
 
 /** A key whose value is a set of story ids: changed with ``addIds`` /
- *  ``removeIds``, never written whole. ``seen:<category>`` arrives with
- *  PR3b. */
+ *  ``removeIds``, never written whole. New seen marks go only to
+ *  ``seen:<category>`` (PR3b); ``read_entries:*`` is only read. */
 export type IdSetKey =
   | typeof PREFERENCE_KEYS.starredEntries
   | typeof PREFERENCE_KEYS.hiddenEntries
@@ -214,6 +223,7 @@ const NO_PRESETS: FilterPresetValue[] = []
 type Decoded = { rows: Rows; state: PreferencesState }
 
 const PER_COLUMN = [
+  ['seenEntries', PREFERENCE_KEYS.seen],
   ['readEntries', PREFERENCE_KEYS.readEntries],
   ['lastViewed', PREFERENCE_KEYS.lastViewed],
   ['columnPrefs', PREFERENCE_KEYS.columnPrefs],
@@ -225,6 +235,7 @@ const isObject = (v: unknown): v is object => !!v && typeof v === 'object' && !A
 // One per-column value, or undefined when it has the wrong shape.
 function columnValue(field: (typeof PER_COLUMN)[number][0], value: unknown): unknown {
   switch (field) {
+    case 'seenEntries':
     case 'readEntries':
       return coerceIds(value)
     case 'lastViewed':
@@ -239,7 +250,7 @@ function columnValue(field: (typeof PER_COLUMN)[number][0], value: unknown): unk
  * whose rows didn't change since ``prev`` is ``prev``'s object, and
  * with nothing changed ``prev.state`` itself comes back, so a resync
  * re-renders only what it changed. Unknown keys are ignored (a
- * newer build's keys, ``seen:*`` until PR3b reads them).
+ * newer build's keys).
  */
 function decodeState(rows: Rows, prev: Decoded | null): PreferencesState {
   if (prev && prev.rows === rows) return prev.state
@@ -426,26 +437,12 @@ export interface PreferencesContextValue {
   setVotes: (changes: Record<number, Vote | null>) => void
 
   // The other keys: whole values, PUT. Stable across renders.
-
-  /** Record that the user just visited a column. */
-  setLastViewed: (columnId: string, iso: string) => void
-
-  /** Forget that the user ever visited a column. Used by the
-   *  column-mark-read Undo action -- the cleared ``lastViewed`` is what
-   *  makes the "+N new" chip repopulate on the next refresh. The
-   *  provider issues a ``DELETE /api/preferences/last_viewed:<columnId>``
-   *  so the row is actually gone on the server (vs. PUTing a sentinel
-   *  that the consumer would have to special-case). */
-  clearLastViewed: (columnId: string) => void
+  // (``last_viewed:*`` and ``column_sections:*`` are no longer written
+  // from PR3b on: the "+N new" chip and the Fresh / History folds went.
+  // Reset still deletes their rows.)
 
   /** Update the sort/filter prefs for one column. */
   setColumnPrefs: (columnId: string, prefs: ColumnPrefsValue) => void
-
-  /** Update the Fresh/History section collapse for one column. */
-  setColumnSections: (
-    columnId: string,
-    sections: ColumnSectionsValue,
-  ) => void
 
   /** Replace the saved-presets list. */
   setFilterPresets: (presets: FilterPresetValue[]) => void
@@ -576,22 +573,8 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
   const removeIds = useCallback((key: IdSetKey, ids: number[]) => sync.removeIds(key, ids), [sync])
   const setVotes = useCallback((changes: Record<number, Vote | null>) => sync.setVotes(changes), [sync])
 
-  const setLastViewed = useCallback(
-    (columnId: string, iso: string) => sync.put(`${PREFERENCE_KEYS.lastViewed}:${columnId}`, iso),
-    [sync],
-  )
-  // Delete the row, not PUT a sentinel. The server's DELETE is
-  // idempotent (204 whether or not the row existed).
-  const clearLastViewed = useCallback(
-    (columnId: string) => sync.delete(`${PREFERENCE_KEYS.lastViewed}:${columnId}`),
-    [sync],
-  )
   const setColumnPrefs = useCallback(
     (columnId: string, prefs: ColumnPrefsValue) => sync.put(`${PREFERENCE_KEYS.columnPrefs}:${columnId}`, prefs),
-    [sync],
-  )
-  const setColumnSections = useCallback(
-    (columnId: string, sections: ColumnSectionsValue) => sync.put(`${PREFERENCE_KEYS.columnSections}:${columnId}`, sections),
     [sync],
   )
   const setFilterPresets = useCallback(
@@ -617,10 +600,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       addIds,
       removeIds,
       setVotes,
-      setLastViewed,
-      clearLastViewed,
       setColumnPrefs,
-      setColumnSections,
       setFilterPresets,
       setHistoryGroupBy,
       setCategoryLayout,
@@ -638,10 +618,7 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
       addIds,
       removeIds,
       setVotes,
-      setLastViewed,
-      clearLastViewed,
       setColumnPrefs,
-      setColumnSections,
       setFilterPresets,
       setHistoryGroupBy,
       setCategoryLayout,

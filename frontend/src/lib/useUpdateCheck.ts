@@ -25,6 +25,10 @@
 //   loop.
 // Any of these leaves it for the next return. Only in a production
 // build: the dev server has no build id.
+//
+// Every return then goes to ``onReturn`` (PR3b's C1: after 10 minutes
+// away the tabs start over at their tops), after the check has started,
+// so a page about to move onto a new build is never re-sorted first.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { buildIdFromHtml, buildIdFromUrls, entryScriptFromHtml } from './buildId'
@@ -34,7 +38,9 @@ import { whenAllIdle as feedSavesIdle } from './sourceSaves'
 import { toast } from '../components/Toast'
 
 export const RETURN_CHECK_MS = 10 * 60_000
-const OPEN_GUARD_MS = 2_000
+// A page that hid this soon after opening a story was left to read it:
+// coming back, its card stays where it was, for ▲ or Save.
+export const OPEN_GUARD_MS = 2_000
 const FLUSH_CAP_MS = 3_000
 // A request that hangs (a dead connection after a resume) gives up.
 // Hiding the page also calls off the check's requests, so a check cut off
@@ -151,6 +157,11 @@ async function flushWrites(flushPrefs: () => Promise<boolean>): Promise<boolean>
   return saved
 }
 
+/** A return to the page: how long it was away (``Date.now``, so time
+ *  iOS kept it suspended counts), and whether it hid within
+ *  ``OPEN_GUARD_MS`` of opening a story. */
+export type Return = { away: number; openedBefore: boolean }
+
 export type UpdateCheck = {
   /** Desktop only: the server serves a newer build than this page. */
   ready: boolean
@@ -158,8 +169,10 @@ export type UpdateCheck = {
   reload: () => void
 }
 
-export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
+export function useUpdateCheck(isDesktop: boolean, onReturn?: (r: Return) => void): UpdateCheck {
   const { flushPending } = usePreferences()
+  const onReturnRef = useRef(onReturn)
+  onReturnRef.current = onReturn
   const [ready, setReady] = useState(false)
   const desktopRef = useRef(isDesktop)
   desktopRef.current = isDesktop
@@ -170,7 +183,9 @@ export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
   const reloadingRef = useRef(false)
 
   useEffect(() => {
-    if (!import.meta.env.PROD) return
+    // The dev server has no build id: no check, but returns are still
+    // reported.
+    const prod = import.meta.env.PROD
     let hiddenAt: number | null = null
     // Bumped by every hide and every input, so a check under way can
     // tell that it has to give up.
@@ -215,18 +230,21 @@ export function useUpdateCheck(isDesktop: boolean): UpdateCheck {
     const onShown = () => {
       if (hiddenAt == null) return
       const away = Date.now() - hiddenAt
+      const openedBefore = hiddenAt - lastStoryOpenAt() <= OPEN_GUARD_MS
       // The desktop opens stories in another tab and never reloads by
       // itself, so the guard is the phone's.
-      const justOpened = !desktopRef.current && hiddenAt - lastStoryOpenAt() <= OPEN_GUARD_MS
+      const justOpened = !desktopRef.current && openedBefore
       hiddenAt = null
-      if (away < RETURN_CHECK_MS || justOpened || running?.epoch === epoch) return
-      const mine = { epoch, cancel: new AbortController() }
-      running = mine
-      void check(mine.cancel.signal).finally(() => {
-        // A check from an earlier epoch that settles late leaves a newer
-        // one's marker alone.
-        if (running === mine) running = null
-      })
+      if (prod && away >= RETURN_CHECK_MS && !justOpened && running?.epoch !== epoch) {
+        const mine = { epoch, cancel: new AbortController() }
+        running = mine
+        void check(mine.cancel.signal).finally(() => {
+          // A check from an earlier epoch that settles late leaves a newer
+          // one's marker alone.
+          if (running === mine) running = null
+        })
+      }
+      onReturnRef.current?.({ away, openedBefore })
     }
     const onVisibility = () => (document.visibilityState === 'hidden' ? onHidden() : onShown())
     // Back from the back-forward cache: the gap runs from pagehide.

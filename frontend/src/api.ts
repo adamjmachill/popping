@@ -69,7 +69,8 @@ export interface Entry {
   published_at: string | null
   // ISO timestamp of when the row landed in our DB (server `fetched_at`).
   // Distinct from `published_at` (source article publish time). The
-  // frontend uses this for "new since last refresh" + read/unread.
+  // frontend uses this for a tab's "Hide if older than" and for the
+  // read model's first-deploy baseline (lib/feedOrder.ts, D33).
   fetched_at: string | null
   composite_score: number
   personal_score: number

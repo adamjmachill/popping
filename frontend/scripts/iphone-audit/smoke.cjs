@@ -19,7 +19,7 @@
 const fs = require('fs')
 const path = require('path')
 const playwright = require('playwright')
-const { mockApi, IOS_UA } = require('./capture.cjs')
+const { mockApi, prefMock, IOS_UA } = require('./capture.cjs')
 const F = require('./fixtures.cjs')
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -166,6 +166,48 @@ function briefNeedsAiState(name, { brief, collapse }) {
         await page.locator(`${MOBILE_MAIN} [aria-expanded="true"][role="button"] > span[aria-hidden="true"]`).first().click()
         await page.locator(`${MOBILE_MAIN} [aria-expanded="false"][role="button"]`).waitFor({ state: 'visible' })
         await setUp.waitFor({ state: 'visible' })
+      }
+    },
+  }
+}
+
+// PR3b: the NHL tab with `seen` stored as seen, Earlier opened or not.
+// The rows under the last unseen card are 44px, never role="status", and
+// never a <section>.
+function readModelState(name, seen, openEarlier) {
+  return {
+    name,
+    before: async ({ context }) => {
+      if (seen.length) prefMock(context).seed({ 'seen:nhl': seen })
+    },
+    setup: async ({ page }) => {
+      await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').filter({ hasText: /^Nhl/ }).first().click()
+      await page.locator(`${MOBILE_MAIN} [data-caught-up]`).waitFor({ state: 'visible' })
+      if (openEarlier) {
+        await page.locator(`${MOBILE_MAIN} button[data-earlier]`).click()
+        await page.locator(`${MOBILE_MAIN} [data-group="earlier"] article[data-card-id]`).first().waitFor({ state: 'visible' })
+        await page.locator(`${MOBILE_MAIN} [data-caught-up]`).scrollIntoViewIfNeeded()
+      }
+    },
+    run: async ({ page, fail }) => {
+      const rows = await page.$$eval(`${MOBILE_MAIN} [data-caught-up], ${MOBILE_MAIN} [data-next-tab], ${MOBILE_MAIN} [data-earlier]`, (els) =>
+        els.map((el) => ({ text: el.textContent.trim(), h: el.getBoundingClientRect().height, status: !!el.closest('[role="status"]') || el.getAttribute('role') === 'status', section: !!el.closest('main section [data-scroller] section') })),
+      )
+      for (const r of rows) {
+        if (r.h < 43.5) fail('READ-MODEL', `"${r.text}" is ${r.h}px tall`)
+        if (r.status) fail('READ-MODEL', `"${r.text}" is a status region`)
+        if (r.section) fail('READ-MODEL', `"${r.text}" is inside a <section> of its own`)
+      }
+      const unseen = await page.locator(`${MOBILE_MAIN} [data-group="unseen"] article[data-card-id]`).count()
+      const marker = rows.find((r) => /caught up|not seen/.test(r.text))
+      const want = { 'caught-up': [0, /^✓\s*You.re all caught up$/], 'not-seen-row': [3, /^3 not seen · Mark as read$/], 'earlier-open': [1, /^1 not seen · Mark as read$/] }[name]
+      if (unseen !== want[0]) fail('READ-MODEL', `${unseen} cards above the marker, expected ${want[0]}`)
+      if (!marker || !want[1].test(marker.text)) fail('READ-MODEL', `the marker reads ${JSON.stringify(marker && marker.text)}`)
+      // C8: the next tab in the strip after Nhl with new stories.
+      if (name === 'caught-up' && !rows.some((r) => /^Podcast · \d+/.test(r.text))) fail('READ-MODEL', "no C8 row naming Podcast under the caught-up tab")
+      if (name === 'earlier-open') {
+        const dim = await page.$$eval(`${MOBILE_MAIN} [data-group="earlier"] article[data-card-id]`, (els) => els.map((el) => getComputedStyle(el).opacity))
+        if (dim.length !== 2 || dim.some((o) => Number(o) > 0.61)) fail('READ-MODEL', `Earlier's cards have opacity ${JSON.stringify(dim)}, expected two at 0.6`)
       }
     },
   }
@@ -451,6 +493,14 @@ const STATES = [
       await page.locator(`${MOBILE_MAIN} [data-brief-action="generate"]`).waitFor({ state: 'visible' })
     },
   },
+  // PR3b: the end of a tab. The NHL tab (3 stories) with every story
+  // seen: ✓ "You're all caught up", C8's row (Podcast, the next tab with
+  // new stories) and Earlier (3) folded; with none seen: the 3 cards and
+  // "3 not seen · Mark as read"; with two seen and Earlier open: one card,
+  // the row, then the two dimmed.
+  readModelState('caught-up', [601, 602, 603], false),
+  readModelState('not-seen-row', [], false),
+  readModelState('earlier-open', [602, 603], true),
   // PR1c: no AI provider. The phone's Brief opens expanded with no
   // brief; the second state has a brief and is collapsed. The 44px
   // "Brief needs an AI provider · Set up" must stay on one line.
@@ -1073,7 +1123,7 @@ async function runState(browser, state, width, opts) {
       await page.goto(opts.base + (state.url || '/'), { waitUntil: 'load', timeout: 30000 })
       await page.locator(state.wait || PHONE_CARD).first().waitFor({ state: 'visible', timeout: 20000 })
       await settle()
-      // Let the load-time "refreshed" toast go so every state starts clean.
+      // Let any load-time toast go so every state starts clean.
       await page.waitForFunction(() => !document.querySelector('[role="status"]'), null, { timeout: 8000 }).catch(() => {})
       if (state.setup) await state.setup({ page, context, width, settle })
       await settle()

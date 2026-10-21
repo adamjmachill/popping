@@ -40,7 +40,6 @@ const NAVIGATION_BINDINGS: Binding[] = [
 ]
 
 const CARD_BINDINGS: Binding[] = [
-  { key: 'm', label: 'mark selected card read' },
   { key: 's', label: 'toggle inline summary on selected card' },
 ]
 

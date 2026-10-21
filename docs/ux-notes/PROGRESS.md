@@ -12,9 +12,9 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | merged | #38 |
 | PR2a Preference PATCH routes | B | merged | #28 |
 | PR2b prefSync client and sync rules | F | merged | #40 |
-| PR2c Refuse whole-list PUTs of set keys | B (floating) | in review | #37 |
-| PR3a Desktop single scroller and batching | F | in review | #43 |
-| PR3b Read model | F | not started | |
+| PR2c Refuse whole-list PUTs of set keys | B (floating) | merged | #37 |
+| PR3a Desktop single scroller and batching | F | merged | #43 |
+| PR3b Read model | F | in review | |
 | PR3c Seen on scroll | F | not started | |
 | Gate 1 | owner | | |
 | PR4a Ingest rules, brief guard, On this day | B | merged | #30 |
