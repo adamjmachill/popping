@@ -869,6 +869,13 @@ export function App() {
   // moves (Edit tabs) keeps the selection; null is the first column.
   const [selectedColumnKey, setSelectedColumnKey] = useState<ColKey | null>(null)
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null)
+  // A Column folded Earlier with the selected card inside (its button, or
+  // a new snapshot): the selection goes, so the shortcuts never act on a
+  // card that isn't drawn. Only while it is still that card. Stable:
+  // Column's memo keeps callbacks.
+  const dropSelection = useCallback((entryId: number) => {
+    setSelectedCardId((cur) => (cur === entryId ? null : cur))
+  }, [])
   // Per-card summary expansion. Session-scoped on purpose — the user
   // typically expands once to scan, and re-expanding after a reload
   // is cheap (the column has been refetched and the backend serves
@@ -2987,6 +2994,7 @@ export function App() {
                       onMarkAll={() => markColumnRead(col.key)}
                       onOpenTab={openTab}
                       onHoldChange={(hold) => setHold(col.key, hold)}
+                      onSelectionFolded={dropSelection}
                       onHideEntry={(entryId) => {
                         hideEntry(entryId)
                         toast('Entry hidden.', {
@@ -3169,6 +3177,7 @@ export function App() {
                     onMarkAll={() => markColumnRead(phoneCol.key)}
                     onOpenTab={openTab}
                     onHoldChange={(hold) => setHold(phoneCol.key, hold)}
+                    onSelectionFolded={dropSelection}
                     onHideEntry={(entryId) => {
                       hideEntry(entryId)
                       toast('Entry hidden.', {

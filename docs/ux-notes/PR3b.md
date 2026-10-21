@@ -262,6 +262,8 @@ History are gone, so a story is used up only by opening it or by Mark all
     cached object per tab while its value holds; `openTab` jumps there
     like the Menu's Jump to column.
   - The arrow keys walk the partition (unseen, then Earlier).
+    `dropSelection(id)` (stable) clears the selection a Column folded
+    Earlier over (re-check round 1).
   - Gone: `HIDDEN_RESET_MS`, `readEntriesKey`, `MAX_SEEN_ENTRY_IDS`,
     `capSetFIFO`, `seenEntryIdsRef`, `hiddenAtRef`, the section-fold
     types, refs and handlers (`setColumnSection`, `sectionsCollapsedFor`),
@@ -272,7 +274,7 @@ History are gone, so a story is used up only by opening it or by Mark all
   - Reset deletes `seen:*` rows too, and drops their queued writes.
 - `frontend/src/components/Column.tsx`: props `sections` (`{unseen,
   earlier}`), `unseenCount`, `nextTab`, `generation`, `onOpenEntry`,
-  `onMarkAll`, `onOpenTab`, `onHoldChange`; gone `newCount`,
+  `onMarkAll`, `onOpenTab`, `onHoldChange`, `onSelectionFolded`; gone `newCount`,
   `totalCount`, `sectionsCollapsed`, `onToggleSection`, `onMarkRead`,
   `onMarkEntryRead`, `onRefresh`. The header is the label, "N new" on md+
   (`data-new-count`) and ⋯, whose first row is Mark all as read
@@ -283,10 +285,13 @@ History are gone, so a story is used up only by opening it or by Mark all
   a time. C8's row is named like the tab in the strip ("News, 12 new").
   Each card run is a `div[data-group]`. Both limits and
   `earlierOpen` reset on `generation`; Earlier opens when the keyboard
-  selection moves into it, and the limits grow to reach it. An
-  IntersectionObserver on the marker (root `sentinelRoot`) reports
-  whether it is above the screen; meanwhile the rows under the marker
-  stay as drawn (review fix 1).
+  selection moves into it, and the limits grow to reach it; folded with
+  the selection inside (its button, or a new snapshot), it drops the
+  selection through `onSelectionFolded` (re-check round 1). An
+  IntersectionObserver on the marker (root `sentinelRoot`), made again
+  for every snapshot (re-check round 1), reports whether it is above the
+  screen; meanwhile the rows under the marker stay as drawn (review fix
+  1).
   `ColumnSection` became `CardList`.
 - `frontend/src/components/Card.tsx`: ✓ and `CheckIcon`, the right-swipe
   reveal and commit, `commitMarkRead`, `mountTime`, the context menu's
@@ -346,6 +351,16 @@ History are gone, so a story is used up only by opening it or by Mark all
   So that this choice never moves the list (review fix 1), the marker's
   form and C8's row stay as last drawn while the marker is above the
   screen, and catch up when it is back on screen or the tab starts over.
+- **Earlier and the keyboard selection.** The spec has Column open
+  Earlier "itself when `selectedId` is in it" and fold it again "on every
+  snapshot", which conflict when a snapshot starts over with the
+  selection inside. Earlier opens when the selection moves into it
+  (review fix 4), every new snapshot folds it, and a fold with the
+  selection inside (the Earlier button, or a new snapshot: Refresh, Mark
+  all, its Undo, C1) drops the selection, so no shortcut acts on a card
+  that isn't drawn and the next arrow starts at the column's first card
+  (re-check round 1). A selection that a reset moves into Earlier (Mark
+  all with an unseen card selected) still opens it.
 - **Saved has no read model**: no partition, no marker, no Mark all row,
   no badge, no dimming ("Saved has no marker").
 - **A hide no longer marks the story read** (the eye button and `h` did);
@@ -391,7 +406,9 @@ History are gone, so a story is used up only by opening it or by Mark all
   deleted.
 - New flows (390 unless said; the README has each step): 
   `flow-open-marks-seen` (a Column, search, the desktop For You row, and
-  the keepalive PATCH when the page hides straight after an open),
+  the keepalive PATCH when the page hides straight after an open; a
+  middle-click on the headline, and from re-check round 1 on the
+  Reddit-thread link and Listen),
   `flow-badge-cap` (99+, the tab's name with the full count, none at 0),
   `flow-caught-up`, `flow-next-tab` (C8, the row's name, a hidden tab
   never named),
@@ -399,13 +416,20 @@ History are gone, so a story is used up only by opening it or by Mark all
   while the marker is above the screen), `flow-return-after-10-min` (C1:
   9 min nothing; 11 min reset, the arrival first and the list at its top;
   an open straight before leaving: nothing; from the review fixes, an open
-  or a scroll before a slow return's refresh lands: nothing moves),
+  or a scroll before a slow return's refresh lands: nothing moves; from
+  re-check round 1, a finger resting on the list too, and the first
+  return's refresh held until the return's own scroll event),
   `flow-refresh-resets` (a poll appends without a toast; Refresh starts
-  the tab over, "1 new" then "Nothing new", and folds an open Earlier),
+  the tab over, "1 new" then "Nothing new", and folds an open Earlier;
+  from re-check round 1, a Refresh past the old batch draws the first 30
+  and the sentinel),
   and from the review fixes `flow-arrival-batch-edge` (an arrival past a
   whole batch never takes the marker or Earlier off the page) and
   `flow-earlier-keys-fold` (1280: Earlier folds with the keyboard
-  selection inside).
+  selection inside, on `r` and with its button, and the selection goes
+  with it), and from re-check round 1 `flow-return-from-earlier` (C1 from
+  deep in Earlier: the hold is let go, the end row follows the opens and
+  an arrival goes in at once).
 - Changed flows: `flow-auto-append` ends with the marker;
   `flow-desktop-layout` adds a Mark all step; `flow-reset-keeps-saves`
   seeds `seen:news` and opens a story where it tapped ✓;
@@ -417,7 +441,8 @@ History are gone, so a story is used up only by opening it or by Mark all
   didn't handle itself is recorded in `opened` and kept on the page
   (bubble phase), so opening a story leaves the flow on Popping.
   Helpers: `withArrivals`, `arrivalNhl`, `groupIds`, `markerText`,
-  `badge`, `textNow`, `openStory`, `seenAdded`, `seenRemoved`.
+  `badge`, `textNow`, `openStory`, `seenAdded`, `seenRemoved`, and from
+  re-check round 1 `restFinger`.
 - Smoke states (390 and 320): `caught-up`, `not-seen-row`,
   `earlier-open`: rows 44px, the marker not a status region and not a
   nested `<section>`, Earlier's cards at opacity 0.6.
@@ -551,7 +576,10 @@ Every one was fixed; none was skipped.
    when the marker is back on screen (the moment App lets the held
    arrivals in) or the tab starts over (a new `generation`). The
    deviation "C8's row only under You're all caught up" stays, so the
-   CAUGHT-UP assertion and the badge's count are unchanged.
+   CAUGHT-UP assertion and the badge's count are unchanged. (Re-check
+   round 1: the marker's observer is now made again for every snapshot,
+   so a return that jumps the marker from above the screen to below it
+   lets the hold go.)
 2. **C1's second reset could move a story opened right after a return.**
    The reset armed by a long return is now called off
    (`disarmReturnReset`) by any input after the return: capture
@@ -573,12 +601,13 @@ Every one was fixed; none was skipped.
    new-tab link (`middle: true`) and keeps it on the page.
 4. **"Earlier (N)" wouldn't fold with the keyboard selection inside**
    (two findings). Column opens Earlier when the selection moves into it
-   (`openedFor`, cleared when the selection leaves Earlier and on a new
-   snapshot), not on every render; `aria-expanded` and the drawn cards
-   follow `earlierOpen` alone. The limit growth for the selection applies
-   only while Earlier is open, so a folded Earlier leaves the selected
-   card undrawn (App's scroll skips a missing card) until the selection
-   moves on, which opens it again.
+   (`openedFor`, cleared when the selection leaves Earlier), not on every
+   render; `aria-expanded` and the drawn cards follow `earlierOpen` alone.
+   The limit growth for the selection applies only while Earlier is
+   open. (Re-check round 1 corrected the rest: `openedFor` is no longer
+   cleared on a new snapshot, which reopened Earlier, and a fold with the
+   selection inside drops the selection instead of leaving it on an
+   undrawn card that `h`, `b` and `s` still acted on.)
 5. **An arrival on a 30-card boundary unmounted the marker and an open
    Earlier for a frame.** Column keeps `drewAllUnseen` (set once every
    unseen card has been drawn in the generation, cleared on a new one);
@@ -638,6 +667,131 @@ local loop (`popping_test_f`, `vite preview` on 127.0.0.1:4173):
 - Mutation checks: eleven mutants, each a scratch edit, rebuild, `--only`
   on its flows, restore from a backup copy and a byte compare; all
   failed (table above).
+
+## Review fixes (re-check round 1, "PR3b: re-check fixes, round 1")
+
+The re-check confirmed seven findings. Every one was fixed; none was
+skipped. Findings 2 and 3 share a cause (the keyboard selection left on an
+Earlier that folded) and are fixed together.
+
+1. **After a long return, the marker's hold stayed on with the marker
+   below the screen** (minor). The return's instant jump to the top took
+   a marker that was above the screen to below it with no frame in
+   between, so its IntersectionObserver never called back (it reports
+   crossings), and the marker element was the same one, so its effect
+   never ran again: `held` and App's hold stayed true. The end row kept
+   an old count (review fix 1 freezes it while `held`) and new stories
+   waited, then went in above the row the moment it was scrolled to,
+   pushing it off the screen. The marker's observer now also depends on
+   `generation`, so every new snapshot (C1, Refresh, Mark all, Undo)
+   makes a fresh one, whose first callback reports where the marker
+   really is. New `flow-return-from-earlier`.
+2. **Folding Earlier with the keyboard selection inside left an
+   invisible selected card that `h`, `b` and `s` still acted on**
+   (minor), and Enter did nothing (App's handler took it from the
+   focused Earlier button). A folded Earlier now never keeps the
+   selection: Column calls `onSelectionFolded(id)` when the selected card
+   is in Earlier and Earlier is folded (its button, or a new snapshot),
+   and App's stable `dropSelection` clears it while it is still that
+   card. The call is in a layout effect: from a passive effect App's
+   update waited behind the next key, and the flow showed `h` and `b`
+   still acting on the card that went (the `useEffect` mutant fails 3 of
+   3 runs). The next ArrowDown starts at the column's first card.
+   `flow-earlier-keys-fold` presses `h`, `b` and `s` after the fold and
+   checks that nothing was sent, toasted, hidden or expanded, then that
+   Enter on the focused Earlier button opens it.
+3. **A new snapshot reopened an Earlier the user had folded with the
+   selection inside** (minor). The new-snapshot block no longer clears
+   `openedFor`: a selection that didn't move doesn't open Earlier again,
+   so every snapshot folds it, as the spec says, and fix 2 drops the
+   selection. A selection a reset moves into Earlier (Mark all on the
+   selected unseen card) still opens it (`openedFor` was not that card).
+   With fix 2 alone the reported steps (fold, then `r`) already stay
+   folded, so the flow checks the case only this fix covers: `r` with the
+   selection inside an open Earlier folds it.
+4. **The return flow never tested the input listeners on their own**
+   (major, tests). `flow-return-after-10-min` has a third slow-return
+   case: a finger resting on the top card (`restFinger`: a CDP
+   `touchStart`, then a `touchCancel`, so no tap and no scroll) when the
+   refresh lands. The list must be the reset one with the late story at
+   its end, at its top, Earlier as it was. Case 1's open is now a
+   `dispatchEvent('click')` (no pointer or touch, as VoiceOver does), so
+   the open guards are tested with the input listeners in place. The two
+   open guards back each other up: `openEntry` stamps the open the
+   landing checks, so a story opened from a card is kept by either one,
+   and only removing both fails (each alone has no visible effect on a
+   card open; the landing's check alone also covers a related-coverage
+   link, which stamps an open without `openEntry`).
+5. **The `scrollTop > 0` exemption was tested only by a race** (major,
+   tests). The gate route now holds the first 11-minute return's request
+   too, and the flow lets it go only after the list has sent the scroll
+   event of the return's own jump to the top (from 400), as on an iPhone,
+   where the refresh always takes longer than a frame. The mutant fails 5
+   of 5 runs. Each slow return now leaves with the list at 200, so its
+   check that the list is at 0 on the way back proves the tab started
+   over (an open guard grown to 30 s now fails the second slow return).
+6. **Middle-click was tested on the headline only** (minor, tests).
+   `flow-open-marks-seen` middle-clicks story 104's Reddit-thread link
+   (`seen:news`, badge 9) and a podcast episode's Listen (`seen:podcast`),
+   each recorded as a middle open.
+7. **The `!newSnapshot` guards had no test** (minor, tests).
+   `flow-refresh-resets` ends at the top of News with all 13 unseen cards
+   drawn, brings 20 stories with Refresh ("20 new"), and checks the tab
+   draws its first 30 and the "load more" sentinel, not all 33.
+
+New flow: `flow-return-from-earlier` (1). Changed: `flow-earlier-keys-fold`
+(2, 3), `flow-return-after-10-min` (4, 5), `flow-open-marks-seen` (6),
+`flow-refresh-resets` (7). New harness helper `restFinger`. The README
+describes each. `docs/DEVICE_CHECKS.md` gains a line for fix 1 (the flows
+run on Chromium only, and the return's jump is the same on Safari).
+
+### Mutation checks (re-check round 1)
+
+Each mutant was a scratch edit in a copy of `frontend/` (the worktree
+untouched), a rebuild, `vite preview` on 4173 and `--only` on its flow;
+the copy was restored after each.
+
+| Test | Broken line | Fails on |
+|---|---|---|
+| `flow-return-from-earlier` (1) | the marker observer's dependencies without `generation` | RETURN-EARLIER: after two opens the end row reads "7 not seen", expected 5; the arrival waits; the row reads 7, expected 6; "the end row, scrolled to at 555, moved to 741" (2 of 2 runs) |
+| `flow-earlier-keys-fold` (2) | no `onSelectionFolded` call | EARLIER-KEYS: after `r` ArrowDown selected 603 in Earlier, expected 601; with Earlier folded `h`, `b` and `s` sent `never` and `bookmark` for 603, "Earlier (1)", a toast; Enter on the focused Earlier button did nothing |
+| `flow-earlier-keys-fold` (2) | the call in `useEffect`, not `useLayoutEffect` | EARLIER-KEYS: `h` and `b` sent `never` and `bookmark` for 602, "Earlier (1)", a toast (3 of 3 runs) |
+| `flow-earlier-keys-fold` (3) | `setOpenedFor(undefined)` back in the new-snapshot block | EARLIER-KEYS: "r with the selection inside left Earlier expanded true with 2 cards drawn, expected it folded" |
+| `flow-earlier-keys-fold` (review fix 4, again) | Earlier opened on every render while the selection is in it | EARLIER-KEYS: `r` and the Earlier button both left it expanded, and the shortcuts acted on 603 |
+| `flow-return-after-10-min` (4) | no input listeners while armed | RETURN: "with a finger on the list when the return's refresh landed, the list became [7954,7953,7952,102,…], expected [7953,7952,102,…,7954]" (2 of 2 runs) |
+| `flow-return-after-10-min` (4) | neither open guard (no disarm in `openEntry`, `afterReturn` ignores opens) | RETURN: "story 7951, opened before the return's refresh landed, moved"; "Earlier (3)", was "Earlier (2)" |
+| `flow-return-after-10-min` (4) | only `openEntry`'s disarm, or only the landing's open check, removed | passes (each backs the other up; see fix 4) |
+| `flow-return-after-10-min` (5) | `&& t.scrollTop > 0` dropped | RETURN: "back after 11 min the stories above the marker are [102,…,112,7951], expected the arrival first" (5 of 5 runs) |
+| `flow-return-after-10-min` (5) | `OPEN_GUARD_MS` 30 s | RETURN: "the second slow return did not start the tab over at its top" |
+| `flow-return-after-10-min` (review fix 2, again) | no scroll listener | RETURN: the scroll case's list and position, as before |
+| `flow-open-marks-seen` (6) | the Reddit-thread link's `onAuxClick` dropped | OPEN-SEEN: "a middle-click on story 104's Reddit thread sent no PATCH adding it to seen:news"; badge "10", expected "9" |
+| `flow-open-marks-seen` (6) | Listen's `onAuxClick` dropped | OPEN-SEEN: "a middle-click on episode 401's Listen sent no PATCH adding it to seen:podcast" |
+| `flow-refresh-resets` (7) | the three `!newSnapshot &&` guards removed | REFRESH: "after a Refresh that brought 20 to 13 unseen the tab draws 33 unseen cards without a "load more" sentinel" (2 of 2 runs) |
+
+### Verification (re-check round 1)
+
+On the same base (`e1f0390`), with the same local loop (`popping_test_f`,
+`vite preview` on 127.0.0.1:4173, started and stopped by PID).
+
+- `npm run lint`: 0 errors (the same 4 react-refresh warnings).
+  `npm run build`: clean. `git diff --exit-code package.json
+  package-lock.json`: clean.
+- Unit tests: 193 of 193 pass (no library changed).
+- Backend pytest, the ten tests that read frontend source (slice 21,
+  slice 19, the feed editor and preference contracts, and the rest that
+  open `frontend/`): 210 passed. `onSelectionFolded` is a callback, so
+  slice 21's comparator list is unchanged, and it sits after
+  `sourcesByName=` at both Column sites (slice 19's regex).
+- Strict smoke (`--csp --strict`, fonts-ci.conf), every state and flow:
+  0 failures, 0 warnings (172 runs, 487 s).
+- The PR3b flows and states, every flow this unit changed or leans on,
+  the new `flow-return-from-earlier`, and `flow-desktop-select-follows-tab`,
+  `flow-reload-on-new-build` and `flow-reload-desktop-button` (the
+  keyboard selection and the return path): 23 flows and 3 states at 390
+  and 320, 29 runs, looped 3 times: 0 failures each time (162 to 164 s a
+  loop).
+- Mutation checks: the table above; every mutant of a fix failed its
+  flow, the two single open guards pass as explained under fix 4.
 
 ## Open items for later units
 

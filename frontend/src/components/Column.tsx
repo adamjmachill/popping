@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useId, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { Entry } from '../api'
 import { Card } from './Card'
 import { FORYOU_KEY, SAVED_KEY, type ColKey } from '../lib/columns'
@@ -91,6 +91,11 @@ type Props = {
   // is, App holds new arrivals back (Safari has no scroll anchoring),
   // and the rows under the marker stay as they were drawn.
   onHoldChange?: (hold: boolean) => void
+  // Earlier folded with the keyboard selection inside it (its button,
+  // or a new snapshot): App drops the selection, so no shortcut acts on
+  // a card that isn't drawn. Called with the selected id. Must be stable
+  // (the memo comparator ignores callbacks).
+  onSelectionFolded?: (entryId: number) => void
   // Prefs + setter for the ⋯ popover (Mark all, Newest | Best, and the
   // age filter). Without a setter there is no ⋯.
   prefs?: ColumnPrefs
@@ -171,7 +176,8 @@ type EndRows = { generation: number | undefined; count: number; next: TabCount |
 // ``React.memo`` wrap with a custom comparator (``_columnPropsEqual``,
 // below) so App's per-render closures don't defeat memoization. The
 // comparator ignores the callback props (``onOpenEntry``,
-// ``onMarkAll``, ``onOpenTab``, ``onHoldChange``, ``onHideEntry``,
+// ``onMarkAll``, ``onOpenTab``, ``onHoldChange``,
+// ``onSelectionFolded``, ``onHideEntry``,
 // ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
 // ``onToggleSummary``, ``onPrefsChange``) and the per-card
 // ``cardRefs`` — they're inherently per-render at the App layer; the
@@ -212,6 +218,7 @@ export function ColumnInner({
   onMarkAll,
   onOpenTab,
   onHoldChange,
+  onSelectionFolded,
   prefs,
   onPrefsChange,
   categoriesBySourceId,
@@ -243,7 +250,10 @@ export function ColumnInner({
   const [drewAllUnseen, setDrewAllUnseen] = useState(false)
   // The keyboard selection that opened Earlier. Earlier opens when the
   // selection moves into it, once per card, so the Earlier button can
-  // still fold it with the selection inside.
+  // still fold it with the selection inside. A new snapshot keeps it: a
+  // selection already inside Earlier hasn't moved, so Earlier stays
+  // folded (and App drops the selection, below). A selection the reset
+  // itself moves into Earlier (Mark all) still opens it.
   const [openedFor, setOpenedFor] = useState<number | undefined>(undefined)
   const [shownGeneration, setShownGeneration] = useState(generation)
   // A new snapshot (React's "adjust state when a prop changes"). React
@@ -257,7 +267,6 @@ export function ColumnInner({
     setEarlierOpen(false)
     setEarlierLimit(BATCH)
     setDrewAllUnseen(false)
-    setOpenedFor(undefined)
   }
   const [sentinel, setSentinel] = useState<HTMLElement | null>(null)
   const [marker, setMarker] = useState<HTMLElement | null>(null)
@@ -343,8 +352,8 @@ export function ColumnInner({
   // (ArrowDown walks past a batch, and from the unseen cards into
   // Earlier): the limits grow, by whole batches, to reach it. Earlier
   // opens when the selection moves into it; folded again with the
-  // selection inside, it leaves the selected card undrawn (App's scroll
-  // skips a card that isn't there) until the selection moves on.
+  // selection inside (its button, or a new snapshot), it takes the
+  // selection with it (``onSelectionFolded``, below).
   let selectedUnseen = -1
   let selectedEarlier = -1
   if (selectedId != null) {
@@ -422,7 +431,12 @@ export function ColumnInner({
   // first callback reports where the marker is now, so a marker that
   // changes (the row turning into "You're all caught up") keeps the
   // hold true to its place; a marker that goes (unseen cards still
-  // loading) or a Column that goes (another tab) lets arrivals in.
+  // loading) or a Column that goes (another tab) lets arrivals in. A new
+  // snapshot measures it again too: an observer calls back only when
+  // the marker crosses the screen's edge, and C1's jump to the top takes
+  // a marker above the screen to below it with no frame in between, so
+  // the hold (and the end rows it keeps) would stay on until the next
+  // crossing.
   useEffect(() => {
     if (!marker || !sentinelRoot) return
     const io = new IntersectionObserver((entries) => {
@@ -434,13 +448,26 @@ export function ColumnInner({
     }, { root: sentinelRoot })
     io.observe(marker)
     return () => io.disconnect()
-  }, [marker, sentinelRoot])
+  }, [marker, sentinelRoot, generation])
   useEffect(() => {
     if (marker) return
     setHeld(false)
     holdRef.current?.(false)
   }, [marker])
   useEffect(() => () => holdRef.current?.(false), [])
+
+  // A folded Earlier never keeps the keyboard selection. Its button, or
+  // a new snapshot, folded it with the selected card inside, and the
+  // selection didn't move, so it stays folded: App drops the selection,
+  // and ``s``, ``b``, ``h`` and Enter can't act on a story no one can
+  // see. The next arrow starts at the column's first card. A layout
+  // effect: App's update then renders before the browser takes the next
+  // key (from a passive effect it waits behind it, and the key acts on
+  // the card that went).
+  const foldedSelection = selectedEarlier >= 0 && !earlierOpen ? selectedId : undefined
+  useLayoutEffect(() => {
+    if (foldedSelection != null) onSelectionFolded?.(foldedSelection)
+  }, [foldedSelection, onSelectionFolded])
 
   // The end row's "Mark as read" was pressed with the keyboard or
   // VoiceOver: once the tab has started over, caught up, the focus that

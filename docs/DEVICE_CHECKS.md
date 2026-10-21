@@ -53,6 +53,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #45 · On a tab that says "You're all caught up", tap the row under it that names another tab (such as "News · 12"). Pass: that tab opens; a tab hidden in Edit tabs is never named, and with every tab read the row is gone.
 - [ ] #45 · Tap a tab's ⋯, then Mark all as read. Pass: the tab shows "You're all caught up", its badge goes, and the same ⋯ row is greyed out until new stories arrive.
 - [ ] #45 · Scroll down a tab, switch to another app for 10 minutes or more (not straight after opening a story), then come back. Pass: the tab is back at its top, and the stories you had opened are under "Earlier (N)".
+- [ ] #45 · On a busy tab, open "Earlier (N)" and scroll far down it, switch to another app for 10 minutes or more, come back, open the top story, then scroll down to the "N not seen · Mark as read" row. Pass: its number matches the tab's badge, and the row stays still when you reach it.
 - [ ] #45 · Open a story, read it in Safari for 10 minutes or more, then come back to Popping. Pass: the list is where you left it, with that story still in place.
 - [ ] #45 · On the phone, note the badges of For You and of a category tab, then open a story of that category from For You and come back. Pass: both badges are one lower (a story opened anywhere counts as seen everywhere).
 - [ ] #45 · (If you have a desktop) On the laptop, open a story from the For You row at the top, then look at its category's column. Pass: the column's "N new" is one lower and the column didn't move.
