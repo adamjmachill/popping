@@ -54,6 +54,7 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #<pr> · On the laptop, make the browser window shorter than the For You row, then scroll down with the trackpad or mouse wheel. Pass: everything under the header (Brief, For You and the columns) scrolls as one page, the header stays at the top, and the columns under For You show their stories at full height, not as a thin strip.
 - [ ] #<pr> · On the phone, open a tab with more than 30 stories and scroll steadily to its end. Pass: more stories appear before you reach the bottom, with no tap and no visible jump, and the list ends with the tab's last story.
 - [ ] #<pr> · On the laptop, scroll down past the 30th story of a column with more than 30. Pass: the next stories appear as you near the end of the column.
+- [ ] #<pr> · With rotation unlocked, open the home-screen app with the phone held sideways, on a tab with more than 30 stories, then turn it upright. Pass: scrolling the tab to its end loads more stories, and tapping the tab again takes the list back to its top.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

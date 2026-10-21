@@ -3470,7 +3470,55 @@ module.exports = [
       await toEnd()
       if (!(await waitFor(async () => (await cardCount(column)) === 70, 3000))) return fail('AUTO-APPEND', `after a second scroll to the end the list has ${await cardCount(column)} cards, expected 70`)
       if (await column.locator('[data-more]').count()) fail('AUTO-APPEND', 'the "load more" sentinel is still there with every card rendered')
+      // The last batch went in below the scroll position: scroll to the
+      // end again so the shot shows the last card, where the sentinel was.
+      await toEnd()
+      await sleep(300)
+      const last = await list.evaluate((el) => {
+        const cards = el.querySelectorAll('article[data-card-id]')
+        const r = cards[cards.length - 1].getBoundingClientRect()
+        const box = el.getBoundingClientRect()
+        return r.bottom > box.top && r.top < box.bottom
+      })
+      if (!last) fail('AUTO-APPEND', 'the end shot does not show the last card')
       await shot('end')
+    },
+  }),
+  // Crossing 768px hands the scroller over without a remount: the phone
+  // list carries data-scroller (and is the sentinel root and the
+  // tap-to-top target) only on the phone, the wrapper only on the
+  // desktop. The stored section row keeps the Column's memo holding
+  // across the flip, as on any tab whose Fresh or History was ever
+  // toggled, so only a prop the memo compares can re-render it.
+  dashFlow('flow-scroller-rotate', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page, context }) => {
+      await withStories(page, moreNhl(67))
+      await page.addInitScript(() => localStorage.setItem('popping.v1.mobileTab', 'cat:nhl'))
+      prefMock(context).seed({ 'column_sections:nhl': {} })
+    },
+    run: async ({ page, fail }) => {
+      const scrollers = () =>
+        page.evaluate(() => [...document.querySelectorAll('[data-scroller]')].map((el) => (el.querySelector('main.grid') ? 'wrapper' : el.closest('main.md\\:hidden') ? 'phone' : 'other')))
+      const one = (want) => waitFor(async () => JSON.stringify(await scrollers()) === JSON.stringify([want]), 3000)
+      if (!(await one('wrapper'))) fail('ROTATE', `at 1280 data-scroller is on ${JSON.stringify(await scrollers())}, expected only the wrapper`)
+
+      await page.setViewportSize({ width: 390, height: 844 })
+      if (!(await one('phone'))) return fail('ROTATE', `after 1280 → 390 data-scroller is on ${JSON.stringify(await scrollers())}, expected only the phone list`)
+      if (!/^nhl/i.test(await selectedTab(page))) return fail('ROTATE', `the phone shows ${JSON.stringify(await selectedTab(page))}, expected the NHL tab`)
+      const column = page.locator(`${MOBILE_MAIN} section`)
+      const list = page.locator(`${MOBILE_MAIN} section [data-scroller]`)
+      if (!(await sentinelBelow(column, 300))) return fail('ROTATE', 'the NHL list has no "load more" sentinel')
+      if (!(await waitFor(async () => (await cardCount(column)) === 60, 3000))) fail('ROTATE', `after 1280 → 390, scrolled to 300px above the end, the list has ${await cardCount(column)} cards, expected 60`)
+      const top = () => list.evaluate((el) => el.scrollTop)
+      if ((await top()) <= 200) return fail('ROTATE', 'the NHL list did not scroll down')
+      // A click: this context (a desktop one) has no touch.
+      await phoneTab(page, /^nhl/i).click()
+      if (!(await waitFor(async () => (await top()) === 0, 3000))) fail('ROTATE', `after 1280 → 390 a tap on the shown tab left the list at ${await top()}`)
+
+      await page.setViewportSize({ width: 1280, height: 800 })
+      if (!(await one('wrapper'))) fail('ROTATE', `after 390 → 1280 data-scroller is on ${JSON.stringify(await scrollers())}, expected only the wrapper`)
     },
   }),
   // ArrowDown past the first 30 cards: the selected card is rendered

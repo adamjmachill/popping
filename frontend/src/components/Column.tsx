@@ -163,8 +163,10 @@ type Props = {
   // The phone only: a callback ref for the story list, which is the
   // phone's real scroller (this section is h-full inside App's
   // wrapper). The list it lands on is marked ``data-scroller``. Pass a
-  // stable function (App passes its state setter); the memo comparator
-  // ignores it like the other callbacks.
+  // stable function (App passes its state setter, or undefined while
+  // the phone layout is hidden on a desktop). The memo comparator
+  // compares it, so crossing 768px re-renders the list and moves the
+  // ref and ``data-scroller`` with it.
   scrollerRef?: (el: HTMLElement | null) => void
   // The scroller the "load more" sentinel is observed against: this
   // Column's own list on the phone (the element ``scrollerRef`` hands
@@ -188,13 +190,13 @@ const MORE_MARGIN = '0px 0px 600px 0px'
 // comparator ignores the per-card callback props (``onMarkEntryRead``,
 // ``onHideEntry``, ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
 // ``onToggleSummary``, ``onToggleSection``, ``onPrefsChange``,
-// ``onMarkRead``, ``onRefresh``), the per-card ``cardRefs`` and the
-// phone's ``scrollerRef`` (a stable setter) —
+// ``onMarkRead``, ``onRefresh``) and the per-card ``cardRefs`` —
 // they're inherently per-render at the App layer; the data-driven
 // props (``sections``, ``sourcesById``, ``sourcesByName``,
 // ``starredSet``, ``hiddenSet``, ``votedMap``, ``prefs``,
-// ``sectionsCollapsed``, ``sentinelRoot``) are what we actually
-// re-render against.
+// ``sectionsCollapsed``, ``sentinelRoot``) and the phone's
+// ``scrollerRef`` (a stable setter or undefined, so comparing it costs
+// no render) are what we actually re-render against.
 //
 // Trade-off: if a callback's logic changes without the data
 // changing, this Column won't re-render. That can't happen in
@@ -1024,7 +1026,12 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     prev.sectionsCollapsed === next.sectionsCollapsed &&
     // The element changes on every phone tab remount and once App has
     // the desktop wrapper; the sentinel's observer rebinds to it.
-    prev.sentinelRoot === next.sentinelRoot
+    prev.sentinelRoot === next.sentinelRoot &&
+    // App's setter on the phone, undefined while the phone layout is
+    // hidden on a desktop. Both are stable, so this only differs when
+    // the width crosses 768px; without it the list would keep (or
+    // never get) the ref and ``data-scroller`` after the flip.
+    prev.scrollerRef === next.scrollerRef
   )
 }
 
