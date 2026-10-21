@@ -66,14 +66,23 @@ export type PartitionInput<E extends Item> = {
   hold?: boolean
   /** Start a new snapshot. */
   reset?: boolean
+  /** Seen, its mark not written yet (PR3c: a story seen on scroll waits
+   *  in App's collector for a moment). Placed as seen: a new snapshot,
+   *  or an arrival, puts it under the marker, where its mark keeps it
+   *  once it lands (ids keep their group). The counts wait for the mark,
+   *  so one written batch is one change of the badge. */
+  isPending?: (e: E) => boolean
 }
 
 const keepAll = () => false
 
 /** One tab's stories split into unseen and Earlier, from its snapshot. */
 export function partitionTab<E extends Item>(input: PartitionInput<E>): Partition<E> {
-  const { entries, isSeen, order } = input
+  const { entries, isSeen, order, isPending } = input
   const isRemoved = input.isRemoved ?? keepAll
+  // Where a story goes when it is placed: under the marker once seen, or
+  // seen and still waiting for its mark.
+  const placedSeen = isPending ? (e: E) => isSeen(e) || isPending(e) : isSeen
   const prev = input.snapshot ?? null
   let snap: Snapshot<E>
   if (!prev || input.reset || prev.order !== order) {
@@ -83,7 +92,7 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
     for (const e of entries) {
       if (cache.has(e.id)) continue
       cache.set(e.id, e)
-      ;(isSeen(e) ? earlier : unseen).push(e.id)
+      ;(placedSeen(e) ? earlier : unseen).push(e.id)
     }
     snap = { generation: (prev?.generation ?? 0) + 1, order, unseen, earlier, held: [], cache, out: prev?.out ?? null }
   } else {
@@ -100,7 +109,7 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
       known.add(e.id)
       // A story that comes in already seen (marked on another device
       // first) isn't new: it goes under the marker, at the end.
-      if (isSeen(e)) earlier.push(e.id)
+      if (placedSeen(e)) earlier.push(e.id)
       else held.push(e.id)
     }
     if (!input.hold && held.length) {

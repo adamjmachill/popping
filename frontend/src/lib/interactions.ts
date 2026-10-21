@@ -1,24 +1,25 @@
 // Client-side buffering of engagement events.
 //
-// The dashboard renders 20-50 visible cards at once; firing one
-// POST per ``view`` would hammer the backend as the user scrolls.
-// These helpers batch events into an in-memory queue and flush
-// them on ``requestIdleCallback`` (with a setTimeout fallback for
-// browsers that don't ship rIC — Safari before 16.4, Firefox before
-// 126). On ``pagehide`` (visibilitychange hidden OR window unload)
-// we switch to ``navigator.sendBeacon`` so the request survives the
-// tab closing.
+// A ``view`` is recorded when a story is used up (PR3c, D3): opened
+// (App's ``openEntry``, on any layout) or, on the phone, scrolled past
+// (App's ``markSeen``), not when its card is drawn. A scroll can use up
+// several at once, and one POST per ``view`` would hammer the backend.
+// These helpers batch events into an in-memory queue and flush them on
+// ``requestIdleCallback`` (with a setTimeout fallback for browsers that
+// don't ship rIC — Safari before 16.4, Firefox before 126). On
+// ``pagehide`` (visibilitychange hidden OR window unload) we switch to
+// ``navigator.sendBeacon`` so the request survives the tab closing.
 //
 // Click events bypass the queue and fire immediately — they are
 // sparse, the user expects immediate feedback (the link they're
 // clicking should open), and one extra POST on a click is negligible.
 //
 // De-duplication: views are deduplicated by entry id via a
-// Set<number> so re-renders (e.g. category filter toggles) don't
-// fire duplicate events for cards already on screen. The set is
-// session-scoped — we deliberately don't persist it across page
-// reloads; a return visit is a fresh "view" signal for the
-// recommendation ranker.
+// Set<number>, so a story sends one view per session even if it is
+// opened and also scrolled past, or seen on scroll again (a tab that
+// starts over). The set is session-scoped — we deliberately don't
+// persist it across page reloads; a return visit is a fresh "view"
+// signal for the recommendation ranker.
 //
 // Failure handling: if a flush POST fails (network blip, 5xx), we
 // drop the events. Engagement signals are advisory; losing a few
