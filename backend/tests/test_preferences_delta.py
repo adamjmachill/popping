@@ -582,16 +582,18 @@ async def test_slash_keys_round_trip_through_every_route(app_client, key):
 @pytest.mark.no_db
 def test_set_key_caps_match_the_frontend():
     """The server trim is a backstop for the client's own prune, so the
-    two must agree. ``MAX_READ_PER_KEY`` (``read_entries:*`` and
-    ``seen:*``) arrives with the client in PR2b, which pins it here."""
-    src = (REPO / "frontend/src/lib/preferences.tsx").read_text()
+    two must agree. The client's caps live in ``lib/prefSync.ts`` (PR2b),
+    which prunes to them; ``MAX_READ_PER_KEY`` covers ``read_entries:*``
+    and ``seen:*``."""
+    src = (REPO / "frontend/src/lib/prefSync.ts").read_text()
 
     def ts_number(name: str) -> int:
         m = re.search(rf"export const {name}\s*=\s*(\d+)", src)
-        assert m, f"couldn't find {name} in preferences.tsx"
+        assert m, f"couldn't find {name} in prefSync.ts"
         return int(m.group(1))
 
     assert SET_KEY_CAPS["hidden_entries"] == ts_number("MAX_HIDDEN")
     assert SET_KEY_CAPS["starred_entries"] == ts_number("MAX_STARRED")
     assert SET_KEY_CAPS["voted_entries"] == ts_number("MAX_VOTED")
-    assert SET_KEY_CAPS["read_entries:*"] == SET_KEY_CAPS["seen:*"] == 1000
+    assert SET_KEY_CAPS["read_entries:*"] == ts_number("MAX_READ_PER_KEY")
+    assert SET_KEY_CAPS["seen:*"] == ts_number("MAX_READ_PER_KEY")

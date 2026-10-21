@@ -553,7 +553,7 @@ export const api = {
     // rather than erroring. Callers here can hold far more than
     // 200 — the Settings Hidden/Starred/Voted tabs cap at
     // MAX_HIDDEN/MAX_STARRED/MAX_VOTED (1000/1000/2000, see
-    // lib/preferences.tsx) — so a single un-chunked call would
+    // lib/prefSync.ts) — so a single un-chunked call would
     // silently drop everything past the first 200 ids sent (the
     // oldest entries, since callers pass ids in recency order).
     // Chunking preserves the full list and keeps each request's
@@ -813,44 +813,74 @@ export const api = {
 
   // ---- Per-user preferences (read state, sort/filter, hides, etc.) ----
   // See ``lib/preferences.tsx`` for the React context that wraps
-  // these. The endpoints are the low-level transport; the
-  // provider does debouncing, optimistic updates, and the
-  // localStorage-seed-on-first-launch.
+  // these, and ``lib/prefSync.ts`` for how writes are batched, sent
+  // as changes, retried and merged with what the server sends back.
+  // The endpoints are the low-level transport.
   //
-  // The server treats the key as an opaque string. The frontend
-  // uses namespaced keys (``read_entries:<columnId>`` etc.);
-  // the backend just stores whatever JSONB you give it under
-  // that key.
+  // The server checks the key against an allowlist of namespaces
+  // (``read_entries:<columnId>`` etc., routes/preferences.py) and
+  // stores a PUT's value as given. ``keepalive`` lets a write finish
+  // after the page has gone (the leave flush).
 
-  /** Fetch all of the caller's preferences in one round-trip.
-   *  Returned as a flat list of (key, value) rows; the provider
-   *  decodes this into the typed ``PreferencesState`` shape. */
-  getPreferences: () =>
+  /** Fetch the caller's preferences in one round-trip: all of them, or
+   *  with ``since`` only the rows updated after it (an ISO time with a
+   *  zone). A since read can't report deleted rows. */
+  getPreferences: (since?: string | null, signal?: AbortSignal) =>
     jsonFetch<{ items: Array<{ key: string; value: unknown; updated_at: string }> }>(
-      '/api/preferences',
+      since ? `/api/preferences?since=${encodeURIComponent(since)}` : '/api/preferences',
+      { signal },
     ),
 
-  /** Upsert one preference. Idempotent -- the server is
-   *  "latest-value-wins" on the (user_id, key) primary key. The
-   *  value is opaque; pass any JSON-serializable shape. */
-  setPreference: (key: string, value: unknown) =>
+  /** Upsert one preference that isn't a set key. Idempotent -- the
+   *  server is "latest-value-wins" on the (user_id, key) primary key.
+   *  The value is opaque; pass any JSON-serializable shape. Set keys
+   *  (saves, hides, votes, read marks) are never PUT: two devices'
+   *  lists would overwrite each other. They take ``patchPreference``. */
+  setPreference: (key: string, value: unknown, opts: { keepalive?: boolean } = {}) =>
     jsonFetch<{ key: string; value: unknown; updated_at: string }>(
       `/api/preferences/${encodeURIComponent(key)}`,
       {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ value }),
+        keepalive: opts.keepalive,
       },
     ),
 
+  /** Change one set key: ``{add, remove}`` for the id lists, ``{set}``
+   *  (``null`` clears) for ``voted_entries``. The server applies
+   *  ``remove`` before ``add`` under a row lock and answers with the
+   *  whole new row. Empty lists are left out of the body. */
+  patchPreference: (
+    key: string,
+    delta: { add: number[]; remove: number[] } | { set: Record<string, 'up' | 'down' | null> },
+    opts: { keepalive?: boolean } = {},
+  ) => {
+    const body: Record<string, unknown> = {}
+    if ('set' in delta) body.set = delta.set
+    else {
+      if (delta.add.length) body.add = delta.add
+      if (delta.remove.length) body.remove = delta.remove
+    }
+    return jsonFetch<{ key: string; value: unknown; updated_at: string }>(
+      `/api/preferences/${encodeURIComponent(key)}`,
+      {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+        keepalive: opts.keepalive,
+      },
+    )
+  },
+
   /** Delete one preference. Idempotent -- 204 whether or not
-   *  the row existed. Not currently called by the frontend;
-   *  included for completeness (e.g. a future "reset all
-   *  preferences" button). */
-  deletePreference: (key: string) =>
+   *  the row existed. Used by Reset and by the column-mark-read
+   *  Undo (``last_viewed:<columnId>``). */
+  deletePreference: (key: string, opts: { keepalive?: boolean } = {}) =>
     fetch(`/api/preferences/${encodeURIComponent(key)}`, {
       method: 'DELETE',
       credentials: 'include',
+      keepalive: opts.keepalive,
     }),
 }
 

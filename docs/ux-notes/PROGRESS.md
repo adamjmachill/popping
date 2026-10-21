@@ -9,9 +9,9 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR1r Build stamp and reload on a new build | F | merged | #32 |
 | PR1a Scheduler defaults, extraction off the loop, Reddit Test, History | B | merged | #27 |
 | PR1b Tab keys, resolveTab, tap-to-top, phone scroller | F | merged | #36 |
-| PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | in review | #38 |
+| PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | merged | #38 |
 | PR2a Preference PATCH routes | B | merged | #28 |
-| PR2b prefSync client and sync rules | F | not started | |
+| PR2b prefSync client and sync rules | F | in review | #40 |
 | PR2c Refuse whole-list PUTs of set keys | B (floating) | waits for both devices on the PR2b build | |
 | PR3a Desktop single scroller and batching | F | not started | |
 | PR3b Read model | F | not started | |

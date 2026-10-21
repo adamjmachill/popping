@@ -63,17 +63,16 @@ import { sameHeaders, type HeaderMap } from './lib/headers'
 // orders. The server-backed store keys by user_id, so all
 // devices on the same LAN (sharing the bypass user_id) see
 // the same state. See ``lib/preferences.tsx`` for the
-// provider, the debounced sync, and the one-time
-// localStorage seed that runs on first launch.
+// provider and ``lib/prefSync.ts`` for the sync: saves, hides,
+// votes and read marks go to the server as changes, so two
+// devices never undo each other's.
 import {
   PREFERENCE_KEYS,
   usePreferences,
   type ColumnPrefsValue,
   type ColumnSectionsValue,
   type FilterPresetValue,
-  type ReadEntriesValue,
-  MAX_HIDDEN,
-  MAX_STARRED,
+  type IdSetKey,
   MAX_PRESETS,
 } from './lib/preferences'
 import { STORAGE_KEYS, safeGetItem, safeRemoveItem, safeSetItem } from './lib/storage'
@@ -169,33 +168,11 @@ function filterScope(sources: Set<string>): string {
   return Array.from(sources).sort().join('\n')
 }
 
-// Per-card manual read-set. Stored as ``{columnName: number[]}`` so
-// JSON.stringify round-trips cleanly. Entries that disappear from
-// the dashboard (older than the column's filter, or pruned by the
-// 200-row fetch cap) are eventually garbage-collected when their
-// column isn't rendered, but a few stale ids are cheap — they just
-// sit in localStorage. Valued-shaped (numbers only) so the per-card
-// JSON.parse stays fast at boot.
-//
-// ``MAX_PER_COLUMN`` caps each column's list so a long-running
-// install doesn't grow ``readEntries`` past the 5 MB localStorage
-// quota (the bug sweep found the cap was previously unbounded —
-// every mark-read appended forever and ``safeSetItem``'s quota
-// rejection was silently swallowed by App). When the cap is hit
-// we keep the LAST ``MAX_PER_COLUMN`` ids (newest reads win; the
-// oldest "I marked this read" decisions are also the ones most
-// likely to have been rotated out of the column's fetch window).
-
-
-// Per-column upper bound on manually-marked read entries. Chosen
-// to fit comfortably in localStorage across all columns combined:
-// 8 active columns × 200 entries × ~12 bytes JSON each ≈ 19 KB,
-// well under the 5 MB quota even for a power user with extra
-// columns. If a single column has more than this many manual marks
-// (it shouldn't, given the 50-item entry fetch cap), the oldest
-// marks are dropped — which is fine, because those entries have
-// long since aged out of the column's view.
-const MAX_PER_COLUMN = 200
+// Per-card manual read-sets (``read_entries:<column name>``) and the
+// hide and save sets have their caps in ``lib/prefSync.ts``: the
+// provider drops the oldest ids past a cap in the same PATCH that
+// adds the new ones, so App never trims a list itself.
+const readEntriesKey = (columnName: string): IdSetKey => `${PREFERENCE_KEYS.readEntries}:${columnName}`
 
 // Upper bound on ``seenEntryIdsRef`` (see its declaration below).
 // Unlike readEntries/hiddenEntries/starredEntries, this set is
@@ -738,11 +715,14 @@ export function App() {
   // (the refresh then carries on without it), which takes the tab away
   // until the next refresh that gets it.
   const [forYouLoaded, setForYouLoaded] = useState(false)
-  // Per-user server-backed preferences. The localStorage that
-  // used to back these has moved to ``lib/preferences.tsx``'s
-  // provider; the setters here debounce the PUTs to the server.
-  // On first mount the provider seeds from the old localStorage
-  // values, so the migration is invisible to the user.
+  // Per-user server-backed preferences (``lib/preferences.tsx``).
+  // Saves, hides, votes and read marks change through ``addIds`` /
+  // ``removeIds`` / ``setVotes``: each sends only the change, so two
+  // calls in one tick, or two devices, both land. Handlers that
+  // decide on the current set read ``prefs.latest()``, which holds
+  // the writes made earlier in the same tick, not a ref mirrored by
+  // an effect (Column's memo keeps old callbacks, so a closure's
+  // ``state`` can be renders old).
   const prefs = usePreferences()
   const readEntries = prefs.state.readEntries
   const lastViewed = prefs.state.lastViewed
@@ -753,15 +733,9 @@ export function App() {
   const votedEntries = prefs.state.votedEntries
   const filterPresets = prefs.state.filterPresets as FilterPreset[]
   const historyGroupBy = prefs.state.historyGroupBy
-  // Stable references to the typed setters. Aliased locally so
-  // the existing handlers can call ``setReadEntries(...)`` etc.
-  // without renaming every call site. The provider's setters
-  // are the only writers; the local ``useState`` versions are
-  // gone (the in-memory state lives in the provider now).
-  const setReadEntries: (
-    columnId: string,
-    ids: ReadEntriesValue,
-  ) => void = prefs.setReadEntries
+  // Stable references to the provider's calls, aliased so the
+  // handlers below read like they did. All stable across renders.
+  const { addIds, removeIds, setVotes, latest: latestPrefs } = prefs
   const setLastViewed: (
     columnId: string,
     iso: string,
@@ -775,39 +749,26 @@ export function App() {
     columnId: string,
     sections: ColumnSectionsValue,
   ) => void = prefs.setColumnSections
-  const setHiddenEntries: (ids: number[]) => void = prefs.setHiddenEntries
-  const setStarredEntries: (ids: number[]) => void = prefs.setStarredEntries
-  const setEntryVote: (
-    entryId: number,
-    direction: 'up' | 'down' | null,
-  ) => void = prefs.setEntryVote
   const setFilterPresets: (presets: FilterPresetValue[]) => void =
     prefs.setFilterPresets
+  // ▲ / ▼ on a card (``null`` clears its vote).
+  const voteEntry = useCallback(
+    (entryId: number, direction: 'up' | 'down' | null) => setVotes({ [entryId]: direction }),
+    [setVotes],
+  )
   // Note: no local ``setHistoryGroupBy`` alias — Settings.tsx's
   // History tab calls ``usePreferences()`` directly for that setter
   // rather than receiving it as a prop from here.
-  // Mirror the 8 preference values into refs so handlers can
-  // read the latest value without stale-closure bugs. Without
-  // this, a handler that did
-  //   ``setReadEntries(col, [...readEntries[col], id])``
-  // would read the ``readEntries`` snapshot from the render
-  // that captured the closure, not the value after a previous
-  // handler's update. Two ``setX`` calls in the same tick
-  // (e.g. ``markEntryRead`` and a follow-up
-  // ``restoreHiddenEntry``) would lose the second write.
+  // Mirror the whole-value preferences into refs so handlers can
+  // read the latest value without stale-closure bugs. (The set keys
+  // are read through ``latestPrefs()`` instead.)
   // The pattern: a tiny useEffect keeps the ref in sync with
   // the state on every render; the handlers read the ref.
-  const readEntriesRef = useRef(readEntries)
   const lastViewedRef = useRef(lastViewed)
   const columnPrefsRef = useRef(columnPrefs)
   const columnSectionsRef = useRef(columnSections)
-  const hiddenEntriesRef = useRef(hiddenEntries)
-  const starredEntriesRef = useRef(starredEntries)
   const filterPresetsRef = useRef(filterPresets)
   const historyGroupByRef = useRef(historyGroupBy)
-  useEffect(() => {
-    readEntriesRef.current = readEntries
-  }, [readEntries])
   useEffect(() => {
     lastViewedRef.current = lastViewed
   }, [lastViewed])
@@ -817,12 +778,6 @@ export function App() {
   useEffect(() => {
     columnSectionsRef.current = columnSections
   }, [columnSections])
-  useEffect(() => {
-    hiddenEntriesRef.current = hiddenEntries
-  }, [hiddenEntries])
-  useEffect(() => {
-    starredEntriesRef.current = starredEntries
-  }, [starredEntries])
   useEffect(() => {
     filterPresetsRef.current = filterPresets
   }, [filterPresets])
@@ -1206,8 +1161,12 @@ export function App() {
   // ``silent`` skips the toasts (errors still set the banner): Settings
   // refreshes after adding a feed, and its own "Added …" toast should
   // stay up instead of being replaced by "refreshed".
+  // Each refresh also reads what changed in the preferences since the
+  // last read (a save made on another device shows within a poll).
+  const resyncPrefs = prefs.resync
   const refresh = useCallback(async (opts?: { silent?: boolean }) => {
     setRefreshing(true)
+    void resyncPrefs()
     const seq = ++refreshSeqRef.current
     const startedAt = Date.now()
     let forYouOk = true
@@ -1304,7 +1263,7 @@ export function App() {
     } finally {
       setRefreshing(false)
     }
-  }, [activeSources])
+  }, [activeSources, resyncPrefs])
   // The latest ``refresh`` for callers that must stay stable: Column's
   // memo ignores callbacks, so it would keep calling an old one with
   // an old filter.
@@ -1336,6 +1295,7 @@ export function App() {
   // because every component has its own state mirrors; rebuilding
   // them inline is more code than ``location.reload()`` and
   // prone to one-component-behind-another race conditions.
+  const discardPrefs = prefs.discardPending
   const resetLocalState = useCallback(() => {
     try {
       // Wipe everything under the ``popping.`` namespace. Use
@@ -1367,7 +1327,8 @@ export function App() {
     // the rest of the reset (the reload happens regardless).
     const allKeys: string[] = [PREFERENCE_KEYS.historyGroupBy]
     // Per-column keys: the keys we know about from the
-    // current state plus the four per-column kinds.
+    // current state (writes still queued included) plus the four
+    // per-column kinds.
     const perColumnKinds = [
       PREFERENCE_KEYS.readEntries,
       PREFERENCE_KEYS.lastViewed,
@@ -1375,8 +1336,8 @@ export function App() {
       PREFERENCE_KEYS.columnSections,
     ]
     const columnIds = new Set<string>()
+    const m = latestPrefs()
     for (const k of perColumnKinds) {
-      const m = prefs.state
       if (k === PREFERENCE_KEYS.readEntries) {
         for (const id of Object.keys(m.readEntries)) columnIds.add(id)
       } else if (k === PREFERENCE_KEYS.lastViewed) {
@@ -1392,12 +1353,19 @@ export function App() {
         allKeys.push(`${k}:${id}`)
       }
     }
-    void Promise.allSettled(
-      allKeys.map((k) => api.deletePreference(k)),
-    ).finally(() => {
-      window.location.reload()
-    })
-  }, [prefs.state])
+    // The keys Reset deletes, by kind. Their queued writes are dropped
+    // before the DELETEs: sent after them (the reload's leave flush sends
+    // what is queued) they would write the rows back. Every other key's
+    // queued writes (a save, a hide, a vote, a saved view) go first, and
+    // the writes on the way are waited for (at most 3 s).
+    const resetDeletes = (key: string) =>
+      key === PREFERENCE_KEYS.historyGroupBy || perColumnKinds.some((k) => key.startsWith(`${k}:`))
+    void discardPrefs(resetDeletes)
+      .then(() => Promise.allSettled(allKeys.map((k) => api.deletePreference(k))))
+      .finally(() => {
+        window.location.reload()
+      })
+  }, [latestPrefs, discardPrefs])
 
   // Probe auth state once on mount.
   useEffect(() => {
@@ -1485,6 +1453,9 @@ export function App() {
         hiddenAtRef.current = Date.now()
         stopPolling()
       } else {
+        // Back in front: every preference row, which is also how rows
+        // deleted elsewhere (Reset) go. The refresh's own poll joins it.
+        void resyncPrefs({ full: true })
         void refresh({ silent: true })
         startPolling()
       }
@@ -1501,7 +1472,7 @@ export function App() {
       document.removeEventListener('visibilitychange', onVisibility)
       stopPolling()
     }
-  }, [refresh, authProbed])
+  }, [refresh, authProbed, resyncPrefs])
 
   // One-shot initial health fetch so the Drawer status chip renders
   // without waiting up to 5 min for the cold poller to tick. Mount-
@@ -1746,7 +1717,7 @@ export function App() {
   // This function is a pure UI flip.
   //
   // ``useCallback`` so the keyboard-shortcut effect doesn't re-bind
-  // on every render. ``setReadEntries`` is stable across renders.
+  // on every render. ``addIds`` is stable across renders.
 
 
   // Reverse of ``markColumnRead``: remove a set
@@ -1758,15 +1729,9 @@ export function App() {
   const unmarkColumnRead = useCallback(
     (columnName: string, ids: number[]) => {
       if (ids.length === 0) return
-      const idSet = new Set(ids)
-      // Read latest from the ref -- not the closed-over
-      // ``readEntries`` -- so a previous unmark in the same
-      // tick (e.g. an Undo chain) is reflected here.
-      const cur = readEntriesRef.current[columnName] ?? []
-      const next = cur.filter((id) => !idSet.has(id))
-      if (next.length !== cur.length) {
-        setReadEntries(columnName, next)
-      }
+      // A change, not a new list: a mark made meanwhile (here or on
+      // another device) stays.
+      removeIds(readEntriesKey(columnName), ids)
       // Clear lastViewed for this column so the "N new" chip
       // repopulates on the next refresh. The provider issues
       // a DELETE on the server (not a sentinel PUT) so the
@@ -1780,7 +1745,7 @@ export function App() {
         seenEntryIdsRef.current = merged
       }
     },
-    [setReadEntries, clearLastViewed],
+    [removeIds, clearLastViewed],
   )
 
   // Reverse of ``markEntryRead``: remove the id
@@ -1790,13 +1755,9 @@ export function App() {
   // click.
   const unmarkEntryRead = useCallback(
     (columnName: string, entryId: number) => {
-      const cur = readEntriesRef.current[columnName] ?? []
-      const next = cur.filter((id) => id !== entryId)
-      if (next.length !== cur.length) {
-        setReadEntries(columnName, next)
-      }
+      removeIds(readEntriesKey(columnName), [entryId])
     },
-    [setReadEntries],
+    [removeIds],
   )
 
   // Reverse of ``hideEntry`` / ``toggleHideEntry``
@@ -1812,29 +1773,23 @@ export function App() {
   // split. This matches the prior
   // one-step-at-a-time model.
   const restoreHiddenEntry = useCallback((entryId: number) => {
-    const next = hiddenEntriesRef.current.filter((id) => id !== entryId)
-    if (next.length !== hiddenEntriesRef.current.length) {
-      setHiddenEntries(next)
-    }
-  }, [setHiddenEntries])
+    removeIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
+  }, [removeIds])
 
   const markEntryRead = useCallback((columnName: string, entryId: number) => {
-    const cur = readEntriesRef.current[columnName] ?? []
-    if (cur.includes(entryId)) return
-    // Trim on write so the list doesn't grow unboundedly
-    // across many mark-reads. ``slice(-MAX_PER_COLUMN)``
-    // keeps the newest reads.
-    const next = [...cur, entryId].slice(-MAX_PER_COLUMN)
-    setReadEntries(columnName, next)
-  }, [setReadEntries])
+    // A no-op for an id already marked; past the cap the oldest
+    // marks go in the same PATCH (``lib/prefSync.ts``).
+    addIds(readEntriesKey(columnName), [entryId])
+  }, [addIds])
 
   // The per-card ✓ (and swipe-right) toggles, like Mail: an unread
   // card is marked read, a read card goes back to unread. "Read" is
   // the union of every column's read-set (see ``globalReadIds``), so
-  // unread has to clear the id from all of them. Reads the ref, not
-  // ``globalReadIds``, because Column's memo keeps old callbacks.
+  // unread has to clear the id from all of them. Reads
+  // ``latestPrefs()``, not ``globalReadIds``, because Column's memo
+  // keeps old callbacks.
   const toggleEntryRead = useCallback((columnName: string, entryId: number) => {
-    const readIn = Object.entries(readEntriesRef.current)
+    const readIn = Object.entries(latestPrefs().readEntries)
       .filter(([, ids]) => ids.includes(entryId))
       .map(([col]) => col)
     if (readIn.length === 0) {
@@ -1853,7 +1808,7 @@ export function App() {
         onClick: () => { for (const col of readIn) markEntryRead(col, entryId) },
       },
     })
-  }, [markEntryRead, unmarkEntryRead])
+  }, [latestPrefs, markEntryRead, unmarkEntryRead])
 
   // Hide an entry from every column + the For You row. The
   // entry stays in the DB; it just gets filtered out of the
@@ -1863,11 +1818,8 @@ export function App() {
   // dismissal signal — same pattern as ``markEntryRead``'s
   // ``view`` event for the "I read this" signal.
   const hideEntry = useCallback((entryId: number) => {
-    const cur = hiddenEntriesRef.current
-    if (cur.includes(entryId)) return
-    const next = [...cur, entryId].slice(-MAX_HIDDEN)
-    setHiddenEntries(next)
-  }, [setHiddenEntries])
+    addIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
+  }, [addIds])
 
   // Toggle the eye-button hidden state. When transitioning
   // from visible -> hidden, ALSO mark the entry read so it
@@ -1889,24 +1841,20 @@ export function App() {
   // is per-column, not per-entry.
   const toggleHideEntry = useCallback(
     (columnName: string, entryId: number) => {
-      const isHidden = hiddenSet.has(entryId)
+      // ``latestPrefs()``: Column's memo keeps old callbacks, whose
+      // render-time hidden set can be out of date.
+      const isHidden = latestPrefs().hiddenEntries.includes(entryId)
       if (isHidden) {
         // Unhide: just remove from the hidden set. Don't
         // touch readEntries — the entry stays in its
         // current section (typically History because we
         // marked it read on the original hide).
-        const next = hiddenEntriesRef.current.filter((id) => id !== entryId)
-        if (next.length !== hiddenEntriesRef.current.length) {
-          setHiddenEntries(next)
-        }
+        removeIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
         toast('Entry unhidden.', 'info')  // no Undo: the act of un-hiding IS the undo
       } else {
         // Hide: add to hidden set AND mark read so the
         // entry moves to the column's History section.
-        const cur = hiddenEntriesRef.current
-        if (!cur.includes(entryId)) {
-          setHiddenEntries([...cur, entryId].slice(-MAX_HIDDEN))
-        }
+        addIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
         markEntryRead(columnName, entryId)
         toast('Hidden.', {
           kind: 'info',
@@ -1926,7 +1874,7 @@ export function App() {
         })
       }
     },
-    [hiddenSet, markEntryRead, restoreHiddenEntry, unmarkEntryRead, setHiddenEntries],
+    [latestPrefs, addIds, removeIds, markEntryRead, restoreHiddenEntry, unmarkEntryRead],
   )
 
   // Star / unstar an entry. Stars are a long-term save-for-later
@@ -1935,17 +1883,22 @@ export function App() {
   // Settings/Starred tab. Records a ``bookmark`` engagement event
   // so the ranker can use stars as a positive signal (the
   // opposite of ``hide``'s ``never``).
-  const toggleStarEntry = useCallback((entryId: number) => {
-    const cur = starredEntriesRef.current
-    if (cur.includes(entryId)) {
-      // Unstar. Filter out, don't trim — the user's removal
-      // is intentional and we don't want a subsequent star to
-      // bring it back.
-      setStarredEntries(cur.filter((id) => id !== entryId))
-    } else {
-      setStarredEntries([...cur, entryId].slice(-MAX_STARRED))
-    }
-  }, [setStarredEntries])
+  //
+  // ``setStarred(id, on)`` saves or unsaves; an Undo calls it with
+  // what the story was before, so it puts back exactly that whatever
+  // happened since (a second toggle would flip it again if the
+  // story changed meanwhile, here or on another device).
+  const setStarred = useCallback((entryId: number, on: boolean) => {
+    if (on) addIds(PREFERENCE_KEYS.starredEntries, [entryId])
+    else removeIds(PREFERENCE_KEYS.starredEntries, [entryId])
+  }, [addIds, removeIds])
+  // Returns whether the story was saved before, for the toast and its
+  // Undo (from ``latestPrefs()``, so it matches what the toggle did).
+  const toggleStarEntry = useCallback((entryId: number): boolean => {
+    const wasStarred = latestPrefs().starredEntries.includes(entryId)
+    setStarred(entryId, !wasStarred)
+    return wasStarred
+  }, [latestPrefs, setStarred])
 
   // Apply a saved preset: replace the active sources filter. The
   // per-column prefs a preset captured are no longer applied: they
@@ -2132,13 +2085,12 @@ export function App() {
         // focus and a form field is active.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const wasStarred = starredSet.has(selectedCardId)
+        const wasStarred = toggleStarEntry(selectedCardId)
         // Mirrors the star button's onClick (Card.tsx) — the ranker
         // needs this event regardless of input path, or the
         // preference vector never learns from keyboard-driven saves.
         // Only a save records it: unsaving is not a save.
         if (!wasStarred) recordImmediate({ entry_id: selectedCardId, type: 'bookmark' })
-        toggleStarEntry(selectedCardId)
         toast(
                           wasStarred
                             ? 'Removed from Saved.'
@@ -2147,7 +2099,7 @@ export function App() {
                             kind: 'info',
                             action: {
                               label: 'Undo',
-                              onClick: () => toggleStarEntry(selectedCardId),
+                              onClick: () => setStarred(selectedCardId, wasStarred),
                             },
                           },
                         )
@@ -2197,6 +2149,7 @@ export function App() {
     hiddenSet,
     starredSet,
     toggleStarEntry,
+    setStarred,
     openSettings,
   ])
 
@@ -2222,15 +2175,15 @@ export function App() {
     //   3. seenEntryIdsRef adds them  (next-refresh delta
     //      doesn't re-flag them as "new since refresh")
     //
-    // We read from the refs (not the closed-over state) so
-    // two markColumnRead calls in the same tick don't lose
-    // each other's writes. The debounced sync on the
-    // provider coalesces the resulting server PUTs.
+    // We read ``latestPrefs()`` (not the closed-over state) so
+    // the Undo removes only what this call added. The marks go
+    // out as one change (``addIds``), so two calls in one tick,
+    // or another device, can't drop each other's.
     const col = columns.find((c) => c.name === columnName)
     setLastViewed(columnName, new Date().toISOString())
     const addedIds: number[] = []
     if (col) {
-      const cur = readEntriesRef.current[columnName] ?? []
+      const cur = latestPrefs().readEntries[columnName] ?? []
       // Add only ids not already in the set. The
       // dedup happens in O(n + m) where n is the
       // column's entry count and m is the existing
@@ -2242,9 +2195,8 @@ export function App() {
       }
       if (toAdd.length > 0) {
         addedIds.push(...toAdd)
-        // ``MAX_PER_COLUMN`` cap mirrors the old
-        // localStorage version.
-        setReadEntries(columnName, [...cur, ...toAdd].slice(-MAX_PER_COLUMN))
+        // Past the key's cap the oldest marks go, never these.
+        addIds(readEntriesKey(columnName), toAdd)
       }
       if (seenEntryIdsRef.current != null) {
         const merged = new Set(seenEntryIdsRef.current)
@@ -2255,8 +2207,7 @@ export function App() {
     // Surface the action as an Undo-able toast.
     // The user can tap Undo to restore the column
     // to its pre-mark state. We capture
-    // ``addedIds`` by reference (mutated by the
-    // setReadEntries updater) and the column name;
+    // ``addedIds`` and the column name;
     // the Undo handler unmarks them in lockstep.
     if (addedIds.length > 0) {
       toast(`Marked ${addedIds.length} ${addedIds.length === 1 ? 'entry' : 'entries'} as read`, {
@@ -2270,7 +2221,7 @@ export function App() {
         },
       })
     }
-  }, [columns, readEntriesRef, seenEntryIdsRef, setLastViewed, setReadEntries, unmarkColumnRead, toast])
+  }, [columns, latestPrefs, seenEntryIdsRef, setLastViewed, addIds, unmarkColumnRead, toast])
 
   const toggleSource = useCallback((name: string) => {
     setActiveSources((prev) => {
@@ -2902,8 +2853,7 @@ export function App() {
             onHideToggle={(entryId) => toggleHideEntry('Search', entryId)}
             hiddenSet={hiddenSet}
             onStar={(entryId) => {
-              const wasStarred = starredSet.has(entryId)
-              toggleStarEntry(entryId)
+              const wasStarred = toggleStarEntry(entryId)
               toast(
                 wasStarred
                   ? 'Removed from Saved.'
@@ -2912,13 +2862,13 @@ export function App() {
                   kind: 'info',
                   action: {
                     label: 'Undo',
-                    onClick: () => toggleStarEntry(entryId),
+                    onClick: () => setStarred(entryId, wasStarred),
                   },
                 },
               )
             }}
             starredSet={starredSet}
-            onVote={setEntryVote}
+            onVote={voteEntry}
             votedMap={votedMap}
           />
         </main>
@@ -3006,8 +2956,7 @@ export function App() {
                       onHideToggle={() => toggleHideEntry('For You', e.id)}
                       hidden={hiddenSet.has(e.id)}
                       onStar={() => {
-                        const wasStarred = starredSet.has(e.id)
-                        toggleStarEntry(e.id)
+                        const wasStarred = toggleStarEntry(e.id)
                         toast(
                           wasStarred
                             ? 'Removed from Saved.'
@@ -3016,13 +2965,13 @@ export function App() {
                             kind: 'info',
                             action: {
                               label: 'Undo',
-                              onClick: () => toggleStarEntry(e.id),
+                              onClick: () => setStarred(e.id, wasStarred),
                             },
                           },
                         )
                       }}
                       starred={starredSet.has(e.id)}
-                      onVote={(dir) => setEntryVote(e.id, dir)}
+                      onVote={(dir) => voteEntry(e.id, dir)}
                       vote={votedMap.get(e.id) ?? null}
                       onSourceTap={onSourceTap}
                     />
@@ -3064,8 +3013,7 @@ export function App() {
                       onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
                       hiddenSet={hiddenSet}
                       onStarEntry={(entryId) => {
-                        const wasStarred = starredSet.has(entryId)
-                        toggleStarEntry(entryId)
+                        const wasStarred = toggleStarEntry(entryId)
                         toast(
                             wasStarred
                               ? 'Removed from Saved.'
@@ -3074,13 +3022,13 @@ export function App() {
                               kind: 'info',
                               action: {
                                 label: 'Undo',
-                                onClick: () => toggleStarEntry(entryId),
+                                onClick: () => setStarred(entryId, wasStarred),
                               },
                             },
                           )
                       }}
                       starredSet={starredSet}
-                      onVoteEntry={setEntryVote}
+                      onVoteEntry={voteEntry}
                       votedMap={votedMap}
                       prefs={prefsFor(col)}
                       onPrefsChange={(next) => setPrefsFor(col.name, next)}
@@ -3222,8 +3170,7 @@ export function App() {
                   onHideToggle={(entryId) => toggleHideEntry(phoneCol.name, entryId)}
                   hiddenSet={hiddenSet}
                   onStarEntry={(entryId) => {
-                    const wasStarred = starredSet.has(entryId)
-                    toggleStarEntry(entryId)
+                    const wasStarred = toggleStarEntry(entryId)
                     toast(
                               wasStarred
                                 ? 'Removed from Saved.'
@@ -3232,13 +3179,13 @@ export function App() {
                                 kind: 'info',
                                 action: {
                                   label: 'Undo',
-                                  onClick: () => toggleStarEntry(entryId),
+                                  onClick: () => setStarred(entryId, wasStarred),
                                 },
                               },
                             )
                   }}
                   starredSet={starredSet}
-                  onVoteEntry={setEntryVote}
+                  onVoteEntry={voteEntry}
                   votedMap={votedMap}
                   prefs={prefsFor(phoneCol)}
                   onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
@@ -3290,32 +3237,27 @@ export function App() {
         onEditSource={onEditSource}
         onResetLocalState={resetLocalState}
         hiddenEntries={hiddenEntries}
-        onRestoreHidden={(entryId) => {
-          const next = hiddenEntriesRef.current.filter((id) => id !== entryId)
-          if (next.length !== hiddenEntriesRef.current.length) {
-            setHiddenEntries(next)
-          }
-        }}
+        onRestoreHidden={(entryId) => restoreHiddenEntry(entryId)}
         onRestoreAllHidden={() => {
-          if (hiddenEntriesRef.current.length === 0) return
-          setHiddenEntries([])
+          // The ids hidden now; one hidden on another device since
+          // this page last read them stays hidden.
+          const ids = latestPrefs().hiddenEntries
+          if (ids.length === 0) return
+          removeIds(PREFERENCE_KEYS.hiddenEntries, ids)
           toast('All hidden entries restored.', 'info')
         }}
         starredEntries={starredEntries}
         onUnstarAll={() => {
-          const cleared = starredEntriesRef.current
+          const cleared = latestPrefs().starredEntries
           if (cleared.length === 0) return
-          setStarredEntries([])
+          removeIds(PREFERENCE_KEYS.starredEntries, cleared)
           // Undo puts back what was cleared and keeps anything saved
-          // since the toast appeared.
+          // since the toast appeared (an add, not a new list).
           toast('All saved entries cleared.', {
             kind: 'info',
             action: {
               label: 'Undo',
-              onClick: () => {
-                const now = starredEntriesRef.current
-                setStarredEntries([...cleared.filter((id) => !now.includes(id)), ...now])
-              },
+              onClick: () => addIds(PREFERENCE_KEYS.starredEntries, cleared),
             },
           })
         }}
@@ -3324,28 +3266,24 @@ export function App() {
           // tab list. Mirrors the card's star
           // button + the per-card context-menu
           // "Unsave" action.
-          setStarredEntries(
-            starredEntriesRef.current.filter((id) => id !== entryId),
-          )
+          setStarred(entryId, false)
         }}
         downvotedEntries={downvotedEntries}
         onHideDownvoted={(entryId) => hideEntry(entryId)}
         onHideAllDownvoted={() => {
           const ids = downvotedEntries
           if (ids.length === 0) return
-          const before = hiddenEntriesRef.current
+          const before = latestPrefs().hiddenEntries
           // Only the ones this hid; Undo leaves the rest as they are now.
           const added = ids.filter((id) => !before.includes(id))
-          setHiddenEntries(
-            [...before, ...ids].slice(-MAX_HIDDEN),
-          )
+          addIds(PREFERENCE_KEYS.hiddenEntries, added)
           toast(
             `Hid ${ids.length} downvoted ${ids.length === 1 ? 'entry' : 'entries'}.`,
             {
               kind: 'info',
               action: {
                 label: 'Undo',
-                onClick: () => setHiddenEntries(hiddenEntriesRef.current.filter((id) => !added.includes(id))),
+                onClick: () => removeIds(PREFERENCE_KEYS.hiddenEntries, added),
               },
             },
           )
