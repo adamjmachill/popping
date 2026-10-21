@@ -32,9 +32,10 @@ import httpx
 import pytest
 from sqlalchemy import select
 
-from app import article_extract, feed_autodiscovery, reddit_client, source_preview
+from app import article_extract, feed_autodiscovery, reddit_client, scheduler, source_preview
 from app.models import Entry, Source
 from app.sources import generic_scrape, rss
+from app.sources.generic_scrape import GenericScrapePlugin
 
 SITE = "https://www.example.com"
 FEED = f"{SITE}/feed.xml"
@@ -273,9 +274,19 @@ async def test_a_pasted_youtube_feed_is_a_youtube_channel(app_client, site):
     site.routes[YOUTUBE_FEED] = _xml(_rss(3))
     result = await _preview(app_client, url=YOUTUBE_FEED)
     assert (result["ok"], result["kind"], result["url"]) == (True, "youtube_channel", YOUTUBE_FEED)
-    # A feed type the caller named is kept.
-    result = await _preview(app_client, url=YOUTUBE_FEED, type="rss")
-    assert (result["ok"], result["kind"]) == (True, "rss")
+
+
+@pytest.mark.parametrize("named", ["rss", "podcast"])
+@pytest.mark.parametrize(
+    "url", [YOUTUBE_FEED, "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv"], ids=["feed", "channel"]
+)
+async def test_a_named_feed_type_is_kept_for_any_youtube_address(app_client, site, url, named):
+    """A feed type the caller named is kept, whatever shape of YouTube
+    address it came with: the address resolves to the channel's feed,
+    read as that type (Add stores it so)."""
+    site.routes[YOUTUBE_FEED] = _xml(_rss(3))
+    result = await _preview(app_client, url=url, type=named)
+    assert (result["ok"], result["kind"], result["url"]) == (True, "rss", YOUTUBE_FEED)
 
 
 async def test_a_page_with_a_feed_link_is_read_once_and_previews_its_feed(app_client, site):
@@ -422,6 +433,143 @@ async def test_the_callers_own_user_agent_is_never_swapped(app_client, site):
     assert (result["ok"], result["error_kind"]) == (False, "blocked")
     assert result["error"] == source_preview.ERRORS["blocked"]
     assert site.agents(FEED) == ["MyReader/1.0"]
+
+
+async def test_article_pages_refusing_safari_too_are_blocked(app_client, site):
+    """Safari is refused too: the preview stays on our own headers and
+    ends as the check does, blocked."""
+    story = _site_refusing_its_pages(site, lambda body: 403)
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    assert (result["ok"], result["error_kind"], result["headers_used"]) == (False, "blocked", "default")
+    assert site.agents(story)[1:] == [rss.BROWSER_HEADERS["User-Agent"]]
+
+
+@pytest.mark.parametrize(
+    "safari_gets",
+    [
+        _html("<html><head><title>Just a moment...</title></head><body></body></html>", status=503),
+        404,
+        (200, '{"error": "no"}', "application/json"),
+    ],
+    ids=["503", "404", "not-html"],
+)
+async def test_safari_answers_without_a_page_are_not_served(app_client, site, safari_gets):
+    """Our User-Agent is refused and Safari gets a 5xx, a 404 or no
+    page: Safari wasn't served, so the preview doesn't read as Safari
+    and ends blocked, as the check with our headers does."""
+
+    async def route(request: httpx.Request):
+        if request.headers.get("user-agent") == rss.BROWSER_HEADERS["User-Agent"]:
+            return safari_gets
+        return 403
+
+    story = _site_refusing_its_pages(site, lambda body: route)
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    assert (result["ok"], result["error_kind"], result["headers_used"]) == (False, "blocked", "default")
+    assert len(site.agents(story)) == 2
+
+
+async def test_a_refusal_with_a_rate_limit_is_blocked(app_client, site):
+    """One page refuses us and one rate-limits us: the check reports
+    the refusal (``most_telling_error``), so the preview says blocked."""
+    when = _now() - dt.timedelta(hours=3)
+    pages = [f"{SITE}/news/2026/a", f"{SITE}/news/2026/b"]
+    site.routes[f"{SITE}/sitemap.xml"] = (200, _news_sitemap([(u, when) for u in pages]), "application/xml")
+    site.routes[pages[0]] = 403
+    site.routes[pages[1]] = 429
+    result = await _preview(
+        app_client, url=f"{SITE}/", type="generic_scrape", custom_headers={"User-Agent": "MyReader/1.0"}
+    )
+    assert (result["ok"], result["error_kind"]) == (False, "blocked")
+
+
+# --- website mode against Add's first check ----------------------------------
+#
+# The same MockTransport site is previewed, then read by a real first
+# check (``GenericScrapePlugin`` through ``scheduler._ingest``).
+
+EMPTY_PAGE = "<html><head><title>x</title></head><body></body></html>"
+
+
+def _dated_stories(n: int, hours_step: float = 6) -> list[tuple[str, dt.datetime]]:
+    return [(f"{SITE}/news/2026/story-{i}", _now() - dt.timedelta(hours=2 + i * hours_step)) for i in range(n)]
+
+
+async def _first_check(db_session, headers: dict | None = None) -> tuple[dict, Source]:
+    src = Source(name="site", type="generic_scrape", category="news", url=f"{SITE}/", custom_headers=headers)
+    db_session.add(src)
+    await db_session.commit()
+    await db_session.refresh(src)
+    source_id = src.id
+    summary = await scheduler._ingest(GenericScrapePlugin(src))
+    db_session.expire_all()
+    return summary, await db_session.get(Source, source_id)
+
+
+@pytest.mark.parametrize("refusing", [8, 10, 14])
+async def test_newest_pages_refusing_everyone_end_as_the_first_check_does(
+    app_client, site, db_session, offline_ingest, refusing
+):
+    """The newest pages refuse everyone (members-only), older ones are
+    served. Past the 8 pages it read, the preview reads the rest of the
+    check's batch of 10 and then a control page, as the check does:
+    with 8 refusing two stories come in, with 10 the control is served
+    and the check works with none, and only when every page refuses is
+    the site blocked."""
+    stories = _dated_stories(14)
+    site.routes[f"{SITE}/sitemap.xml"] = (200, _news_sitemap(stories), "application/xml")
+    for i, (url, when) in enumerate(stories):
+        site.routes[url] = 403 if i < refusing else _html(_article(url, f"Story {i}", when))
+
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    summary, row = await _first_check(db_session)
+    if refusing == 14:
+        assert (result["ok"], result["error_kind"]) == (False, "blocked")
+        assert row.last_error.startswith("[blocked]")
+        return
+    assert (result["ok"], result["error_kind"], result["headers_used"]) == (True, None, "default")
+    assert row.last_error is None
+    assert result["will_add_count"] == summary["inserted"] == {8: 2, 10: 0}[refusing]
+
+
+async def test_turned_down_pages_take_the_first_checks_reads(app_client, site, db_session, offline_ingest):
+    """Pages 1, 3 and 5 aren't articles. The check reads the first 10
+    candidates, so they use three of its reads: it adds 7, not 10."""
+    stories = _dated_stories(20, hours_step=24)
+    site.routes[f"{SITE}/sitemap.xml"] = (200, _news_sitemap(stories), "application/xml")
+    for i, (url, when) in enumerate(stories):
+        site.routes[url] = _html(EMPTY_PAGE if i in (1, 3, 5) else _article(url, f"Story {i}", when))
+
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    summary, _row = await _first_check(db_session)
+    assert result["ok"] is True, result
+    assert result["will_add_count"] == summary["inserted"] == 7
+
+
+async def test_pages_still_refusing_safari_take_the_first_checks_reads(
+    app_client, site, db_session, offline_ingest
+):
+    """Every page refuses us; as Safari, pages 4-7 still refuse. The
+    check as Safari reads the first 10 candidates and adds the 6 that
+    answer."""
+    stories = _dated_stories(20, hours_step=24)
+    site.routes[f"{SITE}/sitemap.xml"] = (200, _news_sitemap(stories), "application/xml")
+
+    def route(i: int, url: str, when: dt.datetime):
+        async def handler(request: httpx.Request):
+            if request.headers.get("user-agent") == rss.BROWSER_HEADERS["User-Agent"] and not 4 <= i <= 7:
+                return _html(_article(url, f"Story {i}", when))
+            return 403
+
+        return handler
+
+    for i, (url, when) in enumerate(stories):
+        site.routes[url] = route(i, url, when)
+
+    result = await _preview(app_client, url=f"{SITE}/", type="generic_scrape")
+    summary, _row = await _first_check(db_session, headers=dict(rss.BROWSER_HEADERS))
+    assert (result["ok"], result["headers_used"]) == (True, "browser"), result
+    assert result["will_add_count"] == summary["inserted"] == 6
 
 
 # --- one deadline -------------------------------------------------------------
@@ -613,14 +761,16 @@ async def test_a_failed_preview_is_not_cached(app_client, site):
 
 async def test_website_counts(app_client, site, db_session):
     """Twelve dated sitemap entries: the 8 newest are read (one of them
-    turns out not to be an article). The first-fetch rule over the
-    rest: the newest 10 plus the last 2 days."""
+    turns out not to be an article). The check reads the first 10, so
+    it adds the 9 stories among them; the first-fetch rule over every
+    story (the newest 10 plus the last 2 days) leaves one out as
+    older."""
     stories = []
     for i in range(12):
         when = _now() - dt.timedelta(hours=2 + i * 24)
         stories.append((f"{SITE}/news/2026/story-{i}", when))
     site.routes[f"{SITE}/sitemap.xml"] = (200, _news_sitemap(stories), "application/xml")
-    for i, (url, when) in enumerate(stories[:8]):
+    for i, (url, when) in enumerate(stories):
         site.routes[url] = _html(_article(url, f"Story {i}", when))
     # Story 3 is a page with no text: not a story.
     site.routes[stories[3][0]] = _html("<html><head><title>x</title></head><body></body></html>")
@@ -629,10 +779,10 @@ async def test_website_counts(app_client, site, db_session):
     assert result["ok"] is True, (result, [(str(r.url), r.headers.get("user-agent")[:20]) for r in site.requests])
     assert (result["kind"], result["mode"]) == ("generic_scrape", "sitemap")
     assert result["total_count"] == 12
-    # 11 stories left once story 3 is out; the newest 10 are kept, so
-    # one is older. A check adds at most 10 pages.
+    # 11 stories once story 3 is out; the newest 10 are kept, so one is
+    # older. The check's 10 reads include story 3, so it adds 9.
     assert result["older_skipped_count"] == 1
-    assert result["will_add_count"] == 10
+    assert result["will_add_count"] == 9
     assert len(result["items"]) == 8
     by_url = {i["url"]: i for i in result["items"]}
     assert by_url[stories[3][0]]["accepted"] is False

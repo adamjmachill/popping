@@ -60,10 +60,18 @@ WIP commit); this commit reviews and completes it.
   5. `plan_candidates(..., raise_errors=True)` (a refusal is retried as Safari the same way), then
      the 8 newest candidates read with `preview_page`, 3 at a time. When every page read is
      refused (the site serves its sitemap but not its articles), the same pages are read again
-     as Safari when the caller sent no User-Agent, inside the same step and deadline;
-     `headers_used` becomes `browser` once one is served. Still all refused, or no retry
-     allowed: `blocked`, or `http_error` when every refusal was a 429 (not retried), as Add's
-     first check ends (`_settle_refusals`). A refused verdict carries its `status` for this.
+     as Safari when the caller sent no User-Agent, inside the same step and deadline.
+     `headers_used` becomes `browser`, and Safari's answers replace ours, only when Safari got
+     a page (`generic_scrape.SERVED`: a story, `no_text`, `not_article` or `too_old`); a 5xx, a
+     404 or a non-HTML answer to Safari is not one. Still all refused, or no retry allowed: the
+     preview does what Add's first check does before it reports the site blocked
+     (`GenericScrapePlugin.fetch`, `_settle_refusals`). It reads the rest of the check's batch
+     (candidates 9 and 10, `_MAX_NEW_PER_POLL`) with the caller's headers, and when those refuse
+     too, up to `_MAX_CONTROLS` (3) candidates past the batch as control pages
+     (`generic_scrape.control_serves`, now shared with `_settle_refusals`; a gone one is
+     skipped). A batch page that answers, or a control that serves a page, is a check that works
+     (the refused pages add nothing). Else `blocked`, or `http_error` when every refusal was a
+     429 (not retried). A refused verdict carries its `status` for this.
   - **Deadline:** `PREVIEW_BUDGET_S = 60`; each step gets `min(cap, time left)`. Out of time, the
     response is `error_kind: "timeout"` with what is known (kind, url, items or pages read,
     `feed_candidates`).
@@ -77,16 +85,23 @@ WIP commit); this commit reviews and completes it.
     request (`build_result`, `scheduler._stored_urls`, `scheduler._ingest_tunables`).
   - **Counts, feed mode:** `select_items_for_ingest(first_fetch=True)` with the live `ingest.*`
     knobs. Each item's `reason` is `stored`, `older` or `over_cap` (over `max_per_poll`).
-  - **Counts, website mode:** `total_count` is every candidate the plan accepted. The first-fetch
-    rule runs over them (a page read and turned down is left out; one not read is dated by its
-    list: the listing card's or news sitemap's date, else `<lastmod>`), and `will_add_count =
-    min(kept, 10, dated + max_undated_per_poll)`. `older_skipped_count` is what that rule left
-    out. `items` are the pages read.
+  - **Counts, website mode:** `total_count` is every candidate the plan accepted.
+    `will_add_count` follows the first check: its batch is the first 10 candidates not stored, so
+    a page that is refused, fails or is turned down uses one of its reads. A page read counts by
+    its verdict; one not read counts as a story dated by its list (the listing card's or news
+    sitemap's date, else `<lastmod>`) and is left out past `_MAX_AGE_DAYS`. Then the plugin's
+    undated cap (`max_undated_per_poll`, not old backlog by `_backlog_rule`) and
+    `select_items_for_ingest(first_fetch=True)` with `max_per_poll`, as `scheduler._ingest` runs
+    it. `older_skipped_count` is what the first-fetch rule leaves out as older over every
+    candidate's story (the stories no check will add), less any the batch adds. `items` are the
+    pages read.
   - **`kind`:** for a feed, `podcast` when it has an audio enclosure or the iTunes namespace,
     else `rss`, whether the caller named `rss`, `podcast` or no type (a named feed type means
     "read it as a feed"). `youtube_channel` when named or when the address is a YouTube one,
     the canonical `feeds/videos.xml?channel_id=` address included (as `/sources/auto` types
-    it), unless the caller named `rss` or `podcast`. `reddit` and `generic_scrape` from their
+    it), unless the caller named `rss` or `podcast`: then any YouTube address (channel, handle,
+    video, playlist or feed) resolves to the channel's feed and is read as that type, as Add
+    stores it. `reddit` and `generic_scrape` from their
     steps. A named or resolved feed type is the `kind` from the start, so a preview that runs
     out of time still returns it.
   - **`error`:** one fixed sentence per `error_kind` (`source_preview.ERRORS`), never upstream
@@ -134,6 +149,14 @@ WIP commit); this commit reviews and completes it.
   the last attempt. The new `created_at` baseline is what PR11b's poll compares against.
 - An address without `http(s)://` (other than a subreddit reference or a YouTube handle) is
   `invalid_url`; the Add field (PR11b) adds the scheme.
+- **Website `will_add_count`** is not the spec's `min(accepted, 10, dated + 2)`: it is worked out
+  over the first check's batch of 10 reads (a turned-down or refused page uses one), because
+  the spec's formula over-counts whenever one of the newest pages isn't a story. The cap of 10
+  and the 2 undated still hold.
+- **Website control page:** a check tries the feed's stored stories as controls first. The
+  preview takes the candidates past the batch (the check's choice when nothing is stored),
+  because what is stored is read per request and the upstream half is cached. A site whose
+  stories another feed already stored can, in a rare mixed case, end differently.
 
 ## Verification
 
@@ -236,6 +259,57 @@ this unit's to change.
   - A named feed type kept as the kind: the `rss-True-podcast` and `podcast-False-rss` cases.
   - `challenge-platform` put back in the markers: the Cloudflare test.
   - The half taken per attempt again: the shared-half test.
+
+## Review fixes (final round)
+
+Five confirmed findings, all fixed (the sections above describe the fixed behaviour). Each new
+test was run against the code with its fix reverted and failed, then passed with it restored.
+
+1. **Website preview ended `blocked` when the 8 pages it read all refused, though the first
+   check reads 10 pages plus a control page and succeeds** (minor). `_read_site` now reads the
+   rest of the batch, then up to 3 control candidates past it (`control_serves`, factored out of
+   `_settle_refusals` so both use one probe). Test:
+   `test_newest_pages_refusing_everyone_end_as_the_first_check_does[8, 10, 14]`, which runs the
+   real first check (`GenericScrapePlugin` through `scheduler._ingest`) on the same site: 2 added,
+   0 added with no error, and `blocked` with `[blocked]` stored.
+2. **The Safari page retry set `browser` and ok when Safari got only 5xx, 404 or non-HTML
+   answers** (minor). Safari's verdicts go to a separate map and replace ours only when one is in
+   `generic_scrape.SERVED`; else the preview keeps our refusals and settles them as in 1. Test:
+   `test_safari_answers_without_a_page_are_not_served[503, 404, not-html]`.
+3. **Website `will_add_count` ignored that turned-down or refused pages use the check's 10
+   reads** (minor). `_count_site` now counts over the batch, then the undated cap and the
+   first-fetch rule as the check runs them. Tests: `test_turned_down_pages_take_the_first_checks_reads`
+   (7, as the check), `test_pages_still_refusing_safari_take_the_first_checks_reads` (6, as the
+   check with `BROWSER_HEADERS`), and `test_website_counts` now routes stories 8-11 and expects
+   9, not 10.
+4. **A named `rss`/`podcast` was overridden to `youtube_channel` for a YouTube channel, handle,
+   video or playlist address** (minor). The address still resolves to the feed; the kind becomes
+   `youtube_channel` only when no other feed type was named. Test:
+   `test_a_named_feed_type_is_kept_for_any_youtube_address[feed|channel × rss|podcast]` (the
+   named-`rss` half of `test_a_pasted_youtube_feed_is_a_youtube_channel` moved into it).
+5. **No test for article pages that refuse Safari too, or for a mixed 403/429** (major, tests).
+   Tests: `test_article_pages_refusing_safari_too_are_blocked` (blocked, Safari tried second,
+   `headers_used` stays `default`) and `test_a_refusal_with_a_rate_limit_is_blocked`. The
+   reviewer's mutants, re-made on the new code, now fail: no final raise (8 tests), `browser`
+   whatever Safari got (7), `any` 429 for `all` (1). Dropping only the control page fails the
+   `[10]` case.
+
+Load: a site whose pages refuse everything now gets up to 5 more requests from a preview (the
+2 batch pages and up to 3 controls), all inside the same step and the 60 s deadline, the same
+requests its first check would make.
+
+Correction to round one's fix 3: "ends `blocked` / `http_error` as Add's first check would" was
+true only for sites with at most 8 candidates; fix 1 above makes it hold past that.
+
+Also: the nine `raise ... ` inside `except` blocks in `source_preview.py` now say `from None`, so
+`ruff --select F,E9,B` is clean on the changed files (they were flagged before this round too).
+
+**Verification** (database `popping_test_b2`):
+- `test_sources_preview.py` (58 tests), `test_source_patch_type.py` and
+  `test_frontend_feed_editor_rules.py`: 82 passed, twice in a row. `test_generic_scrape*.py`
+  (the `_settle_refusals` refactor): 162 passed.
+- Full suite: 1515 passed, 13 failed, the 13 exactly the DNS-only baseline list.
+- `ruff check --select F,E9,B` on the changed files: clean.
 
 ## Device checks
 

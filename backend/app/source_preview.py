@@ -19,7 +19,9 @@ check would, in this order, and stops at the first that works:
 5. The page as a website feed: ``generic_scrape.plan_candidates``, then
    up to ``EXTRACT_MAX`` of its pages read and scored
    (``generic_scrape.preview_page``). A refused plan, or pages that
-   all refuse, are tried once more as Safari on the same terms.
+   all refuse, are tried once more as Safari on the same terms. Pages
+   that still all refuse are settled as Add's first check settles them:
+   the rest of its batch, then a control page (``_read_site``).
 
 The Safari retry keeps the caller's own headers and adds only what the
 caller didn't set. The caller's headers go to the address's own site:
@@ -349,9 +351,13 @@ async def _read(req: PreviewRequest, state: _Upstream, deadline: float) -> None:
                 deadline,
             )
             if resolved != url or youtube:
-                url, kind_hint = resolved, "youtube_channel"
+                # A named ``rss`` or ``podcast`` reads the channel's feed
+                # as that type, as Add stores it (``routes.sources``).
+                url = resolved
+                if youtube_ok:
+                    kind_hint = "youtube_channel"
         except (PodcastResolutionError, YouTubeResolutionError):
-            raise _Stop("not_found")
+            raise _Stop("not_found") from None
 
     # 2. A subreddit.
     if kind_hint == "reddit" or (kind_hint is None and _is_subreddit_url(url)):
@@ -437,7 +443,7 @@ async def _read_reddit(url: str, state: _Upstream, deadline: float) -> None:
             reddit_client.fetch_subreddit(sub, listing="hot", limit=50), REDDIT_CAP_S, deadline
         )
     except reddit_client.RedditFetchThrottled:
-        raise _Stop("http_error")
+        raise _Stop("http_error") from None
     if not posts:
         # A private, banned or missing subreddit and a failed fetch all
         # come back empty (``fetch_subreddit``).
@@ -544,13 +550,13 @@ async def _get_document(
                 state.headers_used = "browser"
             resp = retry
     except httpx.TimeoutException:
-        raise asyncio.TimeoutError
+        raise asyncio.TimeoutError from None
     except NETWORK_ERRORS:
-        raise _Stop("network")
+        raise _Stop("network") from None
     except (httpx.HTTPError, ValueError):
         # The SSRF hook's ``httpx.RequestError`` or a redirect to a
         # denied host (``get_feed_response``).
-        raise _Stop("invalid_url")
+        raise _Stop("invalid_url") from None
     if _is_refusal(resp):
         raise _Stop("blocked")
     if resp.status_code in (404, 410):
@@ -656,10 +662,23 @@ async def _read_site(
     A site that refuses us is asked once more as Safari when the caller
     set no User-Agent: its sitemap or listing (the plan), or, when the
     plan was served, its pages, since a site often serves its sitemap
-    but refuses its article pages. Every page read refused, still or
-    with no retry allowed, ends the preview the way it ends Add's first
-    check (``GenericScrapePlugin._settle_refusals``): ``blocked``, or
-    ``http_error`` when every refusal was a 429."""
+    but refuses its article pages. The preview reads as Safari
+    (``headers_used: "browser"``) only once Safari got a page
+    (``generic_scrape.SERVED``); a 5xx, a 404 or a non-HTML answer to
+    Safari isn't one, and the pages keep our own answers.
+
+    Every page read refused, still or with no retry allowed: the preview
+    does what Add's first check does before it reports the site blocked
+    (``GenericScrapePlugin.fetch`` and ``_settle_refusals``). It reads
+    the rest of the check's batch (``_MAX_NEW_PER_POLL`` candidates),
+    and when those refuse too, up to ``_MAX_CONTROLS`` candidates past it
+    as control pages (``generic_scrape.control_serves``: a gone one is
+    skipped). A page that answers, or a control that serves a page, is
+    a check that works, with the refused pages adding nothing. Else
+    ``blocked``, or ``http_error`` when every refusal was a 429. A
+    check would try the feed's stored stories first as controls; the
+    preview can't (what is stored is read per request), so it takes the
+    candidates past the batch, the check's next choice."""
     state.kind = "generic_scrape"
     state.url = url
 
@@ -686,52 +705,75 @@ async def _read_site(
             found = await plan(headers)
             state.headers_used = "browser"
     except FetchRefusedError as exc:
-        raise _Stop("http_error" if exc.response.status_code == 429 else "blocked")
+        raise _Stop("http_error" if exc.response.status_code == 429 else "blocked") from None
     except httpx.HTTPStatusError as exc:
-        raise _Stop("not_found" if exc.response.status_code in (404, 410) else "http_error")
+        raise _Stop("not_found" if exc.response.status_code in (404, 410) else "http_error") from None
     except NoArticleListError:
-        raise _Stop("no_list")
+        raise _Stop("no_list") from None
     except NETWORK_ERRORS:
-        raise _Stop("network")
+        raise _Stop("network") from None
     state.mode = found.mode
     state.candidates = list(found.candidates)
     owner_configured = bool(req.link_pattern) or (bool(req.sitemap_url) and found.mode == "sitemap")
     sem = asyncio.Semaphore(EXTRACT_CONCURRENCY)
 
-    newest = found.candidates[:EXTRACT_MAX]
+    # What Add's first check reads: its batch (the first
+    # ``_MAX_NEW_PER_POLL`` candidates; stored ones aren't known until
+    # ``build_result``) and, past it, its control pages.
+    batch = found.candidates[: generic_scrape._MAX_NEW_PER_POLL]
+    newest = batch[:EXTRACT_MAX]
 
-    async def read(candidate: Candidate, with_headers: dict[str, str], as_browser: bool) -> None:
+    async def read(candidate: Candidate, with_headers: dict[str, str], into: dict[str, dict]) -> None:
         async with sem:
-            verdict = await generic_scrape.preview_page(
+            into[candidate.url] = await generic_scrape.preview_page(
                 candidate, with_headers or None, owner_configured=owner_configured
             )
-        # A page read again as Safari replaces its refusal.
-        state.pages[candidate.url] = verdict
-        if as_browser and verdict["reason"] != generic_scrape.REFUSED:
-            state.headers_used = "browser"
 
-    async def read_all(with_headers: dict[str, str], as_browser: bool = False) -> None:
-        await asyncio.gather(*(read(c, with_headers, as_browser) for c in newest))
+    async def read_all(pages: list[Candidate], with_headers: dict[str, str], into: dict[str, dict]) -> None:
+        await asyncio.gather(*(read(c, with_headers, into) for c in pages))
 
     async def read_newest() -> None:
-        await read_all(headers)
+        await read_all(newest, headers, state.pages)
         refusal = _refusal(state, newest)
+        if refusal is None:
+            return
         if refusal == "blocked" and _may_retry_as_browser(headers):
-            await read_all(_as_browser(headers), as_browser=True)
-            refusal = _refusal(state, newest)
-        if refusal is not None:
-            raise _Stop(refusal)
+            safari: dict[str, dict] = {}
+            await read_all(newest, _as_browser(headers), safari)
+            if any(v["reason"] in generic_scrape.SERVED for v in safari.values()):
+                # Safari got a page: the site serves Safari, and its
+                # answers replace ours.
+                state.pages.update(safari)
+                state.headers_used = "browser"
+                return
+        # Every page read refused, still: read the rest of the batch and
+        # then a control page, as the check does before it reports the
+        # site blocked (``GenericScrapePlugin._settle_refusals``).
+        await read_all(batch[len(newest):], headers, state.pages)
+        refusal = _refusal(state, batch)
+        if refusal is None:
+            return
+        for control in found.candidates[len(batch):][: generic_scrape._MAX_CONTROLS]:
+            answer = await generic_scrape.control_serves(control.url, headers or None)
+            if answer is None:
+                continue
+            if answer:
+                # The site serves us; these pages refuse everyone.
+                return
+            break
+        raise _Stop(refusal)
 
     # Each page is recorded as it is read, so a timeout returns those.
-    # The Safari retry runs inside the same step and deadline.
+    # The Safari retry and the control run inside the same step and
+    # deadline.
     await _step(read_newest(), PREVIEW_BUDGET_S, deadline)
 
 
 def _refusal(state: _Upstream, candidates: list[Candidate]) -> str | None:
     """``blocked`` when every page read was refused and a 401-403 was
     among them, ``http_error`` when every one was a 429 (a rate limit,
-    which Safari wouldn't change), None when any page answered or none
-    was read."""
+    which Safari wouldn't change; ``most_telling_error`` ranks a 401-403
+    first), None when any page answered or none was read."""
     verdicts = [state.pages.get(c.url) for c in candidates]
     if not verdicts or any(v is None or v["reason"] != generic_scrape.REFUSED for v in verdicts):
         return None
@@ -857,34 +899,68 @@ def _count_site(
     rules: IngestTunables,
     now: dt.datetime,
 ) -> None:
-    """A website feed. ``total_count`` is every candidate page. A page
-    the preview read counts by what it found (a story with its own
-    date, or turned down); one not read yet counts as a story, dated by
-    its list (a listing card's date, a news sitemap's, else the
+    """A website feed. ``total_count`` is every candidate page.
+
+    ``will_add_count`` follows Add's first check. It reads the first
+    ``_MAX_NEW_PER_POLL`` candidates not stored (its batch), so a page
+    that is refused, fails or is turned down still takes one of those
+    reads. A page the preview read counts by what it found (a story
+    with its own date, or nothing); one not read yet counts as a story,
+    dated by its list (a listing card's date, a news sitemap's, else the
     sitemap's ``<lastmod>``, which a page's publication can't be later
-    than). Add's first check reads at most ``_MAX_NEW_PER_POLL`` pages
-    and keeps at most ``max_undated_per_poll`` undated ones, so it adds
-    ``min(stories, 10, dated + 2)`` of those the first-fetch rule
-    doesn't leave out as older."""
+    than) and left out past ``_MAX_AGE_DAYS``. The check keeps at most
+    ``max_undated_per_poll`` undated ones that aren't old backlog
+    (``GenericScrapePlugin._cap_undated``), then ``scheduler._ingest``
+    runs the first-fetch rule over what is left.
+
+    ``older_skipped_count`` is what the first-fetch rule leaves out as
+    older over every candidate, the stories no check will add."""
     candidates = upstream.candidates
-    pseudo: list[dict] = []
-    for c in candidates:
+
+    def story(c: Candidate) -> dict | None:
         verdict = upstream.pages.get(c.url)
-        if verdict is not None and c.url not in known:
-            if not verdict["accepted"]:
-                continue
+        if verdict is None:
+            when = c.published or c.modified
+        elif verdict["accepted"]:
             when = verdict["published_at"]
         else:
-            when = c.published or c.modified
-        pseudo.append({"url": c.url, "published_at": when})
+            return None
+        return {"url": c.url, "published_at": published_utc(when)}
+
+    fresh = [c for c in candidates if c.url not in known]
+    batch = fresh[: generic_scrape._MAX_NEW_PER_POLL]
+    items = [
+        item
+        for item in (story(c) for c in batch)
+        if item is not None and not generic_scrape._too_old(item)
+    ]
+    backlog = generic_scrape._backlog_rule(generic_scrape.Plan(upstream.mode or "", candidates, fresh), None)
+    capped: list[dict] = []
+    undated = 0
+    for item in items:
+        if item["published_at"] is not None:
+            capped.append(item)
+        elif undated < rules.max_undated_per_poll and not backlog(item["url"]):
+            capped.append(item)
+            undated += 1
+    kept, _ = _first_fetch(capped, known, rules, now, rules.max_per_poll)
+    result.will_add_count = len(kept)
+
+    # The first-fetch rule over every candidate's story, a stored one
+    # dated by its list (stored stories take rank slots).
+    every: list[dict] = []
+    for c in candidates:
+        if c.url in known:
+            item = {"url": c.url, "published_at": published_utc(c.published or c.modified)}
+        else:
+            item = story(c)
+        if item is not None:
+            every.append(item)
+    every_kept, _ = _first_fetch(every, known, rules, now, max(len(every), 1))
+    older = {item["url"] for item in every} - {item["url"] for item in every_kept} - known
+    result.older_skipped_count = len(older - {item["url"] for item in kept})
     result.total_count = len({c.url for c in candidates})
     result.already_stored_count = sum(1 for c in {c.url for c in candidates} if c in known)
-    kept, counts = _first_fetch(pseudo, known, rules, now, max(len(pseudo), 1))
-    result.older_skipped_count = counts.get(FIRST_FETCH, 0)
-    dated = sum(1 for item in kept if item["published_at"] is not None)
-    result.will_add_count = min(
-        len(kept), generic_scrape._MAX_NEW_PER_POLL, dated + rules.max_undated_per_poll
-    )
     for c in candidates:
         verdict = upstream.pages.get(c.url)
         if verdict is None:

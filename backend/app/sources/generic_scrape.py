@@ -272,6 +272,9 @@ UNREADABLE = "unreadable"    # gone (404, 410, another 4xx), not HTML, empty
 REFUSED = "refused"          # the site refused it (401, 402, 403, 429)
 FAILED = "failed"            # a network error, a timeout or a 5xx
 TOO_OLD = "too_old"          # dated more than ``_MAX_AGE_DAYS`` ago
+# The verdicts of a page the site answered with a page (HTML), a story
+# or not: what ``_Read.served`` records for a poll.
+SERVED = frozenset({None, NO_TEXT, NOT_ARTICLE, TOO_OLD})
 
 
 def _judge_page(
@@ -716,6 +719,22 @@ async def _discover_page_links(
     return links[:limit]
 
 
+async def control_serves(url: str, headers: dict | None = None) -> bool | None:
+    """Read ``url`` as a control page (``GenericScrapePlugin._settle_refusals``,
+    and the Add preview's same step, ``app.source_preview``): True when
+    the site answered with a page, None when it is gone (404, 410: it
+    says nothing about us, so the next control is tried), False for
+    anything else (a refusal, another error status, a network error, an
+    answer with no page in it)."""
+    try:
+        body = await fetch_html_checked(url, custom_headers=headers, raise_for_status=True)
+    except httpx.HTTPStatusError as exc:
+        return None if exc.response.status_code in (404, 410) else False
+    except httpx.HTTPError:
+        return False
+    return body is not None
+
+
 class _Read(NamedTuple):
     """What ``GenericScrapePlugin._extracted_urls`` keeps for a page."""
 
@@ -1065,17 +1084,10 @@ class GenericScrapePlugin(SourcePlugin):
             + [url for url in others if url not in read and url not in self._page_failures]
         )
         for control in controls[:_MAX_CONTROLS]:
-            try:
-                body = await fetch_html_checked(
-                    control, custom_headers=self.custom_headers, raise_for_status=True
-                )
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code in (404, 410):
-                    continue
-                break
-            except httpx.HTTPError:
-                break
-            if body is not None:
+            answer = await control_serves(control, self.custom_headers)
+            if answer is None:
+                continue
+            if answer:
                 served = control
             break
         if served is None:
