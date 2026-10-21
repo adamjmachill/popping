@@ -8,17 +8,15 @@
 //     isn't surprised when their back button doesn't go back.
 //   - Long-press on mobile / right-click on desktop copies the URL
 //     to the clipboard via the global Toast singleton.
-//   - `unread` toggles a soft blue ring + opacity boost so the user
-//     can scan for what they haven't read yet. Defaults to "read"
-//     so cards that haven't been computed (e.g. before F2 lands on
-//     a given column) don't all flash unread.
-//   - Swipe right = mark read, swipe left = hide (Apollo/iOS Mail
-//     style). See the SWIPE_* constants below for the tuning —
-//     there's a dead zone + a direction lock so an intentional
-//     vertical scroll never gets mistaken for a swipe, and a firm
-//     commit threshold so a short/accidental drag always snaps back
-//     with no action taken. The buttons below stay as an explicit
-//     backup for anyone who doesn't want to use the gesture.
+//   - `dimmed` fades a card under a tab's "Earlier (N)": a story
+//     already seen (PR3b). Opening a story is what uses it up
+//     (``onActivate``); there is no mark-read button or gesture.
+//   - Swipe left = hide (Apollo/iOS Mail style). See the SWIPE_*
+//     constants below for the tuning — there's a dead zone + a
+//     direction lock so an intentional vertical scroll never gets
+//     mistaken for a swipe, and a firm commit threshold so a
+//     short/accidental drag always snaps back with no action taken.
+//     The eye button stays as an explicit backup.
 
 import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } from 'react'
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
@@ -36,29 +34,25 @@ type Props = {
   // show no thumbnail); kept so callers and the memo comparator
   // don't change.
   sourceFaviconPath?: string | null
-  unread?: boolean
+  // A story already seen, drawn under its tab's "Earlier (N)": faded and
+  // desaturated. Stories above the marker never fade, even once seen,
+  // so nothing changes under the reader (PR3b).
+  dimmed?: boolean
   // True when this card is the keyboard-selected card. Drives the
   // focus ring. Set by App's keyboard handler.
   selected?: boolean
   // Ref-callback so App can focus/scroll into view on keyboard nav.
   // Optional — most cards never need it.
   cardRef?: (el: HTMLElement | null, prev?: HTMLElement | null) => void
+  // The story was opened, from any of its ways out: the headline, the
+  // thumbnail, the Reddit thread, Listen, the context menu's "Open in new
+  // tab". App marks it seen (PR3b). Must be stable in effect: the memo
+  // comparator ignores it.
   onActivate?: () => void
   // Source category — drives the colored left stripe. Optional; when
   // absent the card just renders without a stripe. The Column passes
   // it through from ``sourcesByMeta``.
   category?: string
-  // Per-card mark-read. When present, an inline ✓ button renders
-  // on the card so the user can dim one entry without nuking the
-  // column. Tapping ✓ on an already-dim card is a no-op up at
-  // App.markEntryRead.
-  //
-  // The button is ALWAYS visible (not hover-only) so the user
-  // can see at a glance that "I can mark this as read" is an
-  // option — the hover-only treatment hid the affordance from
-  // anyone who didn't already know it existed, which defeated
-  // the point of having a per-card action.
-  onMarkRead?: () => void
   // Per-card "hide" action. When present, the context menu
   // (right-click / long-press) gets a "Hide this entry" item
   // that adds the entry to the user's hidden set. The card
@@ -68,8 +62,7 @@ type Props = {
   onHide?: () => void
   // Per-card "star" / "unstar" action. When present, the
   // context menu gets "Save for later" / "Unsave" items, and
-  // a star button renders on the card next to the mark-read
-  // checkmark. The card's starred state is reflected in the
+  // a star button renders on the card. The card's starred state is reflected in the
   // button's filled/outline styling.
   onStar?: () => void
   // True if this entry is currently starred. Drives the
@@ -78,8 +71,7 @@ type Props = {
   // renders in its empty (unstarred) state.
   starred?: boolean
   // Per-card "hide" / "unhide" action. When present, the
-  // card gets a visible eye button next to the mark-read
-  // checkmark. Open eye = visible, closed eye = hidden. The
+  // card gets a visible eye button. Open eye = visible, closed eye = hidden. The
   // button's state is driven by the ``hidden`` prop and the
   // click toggles via ``onHide``. The same handler is used
   // for the context menu's "Hide this entry" / "Unhide"
@@ -93,8 +85,8 @@ type Props = {
   hidden?: boolean
   // Per-card inline summary. When ``expanded`` is true the card
   // fetches the cached summary once and renders it under the
-  // title. ``onToggleSummary`` flips the expanded bit. Independent
-  // of mark-read — expanding a card doesn't mark it.
+  // title. ``onToggleSummary`` flips the expanded bit. Expanding a
+  // card doesn't mark it seen.
   expanded?: boolean
   onToggleSummary?: () => void
   // Per-card vote. ``vote`` is the entry's current persisted
@@ -169,7 +161,7 @@ function categoryStripeClass(category: string | undefined): string {
 // asked for alongside the stripe/source-text tinting so a card reads
 // as "this category" even at a glance from its silhouette. Kept
 // faint (/25) so it doesn't compete with the ring treatment used for
-// selected/unread state, which still needs to read as the stronger
+// the selected card, which still needs to read as the stronger
 // signal.
 function categoryBorderClass(category: string | undefined): string {
   switch (category?.toLowerCase().trim()) {
@@ -292,7 +284,7 @@ const SWIPE_DIRECTION_RATIO = 1.3
 const SWIPE_MAX_REVEAL_PX = 88
 const SWIPE_COMMIT_PX = 58
 
-export function CardInner({ entry, sourceName, unread, selected, cardRef, onActivate, category, onMarkRead, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote, onSourceTap }: Props) {
+export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActivate, category, expanded, onToggleSummary, onHide, onStar, starred, onHideToggle, hidden, vote, onVote, onSourceTap }: Props) {
   // A renamed feed shows its new name here even though memo skips
   // re-renders when only the feed list changed.
   useSourceLabels()
@@ -308,10 +300,9 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   // re-render for every pixel of drag would be needlessly expensive
   // across a list of 20-50 cards. Visuals are applied imperatively
   // (see applySwipeVisual) and only the final commit/cancel touches
-  // React state, via the same onMarkRead / onHideToggle callbacks
-  // the buttons already use.
+  // React state, via the same onHideToggle callback the eye button
+  // uses.
   const articleRef = useRef<HTMLElement | null>(null)
-  const readRevealRef = useRef<HTMLDivElement | null>(null)
   const hideRevealRef = useRef<HTMLDivElement | null>(null)
   const swipeDx = useRef(0)
   const swipeLock = useRef<'none' | 'horizontal' | 'vertical'>('none')
@@ -378,16 +369,6 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   const [relatedExpanded, setRelatedExpanded] = useState(false)
   const [related, setRelated] = useState<FramingCluster | null | undefined>(undefined)
   const [relatedError, setRelatedError] = useState(false)
-
-  // Mount timestamp. Reset on every mount via useEffect so the
-  // dwell counter starts at 0 for each card instance (not for
-  // each unique entry id \u2014 a re-mount on the same entry after a
-  // filter toggle is a fresh "dwell" interval from the user's
-  // perspective).
-  const mountTime = useRef<number>(Date.now())
-  useEffect(() => {
-    mountTime.current = Date.now()
-  }, [entry.id])
 
   useEffect(() => {
     if (!expanded) return
@@ -500,7 +481,8 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   // dedups internally so even if React strict-mode mounts the card
   // twice in dev, only one event lands. Effect fires on mount and
   // when the entry id changes; no dependency on entry itself — we
-  // only care that the card is on screen.
+  // only care that the card is on screen. (PR3c moves the ``view`` to
+  // the moment a card is seen on scroll.)
   useEffect(() => {
     recordBatched({ entry_id: entry.id, type: 'view' })
   }, [entry.id])
@@ -526,9 +508,6 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
       el.style.transform = dx === 0 ? '' : `translateX(${dx}px)`
     }
     const progress = Math.min(1, Math.abs(dx) / SWIPE_MAX_REVEAL_PX)
-    if (readRevealRef.current) {
-      readRevealRef.current.style.opacity = dx > 0 ? String(progress) : '0'
-    }
     if (hideRevealRef.current) {
       hideRevealRef.current.style.opacity = dx < 0 ? String(progress) : '0'
     }
@@ -538,20 +517,6 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
     swipeDx.current = 0
     swipeLock.current = 'none'
     applySwipeVisual(0, animate)
-  }
-
-  // Mirrors the checkmark button's onClick (below) exactly — same
-  // event, same callback — so a swipe-right and a tap produce an
-  // identical outcome.
-  const commitMarkRead = () => {
-    if (!onMarkRead) return
-    // On a read card this is "mark unread": no engagement to record.
-    if (unread) {
-      const dwellMs = Math.min(Date.now() - mountTime.current, 5 * 60 * 1000)
-      recordImmediate({ entry_id: entry.id, type: 'view' })
-      recordBatched({ entry_id: entry.id, type: 'dwell', value: dwellMs })
-    }
-    onMarkRead()
   }
 
   // Mirrors the eye button's onClick (below) exactly.
@@ -646,13 +611,13 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
       }
       if (swipeLock.current !== 'horizontal') return
 
-      // A right-swipe with no onMarkRead wired (or a left-swipe with
-      // no onHideToggle) has nothing to commit to — clamp to 0 so
-      // the card doesn't visually drag in a direction that does
-      // nothing on release.
+      // Only a left swipe does something (hide), and only with
+      // onHideToggle wired: anything else is clamped to 0 so the card
+      // doesn't visually drag in a direction that does nothing on
+      // release. (A right swipe used to mark a story read; PR3b took
+      // it out, so opening a story is the one way to use it up.)
       let clamped = dx
-      if (dx > 0 && !onMarkRead) clamped = 0
-      if (dx < 0 && !onHideToggle) clamped = 0
+      if (dx > 0 || !onHideToggle) clamped = 0
       clamped = Math.max(-SWIPE_MAX_REVEAL_PX, Math.min(SWIPE_MAX_REVEAL_PX, clamped))
       if (clamped !== 0) {
         // Only now, once we're actually dragging the card, block the
@@ -664,12 +629,12 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
     }
     el.addEventListener('touchmove', onMove, { passive: false })
     return () => el.removeEventListener('touchmove', onMove)
-    // onMarkRead / onHideToggle are read fresh from the closure each
-    // effect run (the deps array below re-attaches the listener
-    // whenever either identity changes, which — per Card.memo's
-    // custom comparator — is only when the Column re-derives its
-    // per-card callbacks, not on every poll).
-  }, [onMarkRead, onHideToggle])
+    // onHideToggle is read fresh from the closure each effect run
+    // (the deps array below re-attaches the listener whenever its
+    // identity changes, which — per Card.memo's custom comparator —
+    // is only when the Column re-derives its per-card callbacks, not
+    // on every poll).
+  }, [onHideToggle])
 
   const onTouchEnd = (e: TouchEvent<HTMLElement>) => {
     const start = touchStart.current
@@ -678,11 +643,10 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
     const finalDx = swipeDx.current
     if (wasSwiping) {
       resetSwipe(true)
-      if (Math.abs(finalDx) >= SWIPE_COMMIT_PX) {
+      if (finalDx <= -SWIPE_COMMIT_PX) {
         e.preventDefault()
         e.stopPropagation()
-        if (finalDx > 0) commitMarkRead()
-        else commitHideToggle()
+        commitHideToggle()
       }
     }
     swipeLock.current = 'none'
@@ -713,42 +677,19 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
   }
 
   // Right-click → small context menu. Native context menu is
-  // suppressed so we can offer "mark as read" + "hide" + "copy
-  // link" + "open in new tab" without a third-party library.
-  //
-  // Actions are conditionally included: ``mark as read`` only
-  // when ``onMarkRead`` is wired AND the card is still unread
-  // (no point offering the action on a card that's already
-  // dim), ``hide`` only when ``onHide`` is wired. Copy/open are
-  // always available.
+  // suppressed so we can offer "hide" + "copy link" + "open in new
+  // tab" without a third-party library. ``hide`` only when
+  // ``onHide`` is wired. Copy/open are always available. There is no
+  // "mark as read": opening a story uses it up (PR3b).
   const onContextMenu = (e: MouseEvent<HTMLElement>) => {
     e.preventDefault()
     const actions: Array<{ label: string; onClick: () => void }> = []
-    if (onMarkRead && unread) {
-      actions.push({
-        label: 'Mark as read',
-        onClick: () => {
-          recordImmediate({ entry_id: entry.id, type: 'view' })
-          onMarkRead()
-        },
-      })
-    }
     if (onHideToggle) {
       // Context-menu hide uses the SAME handler as the
-      // eye button: hides + marks read. The entry
-      // moves from Fresh to History in the same
-      // column, so the user can still see it (faded)
-      // and the column stays populated. The label
-      // flips based on the current state so the menu
-      // tells the user what the action will do.
-      //
-      // (The previous implementation used a separate
-      // onHide callback that hid-only, which made the
-      // column go empty after a hide. That
-      // inconsistency between the eye button and
-      // the context menu caused "Nothing showing in
-      // feeds" after a few hides. Now both paths
-      // produce the same outcome.)
+      // eye button, so both paths produce the same
+      // outcome. The label flips based on the current
+      // state so the menu tells the user what the action
+      // will do.
       actions.push({
         label: hidden ? 'Unhide this entry' : 'Hide this entry',
         onClick: () => {
@@ -819,60 +760,32 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
         // so the popped-out tab doesn't show the "Get the App"
         // overlay (see api.ts for the full rationale).
         noteStoryOpened()
+        onActivate?.()
         window.open(safeExternalUrl(entry.url), '_blank', 'noopener,noreferrer')
       },
     })
     showContextMenu(e.clientX, e.clientY, actions)
   }
 
-  // Visual state for unread vs selected vs read.
-  //
-  // The previous design (Claude code's refactor) used the ring
-  // as the only signal for read state. The user reported that
-  // the mark-read click had no visual effect — the ring
-  // absence is too subtle on its own. The original design
-  // had an opacity dim (opacity-60) for read cards. The
-  // dim is back: read cards are 60% opaque, so they're
-  // visibly "seen" without being "hidden".
-  //
-  // Ring is still used for selected (strong) and unread
-  // (thin). Read cards have no ring.
-  const ringClass = selected
-    ? 'ring-2 ring-accent/70'
-    : unread
-      ? 'ring-1 ring-accent/40'
-      : ''
-  // The opacity dim is applied to the article container
-  // so the entire card (title, body, meta row, sources,
-  // summary) fades together. ``opacity-60`` is heavy
-  // enough to read as "seen at a glance" but light
-  // enough that the user can still read the card body
-  // if they expand it. ``saturate-50`` rides along so read
-  // cards lose color too, not just brightness — opacity alone
-  // still let a vivid category stripe/thumbnail pull the eye
-  // back to an already-read card; desaturating makes unread
-  // cards the only ones that still "pop" with full color.
-  const dimClass = unread || selected ? '' : 'opacity-60 saturate-50'
+  // Visual state. The ring marks the keyboard-selected card only.
+  // A card under "Earlier (N)" is dimmed: the opacity dim applies to
+  // the article container so the entire card (title, body, meta row,
+  // sources, summary) fades together. ``opacity-60`` is heavy enough
+  // to read as "seen at a glance" but light enough that the user can
+  // still read the card body if they expand it. ``saturate-50`` rides
+  // along so a seen card loses color too, not just brightness.
+  const ringClass = selected ? 'ring-2 ring-accent/70' : ''
+  const dimClass = dimmed && !selected ? 'opacity-60 saturate-50' : ''
 
   return (
     <div className="relative">
-      {/* Swipe-reveal backgrounds. Sit behind the card (z-order is
+      {/* Swipe-reveal background. Sits behind the card (z-order is
           implicit — the article below has its own opaque
           background), full-bleed so the color reads as "the card is
           sliding off this surface" rather than a separate strip.
           Opacity is driven imperatively by applySwipeVisual as the
-          user drags; at rest both sit fully transparent and
-          pointer-events-none so they never intercept a tap. */}
-      {onMarkRead && (
-        <div
-          ref={readRevealRef}
-          aria-hidden="true"
-          className="absolute inset-0 rounded-ios-lg bg-emerald-600 flex items-center pl-5 pointer-events-none opacity-0"
-        >
-          <CheckIcon className="w-5 h-5 text-white" filled />
-          <span className="ml-2 text-ios-body font-medium text-white">{unread ? 'Read' : 'Unread'}</span>
-        </div>
-      )}
+          user drags; at rest it sits fully transparent and
+          pointer-events-none so it never intercepts a tap. */}
       {onHideToggle && (
         <div
           ref={hideRevealRef}
@@ -973,6 +886,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               title={entry.title}
               url={entry.url}
               entryId={entry.id}
+              onOpen={onActivate}
             />
           </div>
         )}
@@ -1027,6 +941,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               e.preventDefault()
               e.stopPropagation()
               recordImmediate({ entry_id: entry.id, type: 'click' })
+              onActivate?.()
               // ``safeExternalUrl`` rewrites reddit.com -> old.reddit.com
               // so the popped-out tab doesn't show the "Get the App"
               // overlay (see api.ts). The href above is also rewritten
@@ -1102,6 +1017,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
               e.preventDefault()
               e.stopPropagation()
               recordImmediate({ entry_id: entry.id, type: 'click' })
+              onActivate?.()
               window.open(safeExternalUrl(entry.audio_url!), '_blank', 'noopener,noreferrer')
             }}
             className="inline-flex items-center gap-1 whitespace-nowrap min-h-[44px] -my-2 text-ios-caption text-accent active:opacity-60"
@@ -1261,7 +1177,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
         </div>
       )}
       {/* Vote footer. Deliberately its own full-width bar at the very
-          bottom of the card, separated from the top meta row's check/
+          bottom of the card, separated from the top meta row's
           star/eye cluster by real vertical distance and a hairline
           divider — the previous layout crammed the vote pair in next
           to those tightly-packed 28px icons, which read as one
@@ -1277,7 +1193,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
           which way (if any) they've already voted on this entry,
           matching the persisted-state treatment star/hidden already
           get. */}
-      {(onVote || onToggleSummary || onMarkRead || onStar || onHideToggle) && (
+      {(onVote || onToggleSummary || onStar || onHideToggle) && (
         <div className="mt-2 -mb-1 flex items-center">
           {onVote && (
           <div className="flex items-center -ml-3">
@@ -1337,8 +1253,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
             </button>
           </div>
           )}
-          {/* Utility icon cluster — summary chevron, mark-read, star,
-              hide. Lives on the trailing edge of the SAME footer bar
+          {/* Utility icon cluster — summary chevron, star, hide. Lives on the trailing edge of the SAME footer bar
               the vote pair is in, per the "top of card is info,
               bottom is interaction" split: the meta row above now
               carries only source + timestamp, nothing clickable.
@@ -1351,9 +1266,8 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 guard so a long-press / right-click on the card itself
                 doesn't fire while the user is targeting the chevron.
                 Title alternates by state so the hover hint matches the
-                keyboard shortcut (``s``). Visually mirrors the ✓'s
-                hover-reveal treatment — hidden until hover on desktop,
-                always visible on touch. */}
+                keyboard shortcut (``s``). Hidden until hover on
+                desktop, always visible on touch. */}
             {onToggleSummary && (
               <button
                 type="button"
@@ -1374,42 +1288,6 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 {/* Rotate 180° when expanded so the chevron flips up —
                     standard iOS disclosure-indicator idiom. */}
                 <ChevronDownIcon className={`w-4 h-4 transition-transform ${expanded ? 'rotate-180' : ''}`} />
-              </button>
-            )}
-            {/* Per-card mark-read ✓. ``onMouseDown`` swallows the press
-                so it doesn't bubble into the article's long-press /
-                context-menu paths. Fires ``view`` so the ranker sees
-                the same signal it sees for headline and thumbnail
-                clicks. */}
-            {onMarkRead && (
-              // Always visible (not hover-only) so the user can see at
-              // a glance that the action is available. Muted weight
-              // (text-label-secondary for unread, text-accent for
-              // read) so it doesn't compete with the title. On read
-              // cards the checkmark is filled so the user can tell at
-              // a glance which cards are dimmed and which still need
-              // attention.
-              <button
-                type="button"
-                data-card-interactive
-                data-mark-read
-                onMouseDown={(e) => e.stopPropagation()}
-                onTouchStart={(e) => e.stopPropagation()}
-                onClick={(e) => {
-                  e.preventDefault()
-                  e.stopPropagation()
-                  // Same path as swipe-right: on an unread card, "view" +
-                  // "dwell" (capped at 5 min) + the read flip that dims
-                  // it; on a read card, just the flip back to unread.
-                  commitMarkRead()
-                }}
-                aria-label={unread ? 'mark this card as read' : 'mark this card as unread'}
-                aria-pressed={!unread}
-                title={unread ? 'mark as read (m)' : 'mark as unread'}
-                className={`shrink-0 w-11 h-11 flex items-center justify-center rounded-full active:bg-bg-elevated
-                            ${unread ? 'text-label-secondary' : 'text-accent'}`}
-              >
-                <CheckIcon className="w-4 h-4" filled={!unread} />
               </button>
             )}
             {/* Per-card star. ``data-star`` so the keyboard ``s``
@@ -1443,10 +1321,7 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
             )}
             {/* Per-card hide (eye) button. State reflects the entry's
                 current ``hidden`` prop: open eye = visible, closed eye
-                = hidden. Click toggles via ``onHideToggle`` (App wires
-                this to a callback that ALSO marks the entry read when
-                hiding, so the entry moves to the column's History
-                section instead of just disappearing). The keyboard
+                = hidden. Click toggles via ``onHideToggle``. The keyboard
                 ``h`` shortcut targets this button via
                 document.querySelector + ``data-eye``. */}
             {onHideToggle && (
@@ -1459,9 +1334,8 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
                 onClick={(e) => {
                   e.preventDefault()
                   e.stopPropagation()
-                  // ``never`` is a stronger signal than the ``view``
-                  // mark-read fires — the ranker treats it as a
-                  // category penalty.
+                  // ``never``: the ranker treats it as a category
+                  // penalty.
                   if (!hidden) {
                     recordImmediate({ entry_id: entry.id, type: 'never' })
                   }
@@ -1488,18 +1362,18 @@ export function CardInner({ entry, sourceName, unread, selected, cardRef, onActi
 // inline ref / callback lambdas at the Column level defeat the
 // memo, because they're allocated fresh on every Column render.
 // So we use a custom areEqual that ignores the per-card callback
-// props (``cardRef``, ``onActivate``, ``onMarkRead``,
-// ``onToggleSummary``). They're inherently per-render at the
-// Column layer; the parent passes them through to whatever the
-// latest closure captures. The data-driven props — ``entry``,
-// ``sourceName``, ``unread``, ``selected``, ``category``,
-// ``expanded`` — are what we actually re-render against.
+// props (``cardRef``, ``onActivate``, ``onToggleSummary``).
+// They're inherently per-render at the Column layer; the parent
+// passes them through to whatever the latest closure captures. The
+// data-driven props — ``entry``, ``sourceName``, ``dimmed``,
+// ``selected``, ``category``, ``expanded`` — are what we actually
+// re-render against.
 //
 // Trade-off: if a callback's logic changes without the data
 // changing, this Card won't re-render. That can't happen in
 // practice because callbacks here only depend on data props
-// (``onMarkEntryRead(e.id)`` reads from the same entry id) and
-// App-level state. If a future caller starts passing callbacks
+// (``onOpenEntry(e)`` reads from the same entry) and App-level
+// state. If a future caller starts passing callbacks
 // that close over mutable refs, lift this to a stable ref and
 // re-evaluate.
 function _cardPropsEqual(prev: Props, next: Props): boolean {
@@ -1507,7 +1381,7 @@ function _cardPropsEqual(prev: Props, next: Props): boolean {
     prev.entry === next.entry &&
     prev.sourceName === next.sourceName &&
     prev.sourceFaviconPath === next.sourceFaviconPath &&
-    prev.unread === next.unread &&
+    prev.dimmed === next.dimmed &&
     prev.selected === next.selected &&
     prev.category === next.category &&
     prev.expanded === next.expanded &&
@@ -1519,44 +1393,13 @@ function _cardPropsEqual(prev: Props, next: Props): boolean {
 
 export const Card = memo(CardInner, _cardPropsEqual) as typeof CardInner
 
-// iOS-style checkmark. Used for the per-card mark-read ✓. 2px stroke
-// is heavier than the 1.75 the header icons use — the ✓ is the
-// primary affordance on its button so it should be assertive.
-// ``filled`` toggles a solid filled circle (like a completed
-// checkbox) so the user can tell at a glance which cards are
-// already dimmed and which still need attention. The fill
-// colour is ``currentColor`` so the button's text-label-
-// secondary (unread) vs text-accent (read) recolour logic
-// drives both the icon and its background.
-function CheckIcon({ className, filled = false }: { className?: string; filled?: boolean }) {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill={filled ? 'currentColor' : 'none'}
-      stroke="currentColor"
-      strokeWidth={filled ? 0 : 2}
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-      aria-hidden="true"
-    >
-      {filled ? (
-        <path d="M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20zm-1.2 14.4l-4.2-4.2 1.4-1.4 2.8 2.8 5.6-5.6 1.4 1.4-7 7z" />
-      ) : (
-        <polyline points="4 12 10 18 20 6" />
-      )}
-    </svg>
-  )
-}
-
 // iOS-style eye. The "hide" / "unhide" affordance. Open
 // eye (outline) = the entry is currently visible to the
 // user; clicking the button will hide it. Closed eye
 // (filled, with a stroke through it) = the entry is
 // hidden; clicking will unhide it. The fill / stroke
 // distinction matches the star button's pattern so the
-// three meta-row buttons (check / star / eye) all read
-// as the same scale.
+// meta-row buttons (star / eye) read as the same scale.
 //
 // We use two separate SVG paths and switch between them
 // rather than a single path with a stroke. Single-path
@@ -1611,8 +1454,7 @@ function EyeIcon({
   )
 }
 
-// iOS-style star. The same outline-vs-filled pattern as
-// CheckIcon — outline when unstarred (the user hasn't saved
+// iOS-style star. Outline when unstarred (the user hasn't saved
 // this yet), filled when starred (the user has saved this
 // and the visual should make that immediately obvious). The
 // filled state uses ``currentColor`` so the button's
@@ -1637,7 +1479,7 @@ function StarIcon({ className, filled = false }: { className?: string; filled?: 
 }
 
 // Down-chevron used for the per-card summary disclosure. 2px stroke
-// matches CheckIcon so the two buttons read as visual siblings on the
+// matches StarIcon so the two buttons read as visual siblings on the
 // meta row. Rotated 180° via Tailwind's ``rotate-180`` when the
 // panel is open — standard iOS disclosure-indicator idiom.
 function ChevronDownIcon({ className }: { className?: string }) {
@@ -1659,13 +1501,13 @@ function ChevronDownIcon({ className }: { className?: string }) {
 
 // Vote-pair arrows. A straight stem + chevron head (not a solid
 // Reddit-style triangle) so they read as siblings of the other
-// stroke-based icons here (Check/Eye/Star/Chevron) rather than a
+// stroke-based icons here (Eye/Star/Chevron) rather than a
 // visually foreign import. Slightly heavier stroke (2.5 vs the 2 the
 // other icons use) since these are the primary voting affordance and
 // benefit from a touch more presence at 16px.
 // ``filled`` swaps the open stem+chevron path (idle) for a solid
 // closed triangle (voted) — mirrors the outline-vs-filled pattern
-// StarIcon/CheckIcon already use, but needs a genuinely different
+// StarIcon already uses, but needs a genuinely different
 // path rather than just toggling ``fill`` because the idle path is
 // an open stroke (a stem + a separate chevron), which has no
 // enclosed area for ``fill`` to do anything visible to.
@@ -1739,14 +1581,16 @@ function ArrowDownIcon({ className, filled = false }: { className?: string; fill
 // so a developer chasing a 403 / 404 sees which thumbnail URL is
 // the offender. Hidden state is the same as before (display:none on
 // the wrapper) so the badge still lands flush right.
-function Thumbnail({ path, title, url, entryId }: { path: string; title: string; url: string; entryId: number }) {
+function Thumbnail({ path, title, url, entryId, onOpen }: { path: string; title: string; url: string; entryId: number; onOpen?: () => void }) {
   const wrapperRef = useRef<HTMLDivElement | null>(null)
   const open = () => {
     // The thumbnail click is its own affordance and uses
     // ``e.stopPropagation`` to bypass the article-level handlers —
     // so the headline's onClick won't fire. Record the click event
-    // here so the recommendation ranker sees both kinds of opens.
+    // here so the recommendation ranker sees both kinds of opens,
+    // and tell the card the story was opened (it is seen now).
     recordImmediate({ entry_id: entryId, type: 'click' })
+    onOpen?.()
     // ``safeExternalUrl`` rewrites reddit.com -> old.reddit.com so
     // the popped-out tab doesn't show the "Get the App" overlay.
     window.open(safeExternalUrl(url), '_blank', 'noopener,noreferrer')

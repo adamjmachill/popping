@@ -19,17 +19,15 @@ type Props = {
   error?: string | null
   searching?: boolean
   // Per-card engagement, wired the same way as the "For You" row
-  // in App — search results are cross-column, so there's no single
-  // owning column to mark read against. Callers should scope reads
-  // under a shared pseudo-column key (App uses ``'Search'``).
+  // in App.
   categoriesBySourceId?: Map<number, string>
   // Same shape, favicon path — Card's thumbnail fallback for
   // entries with no photo of their own.
   faviconBySourceId?: Map<number, string | null>
-  // Entries the user has already read anywhere on the dashboard
-  // (App's ``globalReadIds``). Drives the dimmed/unread ring.
-  readIds?: Set<number>
-  onMarkRead?: (entryId: number) => void
+  // A story was opened: App marks it seen, under its category's
+  // ``seen:`` key, as from a tab (PR3b). Results are never dimmed: they
+  // are what you searched for.
+  onOpenEntry?: (entry: Entry) => void
   onHide?: (entryId: number) => void
   onHideToggle?: (entryId: number) => void
   hiddenSet?: Set<number>
@@ -49,8 +47,7 @@ export function SearchResults({
   searching,
   categoriesBySourceId,
   faviconBySourceId,
-  readIds,
-  onMarkRead,
+  onOpenEntry,
   onHide,
   onHideToggle,
   hiddenSet,
@@ -92,10 +89,9 @@ export function SearchResults({
               sourceName={sourcesById.get(e.source_id)}
               sourceFaviconPath={faviconBySourceId?.get(e.source_id)}
               category={categoriesBySourceId?.get(e.source_id)}
-              unread={readIds ? !readIds.has(e.id) : undefined}
               expanded={expandedSummaries?.has(e.id) ?? false}
               onToggleSummary={onToggleSummary ? () => onToggleSummary(e.id) : undefined}
-              onMarkRead={onMarkRead ? () => onMarkRead(e.id) : undefined}
+              onActivate={onOpenEntry ? () => onOpenEntry(e) : undefined}
               onHide={onHide ? () => onHide(e.id) : undefined}
               onHideToggle={onHideToggle ? () => onHideToggle(e.id) : undefined}
               hidden={hiddenSet?.has(e.id) ?? false}

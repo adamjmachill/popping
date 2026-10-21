@@ -55,6 +55,16 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #43 · On the phone, open a tab with more than 30 stories and scroll steadily to its end. Pass: more stories appear before you reach the bottom, with no tap and no visible jump, and the list ends with the tab's last story.
 - [ ] #43 · (If you have a desktop) On the laptop, scroll down past the 30th story of a column with more than 30. Pass: the next stories appear as you near the end of the column.
 - [ ] #43 · With rotation unlocked, open the home-screen app with the phone held sideways, on a tab with more than 30 stories, then turn it upright. Pass: scrolling the tab to its end loads more stories, and tapping the tab again takes the list back to its top.
+- [ ] #<pr> · Before deploying PR3b (it goes out together with PR3c, D33), run `cd /opt/popping && docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -tAc "SELECT max(length(category)) FROM sources"'`. Pass: it prints 55 or less (a seen mark's key is `seen:` plus the category, and keys stop at 60 characters).
+- [ ] #<pr> · After the first deploy with PR3b and PR3c, force-quit and reopen the home-screen app. Pass: no tab badge reads 99+, and stories that arrived more than 2 days ago sit under "Earlier (N)" at the end of their tab.
+- [ ] #<pr> · On the phone, note a tab's badge, open the top story of that tab, then come back to Popping. Pass: the badge is one lower, the story is still where it was (not faded), and the list hasn't moved.
+- [ ] #<pr> · Scroll a tab to its end. Pass: the last story is followed by "N not seen · Mark as read"; tapping it shows "You're all caught up" with the stories folded under "Earlier (N)" and a "Marked N as read" toast whose Undo brings them back above the line.
+- [ ] #<pr> · On a tab that says "You're all caught up", tap the row under it that names another tab (such as "News · 12"). Pass: that tab opens; a tab hidden in Edit tabs is never named, and with every tab read the row is gone.
+- [ ] #<pr> · Tap a tab's ⋯, then Mark all as read. Pass: the tab shows "You're all caught up", its badge goes, and the same ⋯ row is greyed out until new stories arrive.
+- [ ] #<pr> · Scroll down a tab, switch to another app for 10 minutes or more (not straight after opening a story), then come back. Pass: the tab is back at its top, and the stories you had opened are under "Earlier (N)".
+- [ ] #<pr> · Open a story, read it in Safari for 10 minutes or more, then come back to Popping. Pass: the list is where you left it, with that story still in place.
+- [ ] #<pr> · Open the same story on the phone that is also in For You, then look at For You and the story's own tab. Pass: both badges dropped by one (a story opened anywhere counts as seen everywhere).
+- [ ] #<pr> · If you have a desktop: open a story from the For You row at the top, then look at its category's column. Pass: the column's "N new" is one lower and the column didn't move.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
