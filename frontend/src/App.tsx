@@ -49,7 +49,7 @@ import { isBuiltIn } from './lib/feedRules'
 import { TabsEditor } from './components/TabsEditor'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
 import { useUpdateCheck, type Return } from './lib/useUpdateCheck'
-import { countUnseen, keepSet, nextTab as findNextTab, seenKey, seenTest, type TabCount } from './lib/feedOrder'
+import { countUnseen, keepIdsFor, nextTab as findNextTab, seenKey, seenTest, type TabCount } from './lib/feedOrder'
 import { MAX_STARRED } from './lib/prefSync'
 import { reinsertAll, savedStories, savedToFetch } from './lib/saved'
 import { useFeedOrder, type FeedTab } from './lib/useFeedOrder'
@@ -1872,10 +1872,10 @@ export function App() {
   // Every story App fetched: a key's oldest marks outside these go first
   // when it reaches its cap (``pruneIds``), so pruning never brings back
   // a story still on screen as unseen: the tabs, For You, the saves and
-  // the Saved-by-id cache (``keepSet``). (PR4d adds every wider tab's
+  // the Saved-by-id cache (``keepIdsFor``). (PR4d adds every wider tab's
   // rows.)
   const keepIds = useMemo(
-    () => keepSet(entries, forYou, starredEntries, savedById.keys()),
+    () => keepIdsFor({ entries, forYou, starred: starredEntries, savedById }),
     [entries, forYou, starredEntries, savedById],
   )
   const readRefs = useRef({ categoriesBySourceId, keepIds })

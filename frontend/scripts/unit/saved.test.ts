@@ -45,6 +45,8 @@ test('reinsert: the story goes back at its place, clamped to the list', () => {
   // The list got shorter since the hide: at the end.
   assert.deepEqual(ids(reinsert(list, story(9), 10)), [1, 2, 3, 9])
   assert.deepEqual(ids(reinsert([], story(9), 4)), [9])
+  // Below the list: at the start (slice would count -1 from the end).
+  assert.deepEqual(ids(reinsert(list, story(9), -1)), [9, 1, 2, 3])
   // The input list is never changed.
   assert.deepEqual(ids(list), [1, 2, 3])
 })
