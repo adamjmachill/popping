@@ -4,8 +4,8 @@
 // What lives here now
 // -------------------
 //
-// Four keys live in localStorage (two kept through the server-side
-// preferences migration of 2026-07-02, two added later):
+// Five keys live in localStorage (two kept through the server-side
+// preferences migration of 2026-07-02, three added later):
 //
 //   - ``mobileTab`` -- the key of the tab the phone shows
 //     (``lib/columns.ts``: ``meta:foryou``, ``cat:news`` ...).
@@ -22,6 +22,11 @@
 //
 //   - ``briefTone`` -- the Brief tone picked on this device
 //     (Short, Story or Alerts), so a reload keeps it.
+//
+//   - ``firstRunAt`` -- when this device first loaded the read model
+//     (PR3b, D33): stories fetched more than 48 hours before it count
+//     as seen here, so the first deploy doesn't open every tab at
+//     99+. Per-device on purpose: nothing is written to the server.
 //
 // What moved off localStorage
 // ---------------------------
@@ -64,6 +69,8 @@ export const STORAGE_KEYS = {
   briefCollapsed: `${NAMESPACE}.${SCHEMA}.brief.collapsed`,
   // The Brief tone ('terse' | 'narrative' | 'alert'), checked on read.
   briefTone: `${NAMESPACE}.${SCHEMA}.brief.tone`,
+  // When this device first loaded the read model (ms since the epoch).
+  firstRunAt: `${NAMESPACE}.${SCHEMA}.firstRunAt`,
 } as const
 
 export function safeGetItem(key: string): string | null {

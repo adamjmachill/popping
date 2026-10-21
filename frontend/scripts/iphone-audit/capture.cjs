@@ -631,7 +631,7 @@ async function main() {
     await page.goto(BASE + '/', { waitUntil: 'networkidle' })
     await page.waitForSelector('[role="tablist"][aria-label="dashboard sections"]', { timeout: 20000 })
     await mobileMain.locator('article[data-card-id]').first().waitFor({ state: 'visible', timeout: 20000 })
-    await sleep(2200) // let the "refreshed" toast go away
+    await sleep(2200) // let any load-time toast go away
     await state('01-dashboard', 'Dashboard after load (mobile tab bar, first column = For You)')
 
     // ---- (2) card with summary expanded ----

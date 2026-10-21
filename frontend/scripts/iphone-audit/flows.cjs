@@ -18,7 +18,8 @@
 //   freely; they count requests, not taps.
 //
 // Every flow also gets installHarness() before the page loads: window.open,
-// navigator.share and the clipboard are stubbed (nothing leaves the page),
+// links that open a new tab (a story's headline), navigator.share and the
+// clipboard are stubbed (nothing leaves the page),
 // and fetches to /api/preferences and /api/interactions are recorded with
 // their keepalive flag, which Playwright's Request does not expose, and
 // whether the app has read the answer (harnessLog(), answered()).
@@ -178,6 +179,23 @@ function harnessInit() {
     h.opened.push({ url: url == null ? '' : String(url), target: target == null ? '' : String(target) })
     return null
   }
+  // A link that opens a new tab (a card's headline) is recorded the same
+  // way and goes nowhere. This listener runs after the app's own (window
+  // is past React's root in the bubble phase); a link whose handler
+  // already called the navigation off opened its tab through
+  // window.open, which recorded it.
+  // A middle-click (auxclick, button 1) on any link opens a background
+  // tab by itself: recorded with `middle: true`, and kept on the page too.
+  const keep = (e, middle) => {
+    const a = e.target && e.target.closest ? e.target.closest('a[target="_blank"][href]') : null
+    if (!a || e.defaultPrevented) return
+    e.preventDefault()
+    h.opened.push(middle ? { url: a.href, target: '_blank', middle: true } : { url: a.href, target: '_blank' })
+  }
+  window.addEventListener('click', (e) => keep(e, false))
+  window.addEventListener('auxclick', (e) => {
+    if (e.button === 1) keep(e, true)
+  })
   Object.defineProperty(navigator, 'share', {
     configurable: true,
     value: async (data) => {
@@ -264,6 +282,27 @@ async function touchDrag(page, { from, to, steps = 10, stepMs = 50, holdMs = 150
   }
   page._taps = (page._taps || 0) + 1
   return true
+}
+
+// One finger put down near the top of `locator` and left there (a CDP
+// touchStart, no move): a pointerdown and a touchstart, no tap, no
+// scroll. The function it returns lifts the finger with a touchCancel, so
+// no click follows either. Chromium only; elsewhere a held Shift key (a
+// keydown) stands in for it.
+async function restFinger(page, locator) {
+  const box = await locator.boundingBox()
+  if (!isChromium(page) || !box) {
+    await page.keyboard.down('Shift')
+    return () => page.keyboard.up('Shift')
+  }
+  const cdp = await page.context().newCDPSession(page)
+  const x = Math.round(box.x + box.width / 2)
+  const y = Math.round(box.y + Math.min(box.height / 2, 40))
+  await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y, id: 1, radiusX: 1, radiusY: 1, force: 1 }] })
+  return async () => {
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchCancel', touchPoints: [] }).catch(() => {})
+    await cdp.detach().catch(() => {})
+  }
 }
 
 // Leaving the app and coming back: iOS sets both visibilityState and
@@ -627,6 +666,122 @@ const sentinelBelow = (column, px) =>
     sc.scrollTop += el.getBoundingClientRect().top - sc.getBoundingClientRect().bottom - d
     return true
   }, px)
+
+// --- PR3b: the read model ------------------------------------------------------
+
+// The phone list's cards above the marker ("unseen") or under it, in
+// Earlier, by id, in order.
+const groupIds = (page, group) =>
+  page.locator(`${MOBILE_MAIN} [data-group="${group}"] article[data-card-id]`).evaluateAll((els) => els.map((el) => Number(el.getAttribute('data-card-id'))))
+// The trimmed text of the first element matching `selector`, '' when
+// there is none (read at once: a locator would wait for it to appear).
+const textNow = (page, selector) => page.evaluate((sel) => ((document.querySelector(sel) || {}).textContent || '').trim(), selector)
+const PHONE_MARKER = `${MOBILE_MAIN} [data-caught-up]`
+const markerText = (page) => textNow(page, PHONE_MARKER)
+const PHONE_EARLIER = `${MOBILE_MAIN} button[data-earlier]`
+const PHONE_LIST = `${MOBILE_MAIN} section [data-scroller]`
+// After a scroll that puts the marker above the top of `list` (a
+// [data-scroller]): true once the app's own marker observer has seen it
+// there, so the hold is on. An IntersectionObserver made now, on the same
+// root, waits for its first report of the marker above the screen. The
+// app's observer saw the crossing in the same rendering update or an
+// earlier one, so its callback runs in the same notification task or an
+// earlier one: nothing the flow sends next is handled before it has run. A fixed sleep
+// was shorter than that callback's delay on a loaded machine. False
+// after 5 s.
+const markerAbove = (list) =>
+  Promise.race([
+    list
+      .evaluate(
+        (el) =>
+          new Promise((resolve) => {
+            const m = el.querySelector('[data-caught-up]')
+            if (!m) return resolve(false)
+            const io = new IntersectionObserver((entries) => {
+              const e = entries[entries.length - 1]
+              const top = e.rootBounds ? e.rootBounds.top : el.getBoundingClientRect().top
+              if (e.isIntersecting || e.boundingClientRect.bottom > top) return
+              io.disconnect()
+              resolve(true)
+            }, { root: el })
+            io.observe(m)
+          }),
+      )
+      .catch(() => false),
+    sleep(5000).then(() => false),
+  ])
+// Scrolls `list` to `y` and resolves once its scroll event has been sent
+// (with the next frame; the app's capture listener on the document hears
+// it first), so what comes next can't overtake it. False after 3 s.
+const scrolledTo = (list, y) =>
+  Promise.race([
+    list
+      .evaluate(
+        (el, to) =>
+          new Promise((resolve) => {
+            el.addEventListener('scroll', () => resolve(true), { once: true })
+            el.scrollTo(0, to)
+          }),
+        y,
+      )
+      .catch(() => false),
+    sleep(3000).then(() => false),
+  ])
+// What has the focus now: 'BODY', or the element's tag and its data-*
+// attributes (e.g. 'DIV[data-caught-up]').
+const focusedNow = (page) =>
+  page.evaluate(() => {
+    const a = document.activeElement
+    if (!a || a === document.body) return 'BODY'
+    return a.tagName + [...a.attributes].filter((x) => x.name.startsWith('data-') || x.name === 'aria-label').map((x) => (x.name === 'aria-label' ? `[aria-label="${x.value}"]` : `[${x.name}]`)).join('')
+  })
+// A phone tab's badge (the count of its stories not seen yet), or ''.
+const badge = (page, re) => phoneTab(page, re).evaluate((el) => ((el.querySelector('[data-badge]') || {}).textContent || '').trim())
+// The fixture's story ids of one category, in id order.
+const idsOf = (category) =>
+  F.ENTRIES.filter((e) => (F.SOURCES.find((s) => s.id === e.source_id) || {}).category === category).map((e) => e.id)
+// The ids the PATCHes in `writes` (prefWrites) add to (or remove from)
+// `seen:<category>`.
+const seenAdded = (writes, category) => patched(writes, `seen:${category}`, 'add')
+const seenRemoved = (writes, category) => patched(writes, `seen:${category}`, 'remove')
+// Opens a story the way a finger does: its headline (a new-tab link the
+// harness keeps on the page).
+const openStory = (page, id) => tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] a[aria-label="open in new tab"]`).first())
+// Scrolls the phone list to its end, a step at a time, until every
+// batch has loaded (no "load more" sentinel left).
+async function phoneListToEnd(page) {
+  for (let i = 0; i < 10; i++) {
+    await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, el.scrollHeight))
+    await sleep(250)
+    if (!(await page.locator(`${MOBILE_MAIN} [data-more]`).count())) return true
+  }
+  return false
+}
+// Stories that "arrive" on the next poll: everything pushed onto
+// window.__arrivals is added to the tab story lists the page loads (as
+// withStories does, through the page's own fetch).
+async function withArrivals(page) {
+  await page.addInitScript(() => {
+    window.__arrivals = []
+    const orig = window.fetch
+    window.fetch = async (...args) => {
+      const res = await orig(...args)
+      const u = new URL(typeof args[0] === 'string' ? args[0] : args[0].url, location.href)
+      if (u.pathname !== '/api/entries' || u.searchParams.get('q') || u.searchParams.getAll('source').length || !window.__arrivals.length) return res
+      const got = await res.clone().json()
+      if (!Array.isArray(got)) return res
+      return new Response(JSON.stringify([...window.__arrivals, ...got]), { status: res.status, statusText: res.statusText, headers: res.headers })
+    }
+  })
+}
+// A story that arrives now (newer than every other), from the feed of
+// fixture story `like` (601: nhl_news; 103: bbc_news).
+const arrival = (id, like = 601) => {
+  const from = F.ENTRIES.find((e) => e.id === like)
+  const at = new Date(F.NOW - 60000).toISOString()
+  return { ...from, id, title: `Breaking story ${id}`, url: `https://example.com/${from.source_id}/arrival-${id}`, image_url: null, image_path: null, published_at: at, fetched_at: at }
+}
+const arrivalNhl = (id) => arrival(id, 601)
 
 module.exports = [
   flow('flow-fj-youtube-handle', {
@@ -1361,9 +1516,12 @@ module.exports = [
     },
   }),
 
-  // A For You request that fails empties the tab for one refresh, but it
+  // A For You request that fails empties the tab's list, but the tab
   // stays (PR7a): the phone stays on For You, keeps it as its tab, and
-  // shows its stories again when For You loads.
+  // shows its stories again when For You loads. PR3b: a poll that drops
+  // stories leaves them in the tab until it starts over, so the stories
+  // shown stay through the failed poll; the empty tab shows once it starts
+  // over (another tab and back).
   dashFlow('flow-foryou-fails-keeps-tab', {
     expectedFailedLoads: ['/api/foryou'],
     run: async ({ page, fail }) => {
@@ -1375,8 +1533,17 @@ module.exports = [
         (route) => (failing ? route.fulfill({ status: 503, contentType: 'text/plain', body: 'unavailable' }) : route.fallback()),
       )
       const cards = page.locator(`${MOBILE_MAIN} article[data-card-id]`)
+      const shown = await cards.count()
+      const failed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/foryou')
       await startPoll(page)
-      if (!(await waitFor(async () => (await cards.count()) === 0, 3000))) return fail('FY-FAIL', 'For You kept its stories after its request failed')
+      await failed
+      await sleep(500)
+      if ((await cards.count()) !== shown) fail('FY-FAIL', `the failed poll changed For You from ${shown} stories to ${await cards.count()}; they stay until the tab starts over`)
+      if (!/^for you/i.test(await selectedTab(page)) || (await storedTab(page)) !== 'meta:foryou') fail('FY-FAIL', `after the failed poll the phone shows ${JSON.stringify(await selectedTab(page))} and stores ${JSON.stringify(await storedTab(page))}`)
+      // Another tab and back: For You starts over, empty.
+      await phoneTab(page, /^deals/i).click()
+      await phoneTab(page, /^for you/i).click()
+      if (!(await waitFor(async () => (await cards.count()) === 0, 3000))) return fail('FY-FAIL', 'For You kept its stories after its request failed and the tab started over')
       await sleep(300)
       if (!(await tabTexts(page)).some((t) => /^for you/i.test(t))) fail('FY-FAIL', 'the For You tab went while its request fails')
       if (!/^for you/i.test(await selectedTab(page))) fail('FY-FAIL', `while For You fails the phone shows ${JSON.stringify(await selectedTab(page))}`)
@@ -1791,12 +1958,13 @@ module.exports = [
     },
   }),
 
-  // Reset takes the reading state (read marks, last visits, tab prefs,
-  // section folds, History grouping) and keeps saves, hides, votes and
-  // saved views. Of a read mark and a save still queued when Reset is
-  // tapped, the save goes before the DELETEs and is kept; the read mark is
-  // dropped, and nothing for a key Reset deletes goes after the DELETEs
-  // (the reload's leave flush would otherwise write the read marks back).
+  // Reset takes the reading state (seen marks and older builds' read
+  // marks, last visits, tab prefs, section folds, History grouping) and
+  // keeps saves, hides, votes and saved views. Of a seen mark (a story
+  // opened) and a save still queued when Reset is tapped, the save goes
+  // before the DELETEs and is kept; the seen mark is dropped, and nothing
+  // for a key Reset deletes goes after the DELETEs (the reload's leave
+  // flush would otherwise write the marks back).
   dashFlow('flow-reset-keeps-saves', {
     before: async ({ page }) => {
       await installClock(page)
@@ -1809,19 +1977,21 @@ module.exports = [
         filter_presets: [{ id: 'p-1', name: 'Morning', activeSources: [], columnPrefs: {} }],
         history_group_by: 'none',
         'read_entries:news': [101],
+        'seen:news': [109],
         'last_viewed:news': new Date(F.NOW).toISOString(),
         'column_prefs:news': { sort: 'best', minScore: 0, maxAgeHours: null },
         'column_sections:news': { newCollapsed: false, historyCollapsed: true },
       })
       const writes = await prefWrites(page)
-      // A read mark and a save wait in the 1 s batch (the clock is held).
+      // A seen mark (the story opened) and a save wait in the 1 s batch
+      // (the clock is held).
       const now = await page.evaluate(() => Date.now())
       await page.clock.pauseAt(now + 1000)
       await tap(page, phoneTab(page, /^news/i))
       const id = await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().getAttribute('data-card-id')
       const card = page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"]`)
       await tap(page, card.locator('button[aria-label="save for later"]'))
-      await tap(page, card.locator('button[aria-label="mark this card as read"]'))
+      await tap(page, card.locator('a[aria-label="open in new tab"]').first())
       await sleep(300)
       if (writes.length) return fail('RESET', `the queued writes went before Reset: ${JSON.stringify(writes)}`)
       await page.evaluate((u) => {
@@ -1836,7 +2006,7 @@ module.exports = [
       await page.clock.resume()
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
       const firstDelete = writes.findIndex((w) => w.method === 'DELETE')
-      const resetKey = (k) => k === 'history_group_by' || /^(read_entries|last_viewed|column_prefs|column_sections):/.test(k)
+      const resetKey = (k) => k === 'history_group_by' || /^(seen|read_entries|last_viewed|column_prefs|column_sections):/.test(k)
       const after = writes.slice(firstDelete).filter((w) => w.method !== 'DELETE' && resetKey(w.key))
       if (after.length) fail('RESET', `writes after the DELETEs: ${JSON.stringify(after)}`)
       const saveAt = writes.findIndex((w) => w.method === 'PATCH' && w.key === 'starred_entries' && (w.body.add || []).includes(Number(id)))
@@ -1849,7 +2019,7 @@ module.exports = [
       for (const k of ['starred_entries', 'hidden_entries', 'filter_presets', 'voted_entries']) {
         if (deleted.includes(k)) fail('RESET', `Reset deleted ${k}`)
       }
-      for (const k of ['read_entries:news', 'last_viewed:news', 'column_prefs:news', 'column_sections:news', 'history_group_by']) {
+      for (const k of ['seen:news', 'read_entries:news', 'last_viewed:news', 'column_prefs:news', 'column_sections:news', 'history_group_by']) {
         if (!deleted.includes(k)) fail('RESET', `Reset kept ${k} (deleted: ${JSON.stringify(deleted)})`)
       }
       const left = await page.evaluate(async () => ((await (await fetch('/api/preferences')).json()).items || []).map((r) => r.key).sort())
@@ -2249,7 +2419,7 @@ module.exports = [
       await page.clock.runFor(65_000)
       await sleep(800)
       if (!polls) fail('FN', 'no poll ran in 65 s')
-      if (await page.getByText(/^(refreshed|\d+ new since last refresh)$/).count()) fail('FN', 'the background poll showed a toast')
+      if (await page.locator('[role="status"]').getByText(/^(\d+ new|Nothing new)$/).count()) fail('FN', 'the background poll showed a toast')
     },
   }),
 
@@ -3477,6 +3647,85 @@ module.exports = [
       if ((await cardCount(nhl)) !== 60) fail('DESK-LAYOUT', `the column went on to ${await cardCount(nhl)} cards without another scroll`)
       if (after.win !== 0 || after.wrapper <= 0) fail('DESK-LAYOUT', `the scroll moved the window by ${after.win}px and the wrapper by ${after.wrapper}px; only the wrapper should move`)
       await shot('scrolled')
+
+      // PR3b: Deals's end row (in NHL's grid row) clicked with the mouse,
+      // far down the page. Chromium focuses a button on mousedown, but a
+      // mouse click is not a keyboard press: the focus is not handed to
+      // the marker that replaces the row far above the screen, and the
+      // page does not move under the pointer.
+      const column = (re) => page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: re }) })
+      const scrollTop = () => page.evaluate(() => document.querySelector('[data-scroller]').scrollTop)
+      const deals = column(/^deals$/i)
+      const dealsRow = deals.locator('button[data-caught-up]')
+      if ((await dealsRow.count()) !== 1) return fail('DESK-LAYOUT', `the Deals column has no end row: ${JSON.stringify(await deals.locator('[data-caught-up]').allTextContents())}`)
+      await dealsRow.evaluate((el) => el.scrollIntoView({ block: 'end' }))
+      const atClick = await scrollTop()
+      await dealsRow.click()
+      if (!(await waitFor(async () => (await deals.locator('div[data-caught-up]').count()) === 1, 3000))) return fail('DESK-LAYOUT', `after a mouse click on Deals's end row the column still draws ${await cardCount(deals)} cards`)
+      // The hand-over would run within a render or two of the marker.
+      await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))))
+      await sleep(300)
+      const afterClick = await scrollTop()
+      if (afterClick !== atClick) fail('DESK-LAYOUT', `a mouse click on Deals's end row moved the wrapper from ${atClick} to ${afterClick}`)
+      if ((await focusedNow(page)) === 'DIV[data-caught-up]') fail('DESK-LAYOUT', "after a mouse click on Deals's end row the focus went to its marker")
+
+      // PR3b: News's end row pressed with the keyboard, far down the
+      // page. The column shrinks to its marker while NHL's 60 cards keep
+      // the grid row (and the page) as tall as it was, so the marker
+      // that takes the focus is far above the screen: it is brought into
+      // the wrapper's view, not left out of sight.
+      const news = column(/^news$/i)
+      const endRow = news.locator('button[data-caught-up]')
+      if ((await endRow.count()) !== 1) return fail('DESK-LAYOUT', `the News column has no end row: ${JSON.stringify(await news.locator('[data-caught-up]').allTextContents())}`)
+      await endRow.evaluate((el) => el.scrollIntoView({ block: 'end' }))
+      await endRow.focus()
+      const deep = await page.evaluate(() => document.querySelector('[data-scroller]').scrollTop)
+      await page.keyboard.press('Enter')
+      if (!(await waitFor(async () => (await cardCount(news)) === 0, 3000))) return fail('DESK-LAYOUT', `after the end row's Mark as read the News column still draws ${await cardCount(news)} cards`)
+      if (!(await waitFor(async () => (await focusedNow(page)) === 'DIV[data-caught-up]', 1000))) fail('DESK-LAYOUT', `after News's end row from the keyboard the focus is on ${await focusedNow(page)}, expected the marker`)
+      const seen = await page.evaluate(() => {
+        const a = document.activeElement
+        const sc = document.querySelector('[data-scroller]')
+        const r = a.getBoundingClientRect()
+        const b = sc.getBoundingClientRect()
+        return { top: Math.round(r.top), bottom: Math.round(r.bottom), from: Math.round(b.top), to: Math.round(b.bottom), scrollTop: sc.scrollTop, inNews: !!a.closest('section') && a.closest('section').querySelector('header h2').textContent.trim() }
+      })
+      if (!/^news$/i.test(String(seen.inNews))) fail('DESK-LAYOUT', `the focused marker is in ${JSON.stringify(seen.inNews)}, expected News`)
+      if (seen.top < seen.from || seen.bottom > seen.to) fail('DESK-LAYOUT', `after News's end row from the keyboard (the wrapper at ${deep}) the focused marker is at ${seen.top}..${seen.bottom}, outside the wrapper's ${seen.from}..${seen.to} (wrapper now at ${seen.scrollTop})`)
+      await shot('news-marked')
+
+      // PR3b: Security's end row pressed by a screen reader that sends
+      // mouse events alone (NVDA or JAWS in Firefox): a click with detail
+      // 1 on the focused button, with no pointerdown. That is not a
+      // mouse's press: the focus goes on to the marker.
+      const security = column(/^security$/i)
+      const securityRow = security.locator('button[data-caught-up]')
+      if ((await securityRow.count()) !== 1) return fail('DESK-LAYOUT', `the Security column has no end row: ${JSON.stringify(await security.locator('[data-caught-up]').allTextContents())}`)
+      await securityRow.evaluate((el) => {
+        el.scrollIntoView({ block: 'end' })
+        el.focus({ preventScroll: true })
+        el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, detail: 1, view: window }))
+      })
+      if (!(await waitFor(async () => (await security.locator('div[data-caught-up]').count()) === 1, 3000))) return fail('DESK-LAYOUT', `after a screen reader's click on Security's end row the column still draws ${await cardCount(security)} cards`)
+      const onSecurity = () => page.evaluate(() => { const a = document.activeElement; return !!a && a.hasAttribute('data-caught-up') && a.closest('section').querySelector('header h2').textContent.trim() })
+      if (!(await waitFor(async () => /^security$/i.test(String(await onSecurity())), 1000))) fail('DESK-LAYOUT', `after a screen reader's click on Security's end row the focus is on ${await focusedNow(page)} (${JSON.stringify(await onSecurity())}), expected its marker`)
+
+      // PR3b: ⋯ → Mark all as read on the NHL column: its 70 stories go
+      // under the marker, folded, and its "70 new" goes.
+      const newCount = () => nhl.evaluate((el) => { const n = el.querySelector('header [data-new-count]'); return n ? n.textContent.trim() : null })
+      if ((await newCount()) !== '70 new') fail('DESK-LAYOUT', `the NHL header says ${JSON.stringify(await newCount())}, expected "70 new"`)
+      await nhl.locator('button[aria-label="column preferences"]').click()
+      await nhl.locator('[data-column-popover] button[data-mark-all]').click()
+      if (!(await waitFor(async () => (await cardCount(nhl)) === 0, 3000))) return fail('DESK-LAYOUT', `after Mark all the NHL column still draws ${await cardCount(nhl)} cards above the marker`)
+      const caught = ((await nhl.locator('[data-caught-up]').textContent()) || '').trim()
+      if (!/You.re all caught up/.test(caught)) fail('DESK-LAYOUT', `after Mark all the NHL marker reads ${JSON.stringify(caught)}`)
+      const earlier = nhl.locator('button[data-earlier]')
+      if (((await earlier.textContent()) || '').trim() !== 'Earlier (70)' || (await earlier.getAttribute('aria-expanded')) !== 'false') {
+        fail('DESK-LAYOUT', `after Mark all Earlier reads ${JSON.stringify(await earlier.textContent())}, expanded ${await earlier.getAttribute('aria-expanded')}`)
+      }
+      if ((await newCount()) != null) fail('DESK-LAYOUT', `after Mark all the NHL header still says ${JSON.stringify(await newCount())}`)
+      if (!(await page.getByText('Marked 70 as read', { exact: true }).isVisible())) fail('DESK-LAYOUT', 'no "Marked 70 as read" toast')
+      await shot('marked')
     },
   }),
 
@@ -3503,33 +3752,37 @@ module.exports = [
       await toEnd()
       if (!(await waitFor(async () => (await cardCount(column)) === 70, 3000))) return fail('AUTO-APPEND', `after a second scroll to the end the list has ${await cardCount(column)} cards, expected 70`)
       if (await column.locator('[data-more]').count()) fail('AUTO-APPEND', 'the "load more" sentinel is still there with every card rendered')
+      // PR3b: the list ends with the marker; nothing is seen, so it offers
+      // to mark all 70.
+      const end = ((await column.locator('[data-caught-up]').textContent().catch(() => '')) || '').trim()
+      if (end !== '70 not seen · Mark as read') fail('AUTO-APPEND', `the list ends with ${JSON.stringify(end)}, expected "70 not seen · Mark as read"`)
       // The last batch went in below the scroll position: scroll to the
       // end again so the shot shows the last card, where the sentinel was.
       await toEnd()
       await sleep(300)
       const last = await list.evaluate((el) => {
         const cards = el.querySelectorAll('article[data-card-id]')
-        const r = cards[cards.length - 1].getBoundingClientRect()
         const box = el.getBoundingClientRect()
-        return r.bottom > box.top && r.top < box.bottom
+        const inView = (r) => r.bottom > box.top && r.top < box.bottom
+        const marker = el.querySelector('[data-caught-up]')
+        return inView(cards[cards.length - 1].getBoundingClientRect()) && !!marker && inView(marker.getBoundingClientRect())
       })
-      if (!last) fail('AUTO-APPEND', 'the end shot does not show the last card')
+      if (!last) fail('AUTO-APPEND', 'the end shot does not show the last card and the marker')
       await shot('end')
     },
   }),
   // Crossing 768px hands the scroller over without a remount: the phone
   // list carries data-scroller (and is the sentinel root and the
   // tap-to-top target) only on the phone, the wrapper only on the
-  // desktop. The stored section row keeps the Column's memo holding
-  // across the flip, as on any tab whose Fresh or History was ever
-  // toggled, so only a prop the memo compares can re-render it.
+  // desktop. The Column's memo holds across the flip (since PR3b no prop
+  // of the phone Column changes with the width but ``scrollerRef``), so
+  // only a prop the memo compares can re-render it.
   dashFlow('flow-scroller-rotate', {
     widths: [1280],
     wait: 'main.grid article[data-card-id]',
-    before: async ({ page, context }) => {
+    before: async ({ page }) => {
       await withStories(page, moreNhl(67))
       await page.addInitScript(() => localStorage.setItem('popping.v1.mobileTab', 'cat:nhl'))
-      prefMock(context).seed({ 'column_sections:nhl': {} })
     },
     run: async ({ page, fail }) => {
       const scrollers = () =>
@@ -3579,6 +3832,955 @@ module.exports = [
         const r = el.getBoundingClientRect()
         return r.top >= 0 && r.bottom <= innerHeight
       }), 3000))) fail('KEYS-BATCH', 'the selected card was not scrolled into view')
+    },
+  }),
+  // --- PR3b: the read model ----------------------------------------------------
+
+  // Opening a story uses it up (D3): from a tab (a tap, or a middle-click
+  // on the headline), from search and from the desktop For You row, each
+  // open sends one PATCH adding the story's id under its category's seen:
+  // key, and the tab's badge drops by one while the list doesn't move. A
+  // story opened just before the page hides still goes out, in the hide's
+  // keepalive PATCH.
+  dashFlow('flow-open-marks-seen', {
+    before: async ({ page }) => {
+      await installClock(page)
+    },
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      await tap(page, phoneTab(page, /^news/i))
+      const before = await groupIds(page, 'unseen')
+      if (before.length !== 12) return fail('OPEN-SEEN', `News shows ${before.length} stories above the marker, expected 12`)
+      if ((await badge(page, /^news/i)) !== '12') fail('OPEN-SEEN', `the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "12"`)
+      const first = before[0]
+      await openStory(page, first)
+      if (!(await waitFor(() => seenAdded(writes, 'news').includes(first), 3000))) return fail('OPEN-SEEN', `opening story ${first} sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      if ((await badge(page, /^news/i)) !== '11') fail('OPEN-SEEN', `after an open the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "11"`)
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(before)) fail('OPEN-SEEN', `the list moved: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if ((await markerText(page)) !== '11 not seen · Mark as read') fail('OPEN-SEEN', `the end row reads ${JSON.stringify(await markerText(page))}`)
+      const log = await harnessLog(page)
+      if (!log.opened.some((o) => o.target === '_blank')) fail('OPEN-SEEN', 'the headline opened nothing')
+
+      // A middle-click on a headline opens a background tab with no click
+      // event (an auxclick): it uses the story up just the same.
+      const third = before[2]
+      await page.locator(`${MOBILE_MAIN} article[data-card-id="${third}"] a[aria-label="open in new tab"]`).first().click({ button: 'middle' })
+      if (!(await waitFor(() => seenAdded(writes, 'news').includes(third), 3000))) fail('OPEN-SEEN', `a middle-click on story ${third}'s headline sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      if (!(await harnessLog(page)).opened.some((o) => o.middle)) fail('OPEN-SEEN', 'the middle-click opened nothing')
+      if ((await badge(page, /^news/i)) !== '10') fail('OPEN-SEEN', `after a middle-click the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "10"`)
+      // So does a middle-click on a story's Reddit thread (104 has one).
+      if (before.slice(0, 3).includes(104)) return fail('OPEN-SEEN', `story 104 is among the first three: ${JSON.stringify(before)}`)
+      await page.locator(`${MOBILE_MAIN} article[data-card-id="104"] a[href*="reddit.com"]`).first().click({ button: 'middle' })
+      if (!(await waitFor(() => seenAdded(writes, 'news').includes(104), 3000))) fail('OPEN-SEEN', `a middle-click on story 104's Reddit thread sent no PATCH adding it to seen:news: ${JSON.stringify(writes)}`)
+      if (!(await harnessLog(page)).opened.some((o) => o.middle && o.url.includes('reddit.com'))) fail('OPEN-SEEN', 'the middle-click on the Reddit thread opened nothing')
+      if ((await badge(page, /^news/i)) !== '9') fail('OPEN-SEEN', `after a middle-click on the Reddit thread the News badge reads ${JSON.stringify(await badge(page, /^news/i))}, expected "9"`)
+
+      // From search: the story's own category, whatever the results show.
+      await tap(page, page.locator('button[aria-label="open search"]'))
+      await page.locator('#app-search').fill('Pettersson')
+      const result = page.locator('main article[data-card-id="601"]').first()
+      await result.waitFor({ state: 'visible' })
+      await tap(page, result.locator('a[aria-label="open in new tab"]').first())
+      if (!(await waitFor(() => seenAdded(writes, 'nhl').includes(601), 3000))) fail('OPEN-SEEN', `opening a search result sent no PATCH adding 601 to seen:nhl: ${JSON.stringify(writes)}`)
+      await tap(page, page.locator('button[aria-label="clear search"]'))
+      await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
+
+      // Opened, then the page hides at once: the 1 s batch can't run (the
+      // clock is held), so only the hide's keepalive PATCH carries it.
+      const second = before[1]
+      const now = await page.evaluate(() => Date.now())
+      await page.clock.pauseAt(now + 1000)
+      await openStory(page, second)
+      await setHidden(page, true)
+      const keptAlive = () =>
+        harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'PATCH' && decodeURIComponent(f.path) === '/api/preferences/seen:news' && f.keepalive))
+      if (!(await waitFor(keptAlive, 3000))) fail('OPEN-SEEN', 'hiding right after an open sent no keepalive PATCH of seen:news')
+      if (!(await waitFor(() => (prefMock(page.context()).value('seen:news') || []).includes(second), 3000))) fail('OPEN-SEEN', `story ${second}, opened as the page hid, never reached the store`)
+      await setHidden(page, false)
+      await page.clock.resume()
+
+      // A middle-click on a podcast's Listen uses the episode up too.
+      await tap(page, phoneTab(page, /^podcast/i))
+      const episode = await page.locator(`${MOBILE_MAIN} [data-group="unseen"] article[data-card-id]`).filter({ has: page.locator('a[href$=".mp3"]') }).first().getAttribute('data-card-id')
+      if (!episode) return fail('OPEN-SEEN', 'no unseen podcast episode with a Listen link')
+      await page.locator(`${MOBILE_MAIN} article[data-card-id="${episode}"] a[href$=".mp3"]`).first().click({ button: 'middle' })
+      if (!(await waitFor(() => seenAdded(writes, 'podcast').includes(Number(episode)), 3000))) fail('OPEN-SEEN', `a middle-click on episode ${episode}'s Listen sent no PATCH adding it to seen:podcast: ${JSON.stringify(writes)}`)
+      if (!(await harnessLog(page)).opened.some((o) => o.middle && o.url.endsWith('.mp3'))) fail('OPEN-SEEN', 'the middle-click on Listen opened nothing')
+
+      // The desktop For You row (no marker, no dimming there: C2).
+      await page.setViewportSize({ width: 1280, height: 800 })
+      const row = page.locator('section').filter({ visible: true, has: page.locator('header h2', { hasText: /^For You$/ }) })
+      await row.waitFor({ state: 'visible' })
+      await row.locator('article[data-card-id="301"] a[aria-label="open in new tab"]').first().click()
+      if (!(await waitFor(() => seenAdded(writes, 'security').includes(301), 3000))) fail('OPEN-SEEN', `opening a card in the desktop For You row sent no PATCH adding 301 to seen:security: ${JSON.stringify(writes)}`)
+      await shot('desktop')
+    },
+  }),
+
+  // A tab's badge: the unseen count, capped at 99+ on screen, the full
+  // count in the tab's name for a screen reader ("<tab>, N new"), and
+  // none at 0. Saved holds three saves no one has seen, and still has no
+  // badge, and no read model at all: no marker, no C8 row, no Earlier, no
+  // dimmed card and no Mark all.
+  dashFlow('flow-badge-cap', {
+    before: async ({ page, context }) => {
+      await withStories(page, moreNhl(100))
+      prefMock(context).seed({ starred_entries: [601, 602, 603] })
+    },
+    run: async ({ page, fail }) => {
+      const nhl = phoneTab(page, /^nhl/i)
+      const name = () => nhl.getAttribute('aria-label')
+      if ((await badge(page, /^nhl/i)) !== '99+') fail('BADGE', `the NHL tab's badge reads ${JSON.stringify(await badge(page, /^nhl/i))} with 103 unseen, expected "99+"`)
+      if (!/^nhl, 103 new$/i.test((await name()) || '')) fail('BADGE', `the NHL tab is named ${JSON.stringify(await name())}, expected "NHL, 103 new"`)
+      if (!/^news, 12 new$/i.test((await phoneTab(page, /^news/i).getAttribute('aria-label')) || '')) fail('BADGE', `the News tab is named ${JSON.stringify(await phoneTab(page, /^news/i).getAttribute('aria-label'))}`)
+
+      // Saved: three unseen saves, no badge, no read model.
+      const saved = phoneTab(page, /^saved/i)
+      if (!(await waitFor(() => saved.isVisible(), 3000))) return fail('BADGE', 'no Saved tab')
+      if ((await saved.locator('[data-badge]').count()) || (await saved.getAttribute('aria-label'))) {
+        fail('BADGE', `the Saved tab has a badge ${JSON.stringify(await badge(page, /^saved/i))}, named ${JSON.stringify(await saved.getAttribute('aria-label'))}`)
+      }
+      await tap(page, saved)
+      if (!(await waitFor(async () => (await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()) === 3, 3000))) return fail('BADGE', `Saved shows ${await page.locator(`${MOBILE_MAIN} article[data-card-id]`).count()} cards, expected its 3 saves`)
+      for (const [what, sel] of [['a marker', '[data-caught-up]'], ["C8's row", '[data-next-tab]'], ['Earlier', 'button[data-earlier]'], ['an Earlier group', '[data-group="earlier"]']]) {
+        if (await page.locator(`${MOBILE_MAIN} ${sel}`).count()) fail('BADGE', `Saved has ${what}`)
+      }
+      const opacities = await page.locator(`${MOBILE_MAIN} article[data-card-id]`).evaluateAll((els) => els.map((el) => getComputedStyle(el).opacity))
+      if (opacities.some((o) => Number(o) < 0.99)) fail('BADGE', `a card on Saved is dimmed: opacity ${JSON.stringify(opacities)}`)
+      const savedMore = page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`)
+      if (await savedMore.count()) {
+        await tap(page, savedMore)
+        await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+        if (await page.locator(`${MOBILE_MAIN} [data-column-popover] [data-mark-all]`).count()) fail('BADGE', "Saved's ⋯ offers Mark all as read")
+        await tap(page, savedMore)
+      }
+
+      await tap(page, nhl)
+      const first = (await groupIds(page, 'unseen'))[0]
+      await openStory(page, first)
+      if (!(await waitFor(async () => /, 102 new$/.test((await name()) || ''), 3000))) fail('BADGE', `after an open the NHL tab is named ${JSON.stringify(await name())}, expected "NHL, 102 new"`)
+      if ((await badge(page, /^nhl/i)) !== '99+') fail('BADGE', `after an open the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}`)
+      // Mark all: no badge, no count in the name.
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-mark-all]`))
+      if (!(await waitFor(async () => (await badge(page, /^nhl/i)) === '' && (await name()) === null, 3000))) fail('BADGE', `after Mark all the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))} and the tab is named ${JSON.stringify(await name())}`)
+    },
+  }),
+
+  // The end of a tab (D4, D24): with stories still unseen it reads "N not
+  // seen · Mark as read"; opening two leaves them in place and counts them
+  // out; one tap on the row marks the rest, with Undo, and leaves the
+  // focus alone (a finger's press). Undo puts them back above
+  // the marker. Marked again from the keyboard with Earlier open, Earlier
+  // folds (a new snapshot of the same Column) and the focus is on the
+  // marker. Marked, the tab opens on the marker, with Earlier (N) folded
+  // under it, also after leaving it and coming back.
+  dashFlow('flow-caught-up', {
+    before: async ({ page }) => {
+      await withStories(page, moreNhl(37))
+    },
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await phoneListToEnd(page))) return fail('CAUGHT-UP', 'the NHL list never finished loading')
+      const all = await groupIds(page, 'unseen')
+      if (all.length !== 40) return fail('CAUGHT-UP', `the NHL tab draws ${all.length} stories, expected 40`)
+      if ((await markerText(page)) !== '40 not seen · Mark as read') fail('CAUGHT-UP', `the end row reads ${JSON.stringify(await markerText(page))}`)
+      if (await page.locator(PHONE_EARLIER).count()) fail('CAUGHT-UP', 'Earlier shows with nothing seen')
+      if (await page.locator(`${MOBILE_MAIN} [data-next-tab]`).count()) fail('CAUGHT-UP', "C8's row shows while stories are unseen")
+      const rowBox = await page.locator(PHONE_MARKER).boundingBox()
+      if (!rowBox || rowBox.height < 43.5) fail('CAUGHT-UP', `the end row is ${rowBox && rowBox.height}px tall`)
+      if (await page.locator(`${PHONE_LIST} [role="status"]`).count()) fail('CAUGHT-UP', 'a row in the list is role="status"')
+
+      // Two opened: they stay where they are and the row counts them out.
+      await openStory(page, all[0])
+      await openStory(page, all[1])
+      if (!(await waitFor(async () => (await markerText(page)) === '38 not seen · Mark as read', 3000))) fail('CAUGHT-UP', `after two opens the end row reads ${JSON.stringify(await markerText(page))}`)
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(all)) fail('CAUGHT-UP', 'opening stories moved the list')
+      await shot('not-seen')
+
+      // One tap on the row marks the other 38, with Undo.
+      await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, el.scrollHeight))
+      await tap(page, page.locator(PHONE_MARKER))
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('CAUGHT-UP', `after Mark as read ${(await groupIds(page, 'unseen')).length} stories are still above the marker`)
+      if (!/^✓\s*You.re all caught up$/.test(await markerText(page))) fail('CAUGHT-UP', `after Mark as read the marker reads ${JSON.stringify(await markerText(page))}`)
+      if (!(await page.getByText('Marked 38 as read', { exact: true }).isVisible())) fail('CAUGHT-UP', 'no "Marked 38 as read" toast')
+      const rest = all.slice(2)
+      const sameSet = (a, b) => JSON.stringify([...a].sort((x, y) => x - y)) === JSON.stringify([...b].sort((x, y) => x - y))
+      if (!(await waitFor(() => sameSet(seenAdded(writes, 'nhl'), all), 3000))) return fail('CAUGHT-UP', `seen:nhl got ${JSON.stringify(seenAdded(writes, 'nhl'))}, expected all 40`)
+      // A tap is a finger's press, not the keyboard's or a screen
+      // reader's: Chromium focused the row on the tap (an iPhone doesn't),
+      // but the focus is not handed to the marker in its place.
+      if ((await focusedNow(page)) === 'DIV[data-caught-up]') fail('CAUGHT-UP', 'after a tap on Mark as read the focus went to the marker')
+      await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
+      // The tab starts over at its first 30: load the rest.
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length > 0, 3000))) return fail('CAUGHT-UP', 'Undo brought nothing back above the marker')
+      await phoneListToEnd(page)
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(rest), 3000))) fail('CAUGHT-UP', `after Undo the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the 38 marked`)
+      if (!(await waitFor(() => sameSet(seenRemoved(writes, 'nhl'), rest), 3000))) fail('CAUGHT-UP', `Undo removed ${JSON.stringify(seenRemoved(writes, 'nhl'))}, expected exactly the 38 it added`)
+      const earlierAfterUndo = await textNow(page, PHONE_EARLIER)
+      if (earlierAfterUndo !== 'Earlier (2)') fail('CAUGHT-UP', `after Undo Earlier reads ${JSON.stringify(earlierAfterUndo)}, expected the two opened`)
+
+      // Earlier opened, then marked again from the keyboard: Earlier folds
+      // with the new snapshot (the same Column, no tab switch), and the
+      // focus goes to the marker, not to <body>.
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length === 2, 3000))) fail('CAUGHT-UP', `Earlier (2) opened shows ${(await groupIds(page, 'earlier')).length} cards`)
+      await phoneListToEnd(page)
+      await page.locator(PHONE_MARKER).focus()
+      await page.keyboard.press('Enter')
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('CAUGHT-UP', 'the second Mark as read left stories above the marker')
+      if (!(await waitFor(async () => (await focusedNow(page)) === 'DIV[data-caught-up]', 1000))) fail('CAUGHT-UP', `after Mark as read from the keyboard the focus is on ${await focusedNow(page)}, expected the marker`)
+      if ((await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) !== 'false' || (await groupIds(page, 'earlier')).length) {
+        fail('CAUGHT-UP', `after the second Mark as read Earlier is expanded ${await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')} with ${(await groupIds(page, 'earlier')).length} cards drawn, expected it folded`)
+      }
+
+      // Then away to News and back: the tab opens on the marker, Earlier
+      // (40) folded under it.
+      await tap(page, phoneTab(page, /^news/i))
+      await tap(page, phoneTab(page, /^nhl/i))
+      await page.locator(PHONE_MARKER).waitFor({ state: 'visible' })
+      const first = await page.locator(PHONE_LIST).evaluate((el) => (el.firstElementChild && el.firstElementChild.hasAttribute('data-caught-up')) || false)
+      if (!first) fail('CAUGHT-UP', 'back on the tab, the marker is not the first thing in the list')
+      const earlier = page.locator(PHONE_EARLIER)
+      if (((await earlier.textContent()) || '').trim() !== 'Earlier (40)' || (await earlier.getAttribute('aria-expanded')) !== 'false') {
+        fail('CAUGHT-UP', `back on the tab Earlier reads ${JSON.stringify(await earlier.textContent())}, expanded ${await earlier.getAttribute('aria-expanded')}`)
+      }
+      if ((await badge(page, /^nhl/i)) !== '') fail('CAUGHT-UP', `the NHL badge still reads ${JSON.stringify(await badge(page, /^nhl/i))}`)
+      await shot('caught-up')
+    },
+  }),
+
+  // C8: under a caught-up tab's marker, one 44px row names the next shown
+  // tab with stories not seen yet and opens it (2 taps from the strip). A
+  // hidden tab is never named, and with every tab at 0 the row is gone.
+  // The strip without a stored order: … Deals, News, Nhl, Podcast,
+  // Security, Video. Podcast holds 2 stories from the last 48 h; its
+  // other 3 count as seen (D33).
+  dashFlow('flow-next-tab', {
+    before: async ({ context }) => {
+      prefMock(context).seed({ 'seen:nhl': idsOf('nhl') })
+    },
+    run: async ({ page, fail, shot }) => {
+      const next = page.locator(`${MOBILE_MAIN} [data-next-tab]`)
+      const nextText = () => textNow(page, `${MOBILE_MAIN} [data-next-tab]`)
+      // A reload with `rows` in the store; the shown tab may have no card
+      // above its marker, so wait for the strip.
+      const reloadWith = async (rows) => {
+        prefMock(page.context()).seed(rows)
+        await page.reload()
+        await page.locator(`${STRIP} [aria-selected="true"]`).waitFor({ state: 'visible' })
+        await waitFor(() => answered(page, 'GET', '/api/preferences'), 3000)
+      }
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(() => next.isVisible(), 3000))) return fail('NEXT-TAB', 'no next-tab row under the caught-up NHL tab')
+      if (!/You.re all caught up/.test(await markerText(page))) fail('NEXT-TAB', `the NHL marker reads ${JSON.stringify(await markerText(page))}`)
+      const podcast = await badge(page, /^podcast/i)
+      if ((await nextText()) !== `Podcast · ${podcast}` || podcast !== '2') fail('NEXT-TAB', `the row reads ${JSON.stringify(await nextText())}, expected "Podcast · 2"`)
+      // Named like the tab in the strip, for VoiceOver.
+      if ((await next.getAttribute('aria-label')) !== 'Podcast, 2 new') fail('NEXT-TAB', `the row is named ${JSON.stringify(await next.getAttribute('aria-label'))}, expected "Podcast, 2 new"`)
+      const box = await next.boundingBox()
+      if (!box || box.height < 43.5) fail('NEXT-TAB', `the row is ${box && box.height}px tall`)
+      await shot('row')
+      await tap(page, next)
+      if (!/^podcast/i.test(await selectedTab(page))) fail('NEXT-TAB', `the row opened ${JSON.stringify(await selectedTab(page))}, expected Podcast`)
+      if ((await storedTab(page)) !== 'cat:podcast') fail('NEXT-TAB', `the stored tab is ${JSON.stringify(await storedTab(page))}`)
+      taps(page, 2, 'NEXT-TAB')
+
+      // Podcast hidden: the row skips it.
+      await reloadWith({ category_layout: { v: 1, order: [], hidden: ['cat:podcast'] } })
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(() => next.isVisible(), 3000))) return fail('NEXT-TAB', 'no next-tab row with Podcast hidden')
+      const security = await badge(page, /^security/i)
+      if ((await nextText()) !== `Security · ${security}` || !security) fail('NEXT-TAB', `with Podcast hidden the row reads ${JSON.stringify(await nextText())}, expected "Security · ${security}"`)
+
+      // Every tab at 0: no row, so the end of the tab is the end.
+      const everything = {}
+      for (const cat of ['news', 'deals', 'security', 'podcast', 'video', 'nhl']) everything[`seen:${cat}`] = idsOf(cat)
+      await reloadWith({ ...everything, category_layout: { v: 1, order: [], hidden: [] } })
+      await tap(page, phoneTab(page, /^nhl/i))
+      await page.locator(PHONE_MARKER).waitFor({ state: 'visible' })
+      await sleep(300)
+      if (await next.count()) fail('NEXT-TAB', `with every tab at 0 the row still reads ${JSON.stringify(await nextText())}`)
+      if (await page.locator(`${STRIP} [data-badge]`).count()) fail('NEXT-TAB', 'a tab still has a badge with everything seen')
+      await shot('end')
+    },
+  }),
+
+  // ⋯ → Mark all as read (2 taps from the top of a tab): the tab's stories
+  // go under the marker, folded, with one PATCH per seen: key and
+  // "Marked N as read" with Undo, and the focus goes back to ⋯ (tapped,
+  // and from the keyboard). Undo removes exactly those marks and puts the
+  // stories back above the marker, in their order. At 0 the row is
+  // disabled.
+  dashFlow('flow-mark-all-read', {
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      await tap(page, phoneTab(page, /^news/i))
+      const before = await groupIds(page, 'unseen')
+      const more = page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`)
+      const markAll = page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-mark-all]`)
+      await tap(page, more)
+      await markAll.waitFor({ state: 'visible' })
+      const firstRow = await page.locator(`${MOBILE_MAIN} [data-column-popover]`).evaluate((el) => !!el.firstElementChild && el.firstElementChild.hasAttribute('data-mark-all'))
+      if (!firstRow) fail('MARK-ALL', "Mark all as read is not the ⋯'s first row")
+      const box = await markAll.boundingBox()
+      if (!box || box.height < 43.5) fail('MARK-ALL', `Mark all as read is ${box && box.height}px tall`)
+      await tap(page, markAll)
+      taps(page, 3, 'MARK-ALL')
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('MARK-ALL', 'Mark all left stories above the marker')
+      // The row held the focus and went with the popover: the focus is
+      // back on ⋯, not on <body>.
+      const onMore = 'BUTTON[data-column-action][aria-label="column preferences"]'
+      if ((await focusedNow(page)) !== onMore) fail('MARK-ALL', `after Mark all the focus is on ${await focusedNow(page)}, expected ⋯`)
+      const earlier = page.locator(PHONE_EARLIER)
+      if (((await earlier.textContent()) || '').trim() !== `Earlier (${before.length})` || (await earlier.getAttribute('aria-expanded')) !== 'false') {
+        fail('MARK-ALL', `after Mark all Earlier reads ${JSON.stringify(await earlier.textContent())}, expanded ${await earlier.getAttribute('aria-expanded')}`)
+      }
+      if ((await badge(page, /^news/i)) !== '') fail('MARK-ALL', `after Mark all the News badge reads ${JSON.stringify(await badge(page, /^news/i))}`)
+      if (!(await page.getByText(`Marked ${before.length} as read`, { exact: true }).isVisible())) fail('MARK-ALL', `no "Marked ${before.length} as read" toast`)
+      const sorted = (a) => JSON.stringify([...a].sort((x, y) => x - y))
+      if (!(await waitFor(() => sorted(seenAdded(writes, 'news')) === sorted(before), 3000))) return fail('MARK-ALL', `seen:news got ${JSON.stringify(seenAdded(writes, 'news'))}`)
+
+      // Undo while its toast is up (5 s): no screenshot before the tap,
+      // which with --out can take longer than that under load.
+      await tap(page, page.getByRole('button', { name: 'Undo', exact: true }))
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(before), 3000))) fail('MARK-ALL', `after Undo the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected ${JSON.stringify(before)}`)
+      if (await page.locator(PHONE_EARLIER).count()) fail('MARK-ALL', 'after Undo Earlier is still there')
+      if ((await badge(page, /^news/i)) !== String(before.length)) fail('MARK-ALL', `after Undo the News badge reads ${JSON.stringify(await badge(page, /^news/i))}`)
+      if (!(await waitFor(() => sorted(seenRemoved(writes, 'news')) === sorted(before), 3000))) fail('MARK-ALL', `Undo removed ${JSON.stringify(seenRemoved(writes, 'news'))}, expected exactly what Mark all added`)
+      if (await page.getByText('Column restored.').count()) fail('MARK-ALL', 'Undo showed a second toast')
+
+      // Marked again, from the keyboard (focus back on ⋯ again); at 0 the
+      // ⋯'s row is disabled.
+      await more.focus()
+      await page.keyboard.press('Enter')
+      await markAll.waitFor({ state: 'visible' })
+      await markAll.focus()
+      await page.keyboard.press('Enter')
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 0, 3000))) return fail('MARK-ALL', 'the second Mark all left stories above the marker')
+      if ((await focusedNow(page)) !== onMore) fail('MARK-ALL', `after Mark all from the keyboard the focus is on ${await focusedNow(page)}, expected ⋯`)
+      // The marked tab and its toast; no Undo follows this one.
+      await shot('marked')
+      await tap(page, more)
+      await markAll.waitFor({ state: 'visible' })
+      if (!(await markAll.isDisabled())) fail('MARK-ALL', 'Mark all as read is enabled with nothing left to mark')
+    },
+  }),
+
+  // A story that arrives with a poll goes at the end of the unseen ones
+  // (not the top), and counts at once. While the marker is above the
+  // screen (Earlier open and read past it) the next one waits, counted,
+  // so nothing is pushed down under the reader; back at the top, it goes
+  // in at the end. Meanwhile the rows under the marker stay as drawn
+  // (scroll anchoring off, as on Safari): another tab's first story
+  // doesn't bring C8's row in, and this tab's arrival doesn't turn
+  // "You're all caught up" into "1 not seen" or take C8's row away,
+  // until the marker is back on screen.
+  dashFlow('flow-new-arrival-appends', {
+    before: async ({ page, context }) => {
+      await withStories(page, moreNhl(37))
+      await withArrivals(page)
+      // Every NHL story but the two newest is seen: Earlier holds 38.
+      const ids = [...idsOf('nhl'), ...moreNhl(37).map((e) => e.id)]
+      prefMock(context).seed({ 'seen:nhl': ids.filter((id) => id !== 601 && id !== 602) })
+    },
+    run: async ({ page, fail, shot }) => {
+      const poll = async (story) => {
+        await page.evaluate((st) => window.__arrivals.push(st), story)
+        const landed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+        await startPoll(page)
+        await landed
+        await sleep(400)
+      }
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== '[601,602]') return fail('ARRIVAL', `the NHL tab opens with ${JSON.stringify(await groupIds(page, 'unseen'))} above the marker`)
+      await poll(arrivalNhl(7901))
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === '[601,602,7901]', 3000))) return fail('ARRIVAL', `after an arrival the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the newest at the end`)
+      if ((await badge(page, /^nhl/i)) !== '3') fail('ARRIVAL', `the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}, expected "3"`)
+      if ((await markerText(page)) !== '3 not seen · Mark as read') fail('ARRIVAL', `the end row reads ${JSON.stringify(await markerText(page))}`)
+      await shot('arrived')
+
+      // Earlier open, scrolled so the marker is 300px above the screen.
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length > 0, 3000))) return fail('ARRIVAL', 'Earlier did not open')
+      const list = page.locator(PHONE_LIST)
+      await list.evaluate((el) => {
+        const m = el.querySelector('[data-caught-up]')
+        el.scrollTop += m.getBoundingClientRect().bottom - el.getBoundingClientRect().top + 300
+      })
+      if (!(await markerAbove(list))) return fail('ARRIVAL', 'scrolled 300px past the marker, the app never saw it above the screen')
+      const anchor = await list.evaluate((el) => {
+        const top = el.getBoundingClientRect().top
+        const card = [...el.querySelectorAll('[data-group="earlier"] article[data-card-id]')].find((a) => a.getBoundingClientRect().bottom > top + 1)
+        return card ? { id: card.getAttribute('data-card-id'), top: card.getBoundingClientRect().top } : null
+      })
+      if (!anchor) return fail('ARRIVAL', 'no Earlier card on screen')
+      await poll(arrivalNhl(7902))
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== '[601,602,7901]') fail('ARRIVAL', `with the marker above the screen the arrival went in: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if ((await badge(page, /^nhl/i)) !== '4') fail('ARRIVAL', `the held arrival isn't counted: the badge reads ${JSON.stringify(await badge(page, /^nhl/i))}`)
+      const moved = await list.evaluate((el, id) => el.querySelector(`article[data-card-id="${id}"]`).getBoundingClientRect().top, anchor.id)
+      if (Math.abs(moved - anchor.top) > 1) fail('ARRIVAL', `the card being read moved from ${anchor.top} to ${moved}`)
+      await shot('held')
+
+      await list.evaluate((el) => el.scrollTo(0, 0))
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === '[601,602,7901,7902]', 3000))) fail('ARRIVAL', `back at the top the held arrival did not go in at the end: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+
+      // The rows between the marker and Earlier stay put too while the
+      // marker is above the screen, with scroll anchoring off as on
+      // Safari. NHL caught up, every other tab at 0: no C8 row.
+      const everything = { 'seen:nhl': [...idsOf('nhl'), ...moreNhl(37).map((e) => e.id)] }
+      for (const cat of ['news', 'deals', 'security', 'podcast', 'video']) everything[`seen:${cat}`] = idsOf(cat)
+      prefMock(page.context()).seed(everything)
+      await page.reload()
+      await page.locator(`${STRIP} [aria-selected="true"]`).waitFor({ state: 'visible' })
+      await waitFor(() => answered(page, 'GET', '/api/preferences'), 3000)
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(async () => /You.re all caught up/.test(await markerText(page)), 3000))) return fail('ARRIVAL', `the caught-up NHL tab's marker reads ${JSON.stringify(await markerText(page))}`)
+      const next = page.locator(`${MOBILE_MAIN} [data-next-tab]`)
+      if (await next.count()) return fail('ARRIVAL', `with every tab at 0 C8's row reads ${JSON.stringify(await next.textContent())}`)
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length >= 30, 3000))) return fail('ARRIVAL', 'Earlier did not open on the caught-up tab')
+      // The marker 300px above the screen; the first Earlier card on
+      // screen is the one being read.
+      const above = () =>
+        list.evaluate((el) => {
+          el.style.overflowAnchor = 'none'
+          const m = el.querySelector('[data-caught-up]')
+          el.scrollTop += m.getBoundingClientRect().bottom - el.getBoundingClientRect().top + 300
+        })
+      const reading = () =>
+        list.evaluate((el) => {
+          const top = el.getBoundingClientRect().top
+          const card = [...el.querySelectorAll('[data-group="earlier"] article[data-card-id]')].find((a) => a.getBoundingClientRect().top > top + 1)
+          return card ? { id: card.getAttribute('data-card-id'), top: card.getBoundingClientRect().top } : null
+        })
+      const stayed = async (was, what) => {
+        const now = await list.evaluate((el, id) => el.querySelector(`article[data-card-id="${id}"]`).getBoundingClientRect().top, was.id)
+        if (Math.abs(now - was.top) > 1) fail('ARRIVAL', `${what}: the Earlier card being read moved from ${was.top} to ${now}`)
+      }
+      await above()
+      if (!(await markerAbove(list))) return fail('ARRIVAL', 'on the caught-up tab the app never saw the marker above the screen')
+      let read = await reading()
+      if (!read) return fail('ARRIVAL', 'no Earlier card on screen')
+      // Another tab's first story: C8's row would come in above the reader.
+      await poll(arrival(7911, 103))
+      if (!(await waitFor(async () => (await badge(page, /^news/i)) === '1', 3000))) fail('ARRIVAL', `the News arrival isn't counted: the News badge reads ${JSON.stringify(await badge(page, /^news/i))}`)
+      await stayed(read, 'with the marker above the screen a News story arrived')
+      if (await next.count()) fail('ARRIVAL', "with the marker above the screen C8's row came in")
+      await shot('end-rows-held')
+      await list.evaluate((el) => el.scrollTo(0, 0))
+      if (!(await waitFor(async () => (await textNow(page, `${MOBILE_MAIN} [data-next-tab]`)) === 'News · 1', 3000))) return fail('ARRIVAL', `back at the top C8's row reads ${JSON.stringify(await textNow(page, `${MOBILE_MAIN} [data-next-tab]`))}, expected "News · 1"`)
+
+      // This tab's own arrival, held: the count goes from 0 to 1, which
+      // would turn the marker into "1 not seen" and take C8's row away.
+      await above()
+      if (!(await markerAbove(list))) return fail('ARRIVAL', 'back past the marker, the app never saw it above the screen')
+      read = await reading()
+      if (!read) return fail('ARRIVAL', 'no Earlier card on screen')
+      await poll(arrivalNhl(7912))
+      if (!(await waitFor(async () => (await badge(page, /^nhl/i)) === '1', 3000))) fail('ARRIVAL', `the held NHL arrival isn't counted: the badge reads ${JSON.stringify(await badge(page, /^nhl/i))}`)
+      if ((await groupIds(page, 'unseen')).length) fail('ARRIVAL', `with the marker above the screen the arrival went in: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      await stayed(read, 'with the marker above the screen an NHL story arrived')
+      if (!(await next.count())) fail('ARRIVAL', "with the marker above the screen C8's row went")
+      await list.evaluate((el) => el.scrollTo(0, 0))
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === '[7912]', 3000))) fail('ARRIVAL', `back at the top the held arrival did not go in: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if (!(await waitFor(async () => (await markerText(page)) === '1 not seen · Mark as read' && !(await next.count()), 3000))) fail('ARRIVAL', `back at the top the end reads ${JSON.stringify(await markerText(page))} with C8's row ${(await next.count()) ? 'still there' : 'gone'}`)
+    },
+  }),
+
+  // A story that arrives when the unseen cards drawn fill whole batches
+  // (30 of 30): once every unseen card has been drawn the list grows with
+  // the arrival at once, so the marker and an open Earlier never leave
+  // the page for a frame while a batch waits for the "load more"
+  // sentinel (and the list never jumps when they come back).
+  dashFlow('flow-arrival-batch-edge', {
+    before: async ({ page, context }) => {
+      await withStories(page, moreNhl(30))
+      await withArrivals(page)
+      // 33 NHL stories, the three oldest seen: 30 unseen, Earlier (3).
+      prefMock(context).seed({ 'seen:nhl': moreNhl(30).slice(-3).map((e) => e.id) })
+    },
+    run: async ({ page, fail, shot }) => {
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 30 && (await markerText(page)) === '30 not seen · Mark as read', 3000))) {
+        return fail('BATCH-EDGE', `the NHL tab draws ${(await groupIds(page, 'unseen')).length} unseen cards and ends with ${JSON.stringify(await markerText(page))}, expected 30 and the marker`)
+      }
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length === 3, 3000))) return fail('BATCH-EDGE', 'Earlier (3) did not open')
+      // The marker on screen, so the arrival isn't held.
+      await page.locator(PHONE_MARKER).evaluate((el) => el.scrollIntoView({ block: 'center' }))
+      await sleep(400)
+      await page.locator(PHONE_LIST).evaluate((list) => {
+        window.__lost = []
+        new MutationObserver(() => {
+          if (!list.querySelector('[data-caught-up]')) window.__lost.push('the marker')
+          if (!list.querySelector('[data-group="earlier"]')) window.__lost.push('Earlier')
+        }).observe(list, { childList: true, subtree: true })
+      })
+      await page.evaluate((st) => window.__arrivals.push(st), arrivalNhl(7921))
+      const landed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await landed
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 31, 3000))) return fail('BATCH-EDGE', `after an arrival the tab draws ${(await groupIds(page, 'unseen')).length} unseen cards, expected 31`)
+      await sleep(400)
+      const ids = await groupIds(page, 'unseen')
+      if (ids[ids.length - 1] !== 7921) fail('BATCH-EDGE', `the arrival is not drawn last: ${JSON.stringify(ids.slice(-3))}`)
+      const lost = await page.evaluate(() => [...new Set(window.__lost)])
+      if (lost.length) fail('BATCH-EDGE', `${lost.join(' and ')} left the page when the 31st story arrived`)
+      if ((await markerText(page)) !== '31 not seen · Mark as read') fail('BATCH-EDGE', `the end row reads ${JSON.stringify(await markerText(page))}`)
+      if (await page.locator(`${MOBILE_MAIN} [data-more]`).count()) fail('BATCH-EDGE', 'a "load more" sentinel came back for the arrival')
+      await shot('arrived')
+    },
+  }),
+
+  // Earlier opens when the keyboard selection moves into it. A new
+  // snapshot (`r`) folds it again with the selection inside, and so does
+  // its button; either way the selection goes with it, so `h`, `b`, `s`
+  // and Enter can't act on a card that isn't drawn (Enter reaches the
+  // focused Earlier button instead), and the next ArrowDown starts at
+  // the column's first card.
+  dashFlow('flow-earlier-keys-fold', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page, context }) => {
+      prefMock(context).seed({ 'seen:nhl': [602, 603] })
+      await recordInteractions(page)
+    },
+    run: async ({ page, fail }) => {
+      const grid = await gridLabels(page)
+      const at = grid.findIndex((l) => /^nhl$/i.test(l))
+      if (at < 0) return fail('EARLIER-KEYS', `no NHL column in ${JSON.stringify(grid)}`)
+      const nhl = page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: /^nhl$/i }) })
+      const button = nhl.locator('button[data-earlier]')
+      const expanded = () => button.getAttribute('aria-expanded')
+      const drawn = () => nhl.locator('[data-group="earlier"] article[data-card-id]').count()
+      const selected = () => nhl.locator('article[data-card-id][tabindex="0"]').evaluateAll((els) => els.map((el) => ({ id: el.getAttribute('data-card-id'), earlier: !!el.closest('[data-group="earlier"]') })))
+      const intoEarlier = async (what) => {
+        if (!(await waitFor(async () => { const s = await selected(); return s.length === 1 && s[0].earlier }, 3000))) {
+          fail('EARLIER-KEYS', `${what} selected ${JSON.stringify(await selected())}, expected Earlier's first card`)
+          return false
+        }
+        if ((await expanded()) !== 'true') fail('EARLIER-KEYS', `${what}: the selection moved into Earlier and it stayed folded`)
+        return true
+      }
+      // Folded, nothing of Earlier is drawn, so whether the selection went
+      // with it can't be read off the page (a selected card that isn't
+      // drawn has no tabindex either): the steps after each fold show it
+      // by what the keys do.
+      const folded = async (what) => {
+        if (!(await waitFor(async () => (await expanded()) === 'false' && (await drawn()) === 0, 3000))) {
+          fail('EARLIER-KEYS', `${what} with the selection inside left Earlier expanded ${await expanded()} with ${await drawn()} cards drawn, expected it folded`)
+        }
+      }
+      // With no selection the next ArrowDown starts at the column's first
+      // card (still on the card in Earlier, it would go on to 603).
+      const downTo601 = async (what) => {
+        await page.keyboard.press('ArrowDown')
+        if (!(await waitFor(async () => JSON.stringify(await selected()) === '[{"id":"601","earlier":false}]', 3000))) fail('EARLIER-KEYS', `${what} ArrowDown selected ${JSON.stringify(await selected())}, expected the column's first card, 601`)
+      }
+      await button.waitFor({ state: 'visible' })
+      if ((await expanded()) !== 'false') fail('EARLIER-KEYS', 'Earlier (2) starts open')
+      for (let i = 0; i < at; i++) await page.keyboard.press('ArrowRight')
+      // The one unseen card, then Earlier's first.
+      await page.keyboard.press('ArrowDown')
+      await page.keyboard.press('ArrowDown')
+      if (!(await intoEarlier('two ArrowDowns'))) return
+
+      // Refresh with nothing new: a new snapshot, which folds Earlier
+      // (the selection inside didn't move, so it doesn't open it again).
+      await page.keyboard.press('r')
+      if (!(await waitFor(() => page.locator('[role="status"]').getByText('Nothing new', { exact: true }).isVisible(), 3000))) fail('EARLIER-KEYS', 'r showed no "Nothing new"')
+      await folded('r')
+      await downTo601('after the fold')
+      if ((await expanded()) !== 'false') fail('EARLIER-KEYS', 'ArrowDown onto the unseen card opened Earlier')
+
+      // Into Earlier again, then its button folds it.
+      await page.keyboard.press('ArrowDown')
+      if (!(await intoEarlier('ArrowDown from 601'))) return
+      // No shortcut reaches the card that went with the fold, not even an
+      // `h` sent in the same task as the click (straight after React's
+      // own flush of it): only a drop made in that flush, from a layout
+      // effect, is in time for it.
+      const sent = page._events.length
+      await button.evaluate((b) => {
+        b.click()
+        queueMicrotask(() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'h', bubbles: true })))
+      })
+      await folded('the Earlier button')
+      for (const key of ['b', 's']) await page.keyboard.press(key)
+      await sleep(400)
+      const acted = page._events.slice(sent)
+      if (acted.length) fail('EARLIER-KEYS', `with Earlier folded, h, b and s sent ${JSON.stringify(acted)}`)
+      const label = ((await button.textContent()) || '').trim()
+      if (label !== 'Earlier (2)') fail('EARLIER-KEYS', `with Earlier folded, h made it ${JSON.stringify(label)}`)
+      if (await page.locator('[role="status"]').getByText(/^(Hidden|Saved for later)/).count()) fail('EARLIER-KEYS', 'with Earlier folded, h or b showed a toast')
+      // Enter is the focused Earlier button's own again.
+      await button.focus()
+      await page.keyboard.press('Enter')
+      if (!(await waitFor(async () => (await expanded()) === 'true' && (await drawn()) === 2, 3000))) return fail('EARLIER-KEYS', `Enter on the focused Earlier button left it expanded ${await expanded()} with ${await drawn()} cards drawn`)
+      // s didn't open the summary of the card that went with the fold.
+      if (await nhl.locator('[data-group="earlier"] button[aria-label="hide summary"]').count()) fail('EARLIER-KEYS', "with Earlier folded, s opened a story's summary")
+      // And the button's fold dropped the selection.
+      await downTo601('after the Earlier button and Enter')
+    },
+  }),
+
+  // C1: back after 10 minutes or more away, every tab starts over (what
+  // was opened goes under the marker, Earlier folded, and a story that
+  // came in while away is sorted in first) and the list is at its top.
+  // Under 10 minutes nothing moves, and nothing moves either when the
+  // page hid right after opening a story, however long it was away. When
+  // the return's refresh is slow, a story opened, a scroll, a finger on
+  // the glass, a click alone, a key or the wheel before it lands keeps
+  // the list as it is: the late stories go at the end.
+  dashFlow('flow-return-after-10-min', {
+    before: async ({ page }) => {
+      await installClock(page)
+      await withArrivals(page)
+    },
+    run: async ({ page, fail, shot }) => {
+      // The entries request after `gate()` waits until `gate.open()`, as
+      // a resumed iPhone's does: its refresh always takes longer than a
+      // frame.
+      let held = null
+      let waiting = false
+      const gate = () => {
+        waiting = false
+        held = new Promise((resolve) => {
+          gate.open = resolve
+        })
+      }
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries',
+        async (route) => {
+          const wait = held
+          held = null
+          if (wait) {
+            waiting = true
+            await wait
+          }
+          return route.fallback()
+        },
+      )
+      const land = async () => {
+        const landed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+        gate.open()
+        await landed
+        await sleep(600)
+      }
+
+      await tap(page, phoneTab(page, /^news/i))
+      const list = page.locator(PHONE_LIST)
+      const scrollTop = () => list.evaluate((el) => el.scrollTop)
+      const before = await groupIds(page, 'unseen')
+      const first = before[0]
+      await openStory(page, first)
+      // Past the 2 s open guard (the 1 s batch sends the mark meanwhile).
+      await page.clock.runFor(3000)
+      if (!(await waitFor(() => (prefMock(page.context()).value('seen:news') || []).includes(first), 3000))) return fail('RETURN', 'the open never reached the store')
+      await list.evaluate((el) => el.scrollTo(0, 400))
+
+      await away(page, 9)
+      await sleep(800)
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(before)) fail('RETURN', 'back after 9 min the list moved')
+      if (Math.abs((await scrollTop()) - 400) > 2) fail('RETURN', `back after 9 min the list is at ${await scrollTop()}, expected 400`)
+
+      // A News story arrives while the app is away: the return's refresh
+      // brings it, and the tab, started over again when it lands, has it
+      // first (newest first), not appended at the end.
+      // The return's own jump to the top (from 400) sends a scroll event
+      // before its refresh lands: that isn't the user, so it calls nothing
+      // off.
+      await page.evaluate((st) => window.__arrivals.push(st), arrival(7951, 103))
+      await list.evaluate((el) => {
+        window.__atTop = false
+        el.addEventListener('scroll', () => {
+          if (el.scrollTop === 0) window.__atTop = true
+        })
+      })
+      gate()
+      await away(page, 11)
+      if (!(await waitFor(() => waiting, 3000))) return fail('RETURN', "back after 11 min the return's refresh never started")
+      if (!(await waitFor(() => page.evaluate(() => window.__atTop), 3000))) fail('RETURN', "back after 11 min the return's scroll to the top sent no scroll event")
+      await land()
+      const rest = [7951, ...before.filter((id) => id !== first)]
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(rest), 3000))) fail('RETURN', `back after 11 min the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected the arrival first, then all but the opened one`)
+      const earlier = page.locator(PHONE_EARLIER)
+      if ((await textNow(page, PHONE_EARLIER)) !== 'Earlier (1)' || (await earlier.getAttribute('aria-expanded')) !== 'false') fail('RETURN', 'back after 11 min the opened story is not folded under Earlier (1)')
+      if (!(await waitFor(async () => (await scrollTop()) === 0, 3000))) fail('RETURN', `back after 11 min the list is at ${await scrollTop()}, expected its top`)
+      await shot('reset')
+
+      // Opened (a card in view, so the tap scrolls nothing), then away at
+      // once: left alone, however long.
+      const now = await groupIds(page, 'unseen')
+      await list.evaluate((el) => el.scrollTo(0, 400))
+      const inView = await list.evaluate((el) => {
+        const box = el.getBoundingClientRect()
+        const card = [...el.querySelectorAll('[data-group="unseen"] article[data-card-id]')].find((a) => {
+          const r = a.getBoundingClientRect()
+          return r.top >= box.top && r.top < box.bottom - 120
+        })
+        return card ? Number(card.getAttribute('data-card-id')) : null
+      })
+      if (inView == null) return fail('RETURN', 'no card in view at 400px')
+      await openStory(page, inView)
+      const at = await scrollTop()
+      await away(page, 11)
+      await sleep(1000)
+      if (JSON.stringify(await groupIds(page, 'unseen')) !== JSON.stringify(now)) fail('RETURN', `back 11 min after opening a story the list moved: ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if (Math.abs((await scrollTop()) - at) > 2) fail('RETURN', `back 11 min after opening a story the list is at ${await scrollTop()}, expected ${at}`)
+
+      // Back after 11 min, the tab starts over at its top, and the return's
+      // refresh is slow (a resumed iPhone). Whatever the user does before
+      // it lands calls off its second reset: what it brings goes at the
+      // end, as a poll's would, and nothing moves under them. The list is
+      // off its top when the page hides, so being at 0 on the way back
+      // shows the return started the tab over.
+      const slowReturn = async (story) => {
+        await page.clock.runFor(3000)
+        await page.evaluate((st) => window.__arrivals.push(st), story)
+        await list.evaluate((el) => el.scrollTo(0, 200))
+        await sleep(300)
+        if ((await scrollTop()) === 0) return false
+        gate()
+        await away(page, 11)
+        if (!(await waitFor(() => waiting, 3000))) return false
+        const reset = await groupIds(page, 'unseen')
+        return reset[0] !== story.id && (await scrollTop()) === 0 ? reset : false
+      }
+
+      // The top story opened before the refresh lands: it is still first,
+      // not under Earlier. Opened with a dispatched middle-click alone, an
+      // auxclick that comes with no pointer, touch, click, key or wheel
+      // event, so none of the input listeners calls the reset off: the
+      // open guards do (openEntry's call-off and the landing's check of
+      // the last open).
+      const shown = await slowReturn(arrival(7952, 103))
+      if (!shown) return fail('RETURN', 'back after 11 min with a slow refresh, the tab did not start over at its top')
+      const earlierWas = await textNow(page, PHONE_EARLIER)
+      const openedWas = (await harnessLog(page)).opened.length
+      await page.locator(`${MOBILE_MAIN} article[data-card-id="${shown[0]}"] a[aria-label="open in new tab"]`).first().dispatchEvent('auxclick', { button: 1 })
+      if ((await harnessLog(page)).opened.length !== openedWas + 1) fail('RETURN', `the middle-click on story ${shown[0]} opened nothing`)
+      await land()
+      const afterOpen = await groupIds(page, 'unseen')
+      if (afterOpen[0] !== shown[0]) fail('RETURN', `story ${shown[0]}, opened before the return's refresh landed, moved: the list starts ${JSON.stringify(afterOpen.slice(0, 3))}`)
+      if ((await textNow(page, PHONE_EARLIER)) !== earlierWas) fail('RETURN', `the opened story went under Earlier: ${JSON.stringify(await textNow(page, PHONE_EARLIER))}, was ${JSON.stringify(earlierWas)}`)
+      if (afterOpen[afterOpen.length - 1] !== 7952) fail('RETURN', `the story the late refresh brought is not at the end: ${JSON.stringify(afterOpen.slice(-3))}`)
+
+      // The list scrolled (a finger, or VoiceOver's scroll, which sends no
+      // touch) before the refresh lands: it stays as it is.
+      const before2 = await slowReturn(arrival(7953, 103))
+      if (!before2) return fail('RETURN', 'the second slow return did not start the tab over at its top')
+      if (!(await scrolledTo(list, 300))) return fail('RETURN', 'scrolled to 300 after the second slow return, the list sent no scroll event')
+      await land()
+      const afterScroll = await groupIds(page, 'unseen')
+      if (JSON.stringify(afterScroll) !== JSON.stringify([...before2, 7953])) fail('RETURN', `scrolled before the return's refresh landed, the list became ${JSON.stringify(afterScroll)}, expected ${JSON.stringify([...before2, 7953])}`)
+      if (Math.abs((await scrollTop()) - 300) > 2) fail('RETURN', `scrolled to 300 before the refresh landed, the list is at ${await scrollTop()}`)
+
+      // A finger resting on the top card when the refresh lands (no move,
+      // no open, no scroll): nothing moves under it.
+      const before3 = await slowReturn(arrival(7954, 103))
+      if (!before3) return fail('RETURN', 'the third slow return did not start the tab over at its top')
+      const foldWas = await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')
+      const release = await restFinger(page, page.locator(`${MOBILE_MAIN} article[data-card-id="${before3[0]}"]`))
+      await land()
+      const afterTouch = await groupIds(page, 'unseen')
+      await release()
+      if (JSON.stringify(afterTouch) !== JSON.stringify([...before3, 7954])) fail('RETURN', `with a finger on the list when the return's refresh landed, the list became ${JSON.stringify(afterTouch)}, expected ${JSON.stringify([...before3, 7954])}`)
+      if ((await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) !== foldWas) fail('RETURN', `with a finger on the list when the refresh landed, Earlier went from expanded ${foldWas} to ${await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')}`)
+      if ((await scrollTop()) !== 0) fail('RETURN', `with a finger on the list when the refresh landed, the list moved to ${await scrollTop()}`)
+
+      // The rest of the inputs, each alone before the refresh lands: the
+      // list stays as it is, the late story goes at the end, and the list
+      // stays at its top. A click with no pointer, touch or key (a desktop
+      // screen reader in Firefox opening Earlier sends only mouse events):
+      // Earlier stays open. A bare key (Shift, with the focus on the
+      // page). The wheel turned up with the list at its top, which
+      // scrolls nothing.
+      const stays = async (what, story, before, extra) => {
+        await land()
+        const after = await groupIds(page, 'unseen')
+        if (JSON.stringify(after) !== JSON.stringify([...before, story])) fail('RETURN', `${what} before the return's refresh landed, the list became ${JSON.stringify(after)}, expected ${JSON.stringify([...before, story])}`)
+        if ((await scrollTop()) !== 0) fail('RETURN', `${what} before the refresh landed, the list moved to ${await scrollTop()}`)
+        if (extra) await extra()
+      }
+      const before4 = await slowReturn(arrival(7955, 103))
+      if (!before4) return fail('RETURN', 'the fourth slow return did not start the tab over at its top')
+      const earlierButton = page.locator(PHONE_EARLIER)
+      if ((await earlierButton.getAttribute('aria-expanded')) !== 'false') return fail('RETURN', 'back after the fourth slow return Earlier is not folded')
+      await earlierButton.dispatchEvent('click')
+      if (!(await waitFor(async () => (await earlierButton.getAttribute('aria-expanded')) === 'true' && (await groupIds(page, 'earlier')).length > 0, 3000))) return fail('RETURN', 'a click on "Earlier" did not open it')
+      await stays('with Earlier opened by a click alone', 7955, before4, async () => {
+        if ((await earlierButton.getAttribute('aria-expanded')) !== 'true' || !(await groupIds(page, 'earlier')).length) fail('RETURN', `Earlier, opened by a click before the return's refresh landed, folded: expanded ${await earlierButton.getAttribute('aria-expanded')} with ${(await groupIds(page, 'earlier')).length} cards drawn`)
+      })
+
+      const before5 = await slowReturn(arrival(7956, 103))
+      if (!before5) return fail('RETURN', 'the fifth slow return did not start the tab over at its top')
+      await page.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur())
+      await page.keyboard.press('Shift')
+      await stays('with a key pressed', 7956, before5)
+
+      const before6 = await slowReturn(arrival(7957, 103))
+      if (!before6) return fail('RETURN', 'the sixth slow return did not start the tab over at its top')
+      const box = await list.boundingBox()
+      await page.mouse.move(box.x + box.width / 2, box.y + Math.min(box.height / 2, 200))
+      await page.evaluate(() => {
+        window.__wheeled = false
+        window.addEventListener('wheel', () => { window.__wheeled = true }, { once: true, capture: true })
+      })
+      await page.mouse.wheel(0, -100)
+      if (!(await waitFor(() => page.evaluate(() => window.__wheeled), 3000))) return fail('RETURN', 'the wheel over the list sent no wheel event')
+      await stays('with the wheel turned', 7957, before6)
+    },
+  }),
+  // C1 from deep in Earlier: the marker was far above the screen (the
+  // hold on) when the page hid. Back after 11 min the tab starts over at
+  // its top with more unseen stories than fit, so the marker is now below
+  // the screen, and the hold must be let go although the marker never
+  // crossed the screen's edge: the end row follows the opens, an arrival
+  // goes in at once, and the row doesn't jump off the screen when it is
+  // scrolled to.
+  dashFlow('flow-return-from-earlier', {
+    before: async ({ page, context }) => {
+      await installClock(page)
+      await withStories(page, moreNhl(37))
+      await withArrivals(page)
+      // 40 NHL stories: 601, 602 and the four newest of the rest unseen,
+      // the other 34 seen.
+      const unseen = [601, 602, 7001, 7002, 7003, 7004]
+      prefMock(context).seed({ 'seen:nhl': [...idsOf('nhl'), ...moreNhl(37).map((e) => e.id)].filter((id) => !unseen.includes(id)) })
+    },
+    run: async ({ page, fail, shot }) => {
+      const list = page.locator(PHONE_LIST)
+      const markerTop = () => page.locator(PHONE_MARKER).evaluate((m) => m.getBoundingClientRect().top - m.closest('[data-scroller]').getBoundingClientRect().top)
+      const listHeight = () => list.evaluate((el) => el.clientHeight)
+      await tap(page, phoneTab(page, /^nhl/i))
+      const first = await groupIds(page, 'unseen')
+      if (JSON.stringify(first) !== '[601,602,7001,7002,7003,7004]') return fail('RETURN-EARLIER', `the NHL tab opens with ${JSON.stringify(first)} above the marker`)
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await groupIds(page, 'earlier')).length >= 30, 3000))) return fail('RETURN-EARLIER', 'Earlier did not open')
+      // Deep in Earlier: the marker 600px above the screen, and the app's
+      // observer has seen it there, so the hold is on when the page hides
+      // (with it still off, the return has no hold to let go, and the
+      // flow can't tell the fix from its absence).
+      await list.evaluate((el) => {
+        const m = el.querySelector('[data-caught-up]')
+        el.scrollTop += m.getBoundingClientRect().bottom - el.getBoundingClientRect().top + 600
+      })
+      if (!(await markerAbove(list))) return fail('RETURN-EARLIER', 'deep in Earlier, the app never saw the marker above the screen')
+      if ((await markerTop()) > -600) return fail('RETURN-EARLIER', `the marker is at ${await markerTop()}, expected 600px above the screen`)
+      await page.clock.runFor(3000)
+
+      // A story arrives while away; back after 11 min the tab starts over
+      // at its top: 7 unseen, and the marker below the screen.
+      await page.evaluate((st) => window.__arrivals.push(st), arrivalNhl(7991))
+      await away(page, 11)
+      const reset = [7991, ...first]
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(reset), 3000))) return fail('RETURN-EARLIER', `back after 11 min the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected ${JSON.stringify(reset)}`)
+      if (!(await waitFor(async () => (await list.evaluate((el) => el.scrollTop)) === 0, 3000))) fail('RETURN-EARLIER', `back after 11 min the list is at ${await list.evaluate((el) => el.scrollTop)}, expected its top`)
+      await sleep(400)
+      if ((await markerTop()) < (await listHeight())) return fail('RETURN-EARLIER', `back after 11 min the marker is at ${await markerTop()}, expected below the ${await listHeight()}px list`)
+
+      // Two opens: the badge and the end row (below the screen) both say 5.
+      await openStory(page, 7991)
+      await openStory(page, 601)
+      if (!(await waitFor(async () => (await badge(page, /^nhl/i)) === '5', 3000))) fail('RETURN-EARLIER', `after two opens the NHL badge reads ${JSON.stringify(await badge(page, /^nhl/i))}, expected "5"`)
+      if (!(await waitFor(async () => (await markerText(page)) === '5 not seen · Mark as read', 3000))) fail('RETURN-EARLIER', `after two opens the end row reads ${JSON.stringify(await markerText(page))}, expected "5 not seen · Mark as read"`)
+
+      // A poll brings another: the marker is below the screen, so it goes
+      // in at once, at the end of the unseen ones.
+      await page.evaluate((st) => window.__arrivals.push(st), arrivalNhl(7992))
+      const landed = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await landed
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify([...reset, 7992]), 3000))) fail('RETURN-EARLIER', `with the marker below the screen the arrival waits: the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if (!(await waitFor(async () => (await markerText(page)) === '6 not seen · Mark as read', 3000))) fail('RETURN-EARLIER', `after the arrival the end row reads ${JSON.stringify(await markerText(page))}, expected "6 not seen · Mark as read"`)
+      await shot('arrived')
+
+      // Scrolled to, the end row stays where it was put.
+      await page.locator(PHONE_MARKER).evaluate((m) => m.scrollIntoView({ block: 'center' }))
+      const put = await markerTop()
+      await sleep(600)
+      const now = await markerTop()
+      if (Math.abs(now - put) > 1) fail('RETURN-EARLIER', `the end row, scrolled to at ${put}, moved to ${now}`)
+      if ((await markerText(page)) !== '6 not seen · Mark as read') fail('RETURN-EARLIER', `on screen the end row reads ${JSON.stringify(await markerText(page))}`)
+    },
+  }),
+  // Refresh (the header button; `r` on a keyboard) starts every tab over
+  // once its stories land: an opened story goes under the marker, a story
+  // that came in is sorted in first, Earlier folds again, and the toast
+  // counts what came in ("1 new"), or says "Nothing new". A poll never
+  // does any of this.
+  dashFlow('flow-refresh-resets', {
+    before: async ({ page }) => {
+      // 61 NHL stories, every one unseen, for the last part.
+      await withStories(page, moreNhl(58))
+      await withArrivals(page)
+    },
+    run: async ({ page, fail, shot }) => {
+      await tap(page, phoneTab(page, /^news/i))
+      const before = await groupIds(page, 'unseen')
+      await openStory(page, before[0])
+      await page.evaluate((st) => window.__arrivals.push(st), arrival(7961, 103))
+      // A poll first: the arrival goes at the end, the opened story stays.
+      const polled = page.waitForResponse((r) => new URL(r.url()).pathname === '/api/entries')
+      await startPoll(page)
+      await polled
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify([...before, 7961]), 3000))) fail('REFRESH', `after a poll the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}`)
+      if (await page.locator('[role="status"]').getByText(/^(\d+ new|Nothing new)$/).count()) fail('REFRESH', 'a poll showed a refresh toast')
+      // Refresh: the tab starts over.
+      await page.evaluate((st) => window.__arrivals.push(st), arrival(7962, 103))
+      await tap(page, page.locator('header[data-app-header] button[aria-label="refresh"]'))
+      const want = [7962, 7961, ...before.slice(1)]
+      if (!(await waitFor(async () => JSON.stringify(await groupIds(page, 'unseen')) === JSON.stringify(want), 3000))) fail('REFRESH', `after Refresh the stories above the marker are ${JSON.stringify(await groupIds(page, 'unseen'))}, expected ${JSON.stringify(want)}`)
+      if ((await textNow(page, PHONE_EARLIER)) !== 'Earlier (1)') fail('REFRESH', `after Refresh Earlier reads ${JSON.stringify(await textNow(page, PHONE_EARLIER))}, expected the opened story`)
+      if (!(await waitFor(() => page.locator('[role="status"]').getByText('1 new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "1 new" toast')
+      await shot('refreshed')
+      // Earlier opened, then Refresh again with nothing new: the same
+      // Column (no tab switch) starts over, so Earlier folds again.
+      await tap(page, page.locator(PHONE_EARLIER))
+      if (!(await waitFor(async () => (await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) === 'true' && (await groupIds(page, 'earlier')).length === 1, 3000))) fail('REFRESH', 'Earlier (1) did not open')
+      await tap(page, page.locator('header[data-app-header] button[aria-label="refresh"]'))
+      if (!(await waitFor(() => page.locator('[role="status"]').getByText('Nothing new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "Nothing new" toast')
+      if (!(await waitFor(async () => (await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')) === 'false', 3000)) || (await groupIds(page, 'earlier')).length) {
+        fail('REFRESH', `after the second Refresh Earlier is expanded ${await page.locator(PHONE_EARLIER).getAttribute('aria-expanded')} with ${(await groupIds(page, 'earlier')).length} cards drawn, expected it folded`)
+      }
+      // Every unseen card is drawn (13, one batch), so arrivals would be
+      // drawn at once. A Refresh that brings 20 starts the tab over at its
+      // first 30 instead: the rest wait for the "load more" sentinel.
+      await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, 0))
+      const unseenWas = (await groupIds(page, 'unseen')).length
+      if (unseenWas !== 13) fail('REFRESH', `before the third Refresh the tab draws ${unseenWas} unseen cards, expected 13`)
+      await page.evaluate((rows) => window.__arrivals.push(...rows), Array.from({ length: 20 }, (_, i) => arrival(7970 + i, 103)))
+      await tap(page, page.locator('header[data-app-header] button[aria-label="refresh"]'))
+      if (!(await waitFor(() => page.locator('[role="status"]').getByText('20 new', { exact: true }).isVisible(), 3000))) fail('REFRESH', 'no "20 new" toast')
+      await sleep(400)
+      const drawn = (await groupIds(page, 'unseen')).length
+      const sentinel = await page.locator(`${MOBILE_MAIN} [data-more]`).count()
+      if (drawn !== 30 || sentinel !== 1) fail('REFRESH', `after a Refresh that brought 20 to 13 unseen the tab draws ${drawn} unseen cards ${sentinel ? 'with' : 'without'} a "load more" sentinel, expected its first 30 and the sentinel`)
+
+      // A tab that had drawn two batches of more unseen stories (60 of
+      // 61), one of them opened: the Refresh's snapshot has 60 unseen,
+      // which the old limit already reaches, and still draws its first 30
+      // and the sentinel.
+      await tap(page, phoneTab(page, /^nhl/i))
+      const nhlMore = page.locator(`${MOBILE_MAIN} [data-more]`)
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 30 && (await nhlMore.count()) === 1, 3000))) return fail('REFRESH', `the 61-story NHL tab draws ${(await groupIds(page, 'unseen')).length} unseen cards at first, expected 30 and the sentinel`)
+      await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, el.scrollHeight))
+      if (!(await waitFor(async () => (await groupIds(page, 'unseen')).length === 60, 3000))) return fail('REFRESH', `scrolled to its end the NHL tab draws ${(await groupIds(page, 'unseen')).length} unseen cards, expected 60`)
+      await sleep(400)
+      if ((await groupIds(page, 'unseen')).length !== 60 || (await nhlMore.count()) !== 1) return fail('REFRESH', `the NHL tab went on to ${(await groupIds(page, 'unseen')).length} unseen cards without another scroll`)
+      await openStory(page, 601)
+      await page.locator(PHONE_LIST).evaluate((el) => el.scrollTo(0, 0))
+      await tap(page, page.locator('header[data-app-header] button[aria-label="refresh"]'))
+      // The opened story goes under the marker (not drawn yet: the marker
+      // and Earlier wait for the unseen cards).
+      if (!(await waitFor(async () => !(await groupIds(page, 'unseen')).includes(601) && (await page.locator('[role="status"]').getByText('Nothing new', { exact: true }).isVisible()), 3000))) return fail('REFRESH', `after the NHL Refresh the stories above the marker start ${JSON.stringify((await groupIds(page, 'unseen')).slice(0, 3))}, expected the opened 601 gone from them, and "Nothing new"`)
+      await sleep(400)
+      const nhlDrawn = (await groupIds(page, 'unseen')).length
+      const nhlSentinel = await nhlMore.count()
+      if (nhlDrawn !== 30 || nhlSentinel !== 1) fail('REFRESH', `after a Refresh to 60 unseen with 60 drawn before it, the NHL tab draws ${nhlDrawn} unseen cards ${nhlSentinel ? 'with' : 'without'} a "load more" sentinel, expected its first 30 and the sentinel`)
     },
   }),
 ]

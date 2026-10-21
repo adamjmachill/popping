@@ -12,9 +12,9 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR1c Newest / Best, Reset scope, bookmark on save, Brief AI row | F | merged | #38 |
 | PR2a Preference PATCH routes | B | merged | #28 |
 | PR2b prefSync client and sync rules | F | merged | #40 |
-| PR2c Refuse whole-list PUTs of set keys | B (floating) | in review | #37 |
-| PR3a Desktop single scroller and batching | F | in review | #43 |
-| PR3b Read model | F | not started | |
+| PR2c Refuse whole-list PUTs of set keys | B (floating) | merged | #37 |
+| PR3a Desktop single scroller and batching | F | merged | #43 |
+| PR3b Read model | F | in review | #45 |
 | PR3c Seen on scroll | F | not started | |
 | Gate 1 | owner | | |
 | PR4a Ingest rules, brief guard, On this day | B | merged | #30 |
@@ -53,7 +53,10 @@ Work in progress is pushed to `claude/ux-<unit>` branches as it goes.
 
 - The owner tests on the phone only; no desktop is in use. Device checks are written phone-first, and desktop-only lines say "(If you have a desktop)".
 - PR2c's condition is now that the phone shows the PR2b build in Settings. No browser tab is open on an old build; a browser opened later loads the current build.
-  - Met on 2026-10-21: the phone shows the PR2b build `b6bd7e7f` (20 Oct 21:09). PR2c (#37) is rebased onto main and back in review.
+  - Met on 2026-10-21: the phone shows the PR2b build `b6bd7e7f` (20 Oct 21:09). PR2c merged as #37.
 - The process stays as before: every unit gets the full review, and units with major fixes or risky logic get re-checks. Each unit is built on top of the one before it, so the next can start while the last finishes review.
 - PR10b merged after six review rounds. The owner's real-feed probe (baseline, then 3 hours and a day after deploying) is its final check. PR11a waits for that probe.
 - D34: cards get preview text under the headline, and the Summary arrow stays for the full AI summary. PR5a builds it.
+- **Stop point.** The owner chose to stop after Gate 2 and PR9b. The units still to build are PR3c, PR4c, PR4d, PR5a, PR5b, PR6b, PR6c and PR9b. PR11a (built, #41) merges once the website-feed probe passes. PR7b, PR8a, PR8b, PR11b, PR11c, PR12a and PR12b are not built unless the owner asks later; they depend on each other, so they would be done as one stretch.
+- The owner declined a fix for daily feeds waiting up to a day for their first check after each backend restart (the startup stagger ignores `last_attempt_at`). Not in the plan; left as is.
+- 3-hour website-feed probe (2026-10-21, about 9 h after the e1f0390 update): no feed shows an error. Nine of 14 were checked after the update. Four daily feeds were not due yet; the owner checked them by hand (nothing new) and deleted `bamboohr`. The day-later probe is still to come.

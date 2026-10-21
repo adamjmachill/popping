@@ -7,13 +7,15 @@
 // Layered UX features (each documented at the call site):
 //   - Active source filter chips (multi-select via the Menu)
 //   - Per-column sort/filter popover (the ⋯ button)
-//   - Per-column read/unread state (server-backed preferences)
-//   - New-entry chip in column headers (union of refresh-delta +
-//     last-viewed-delta)
+//   - The read model (PR3b): opening a story uses it up; each tab
+//     shows its unseen stories, then "You're all caught up", then
+//     "Earlier (N)"; the tab badges count what isn't seen yet
+//     (lib/feedOrder.ts, lib/useFeedOrder.ts)
 //   - Search (debounced, replaces columns when query is set)
 //   - Keyboard navigation on desktop (←/→/↑/↓/Enter)
 //   - Tab-visibility-aware polling (pauses when tab is hidden,
-//     force-refresh + reset seen-set when it returns)
+//     refreshes when it returns; after 10 minutes away the tabs start
+//     over at their tops, C1)
 //   - Brief tone picker (terse / narrative / alert)
 //   - Source filter chips in the header
 
@@ -37,13 +39,15 @@ import { Wallpaper } from './components/Wallpaper'
 import { SkeletonGrid } from './components/Skeleton'
 import { Settings } from './components/Settings'
 import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
-import { recordImmediate } from './lib/interactions'
+import { lastStoryOpenAt, noteStoryOpened, recordImmediate } from './lib/interactions'
 import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
 import { fullOrder, moveKey, orderColumns, type Move } from './lib/categories'
 import { isBuiltIn } from './lib/feedRules'
 import { TabsEditor } from './components/TabsEditor'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
-import { useUpdateCheck } from './lib/useUpdateCheck'
+import { useUpdateCheck, type Return } from './lib/useUpdateCheck'
+import { countUnseen, nextTab as findNextTab, seenKey, seenTest, type TabCount } from './lib/feedOrder'
+import { useFeedOrder, type FeedTab } from './lib/useFeedOrder'
 import {
   BRIEF_KEY,
   FILTER_KEY,
@@ -74,9 +78,7 @@ import {
   PREFERENCE_KEYS,
   usePreferences,
   type ColumnPrefsValue,
-  type ColumnSectionsValue,
   type FilterPresetValue,
-  type IdSetKey,
   MAX_PRESETS,
 } from './lib/preferences'
 import { STORAGE_KEYS, safeGetItem, safeRemoveItem, safeSetItem } from './lib/storage'
@@ -88,11 +90,18 @@ const REFRESH_INTERVAL_MS = 60_000
 // of the time. 5 min cuts the request count by 5x for the cost of
 // up-to-5-minute staleness on the status chip.
 const HEALTH_INTERVAL_MS = 5 * 60_000
-// Hidden longer than this → treat return as "fresh start"; the new-
-// entry indicator resets and all entries surface as unread. Without
-// this, returning from a long absence shows nothing flagged (because
-// the seen-set still has the old ids).
-const HIDDEN_RESET_MS = 2 * 60 * 1000
+// C1: back after this long away, every tab starts over (a new snapshot,
+// so what was read goes under the marker and what arrived is sorted in)
+// and the lists go back to their tops. Shorter, nothing moves, so you
+// come back to the same place after reading an article. Time away is
+// measured with Date.now (useUpdateCheck), because timers stop while
+// iOS suspends the page.
+const RETURN_RESET_MS = 10 * 60 * 1000
+// What calls off C1's second reset (``armReturnReset``): the user is
+// already using the page. ``click`` too, for an activation that comes
+// with none of the others (a desktop screen reader in Firefox sends
+// only mouse events, and no pointer events with them).
+const RETURN_INPUTS = ['pointerdown', 'touchstart', 'click', 'keydown', 'wheel'] as const
 
 // Structural equality for the plain JSON objects the API returns
 // (Entry, Source — flat scalars plus at most one nested plain
@@ -172,38 +181,26 @@ function filterScope(sources: Set<string>): string {
   return Array.from(sources).sort().join('\n')
 }
 
-// Per-card manual read-sets (``read_entries:<column name>``) and the
-// hide and save sets have their caps in ``lib/prefSync.ts``: the
-// provider drops the oldest ids past a cap in the same PATCH that
-// adds the new ones, so App never trims a list itself.
-const readEntriesKey = (columnName: string): IdSetKey => `${PREFERENCE_KEYS.readEntries}:${columnName}`
+// Seen marks (``seen:<category>``) and the hide and save sets have
+// their caps in ``lib/prefSync.ts``: the provider drops the oldest ids
+// past a cap in the same PATCH that adds the new ones (ids App fetched
+// last, ``keep``, go last), so App never trims a list itself.
 
-// Upper bound on ``seenEntryIdsRef`` (see its declaration below).
-// Unlike readEntries/hiddenEntries/starredEntries, this set is
-// populated automatically on every poll (not by discrete user
-// actions), so a long-running tab left open for days would
-// otherwise accumulate one id per entry ever fetched, forever, with
-// no eviction. 10,000 is generous headroom over any realistic
-// multi-day session's entry volume while still bounding the set's
-// footprint for an install left open indefinitely.
-const MAX_SEEN_ENTRY_IDS = 10_000
-
-// FIFO-evict a Set down to ``max`` entries, keeping the most
-// recently added ones (Set iteration order is insertion order in
-// JS, so the "oldest" ids are simply whatever comes first).
-function capSetFIFO<T>(set: Set<T>, max: number): Set<T> {
-  if (set.size <= max) return set
-  return new Set(Array.from(set).slice(set.size - max))
+// The first-deploy baseline (D33): when this device first loaded the
+// read model. Stories fetched more than 48 h before it count as seen,
+// locally (nothing is written to the server), so no tab opens at 99+.
+// When storage refuses it, this load's time stands in.
+function loadFirstRunAt(): number {
+  const stored = Number(safeGetItem(STORAGE_KEYS.firstRunAt))
+  if (Number.isFinite(stored) && stored > 0) return stored
+  const now = Date.now()
+  safeSetItem(STORAGE_KEYS.firstRunAt, String(now))
+  return now
 }
 
-
-// Per-column Fresh/History section collapse state. The
-// shape is forgiving on read: a missing column name, a
-// missing field, or a non-boolean value silently falls back to
-// "expanded" so a future shape change can't strand the user with
-// permanently-collapsed sections.
-type SectionCollapse = { newCollapsed: boolean; historyCollapsed: boolean }
-type ColumnSections = Record<string, SectionCollapse>
+// No stories: Saved's (empty) Earlier, and a tab with no partition.
+const NO_ENTRIES: Entry[] = []
+const NO_SECTIONS = { unseen: NO_ENTRIES, earlier: NO_ENTRIES }
 
 // One tab's column: ``key`` names it, ``label`` is what it shows,
 // ``name`` is the id its stored rows are kept under (see
@@ -477,9 +474,6 @@ export function App() {
     inserted: new Map<number, number>(),
     deleted: new Map<number, number>(),
   })
-  // Each refresh's number; a result older than one already applied is
-  // dropped.
-  const refreshSeqRef = useRef(0)
   const appliedRefreshRef = useRef(0)
   const [health, setHealth] = useState<Health | null>(null)
   const [drawerOpen, setDrawerOpen] = useState(false)
@@ -598,9 +592,74 @@ export function App() {
   // The desktop grid, its For You row, framing watch and inline Brief
   // render only at desktop widths; a phone renders only its own layout.
   const isDesktop = useMediaQuery('(min-width: 768px)')
+  // Each tab's snapshot (lib/useFeedOrder.ts, PR3b): what it shows above
+  // and below "You're all caught up", kept still while you read.
+  const feed = useFeedOrder<Entry>()
+  const { resetSnapshot, setHold, latest: latestPart } = feed
+  // Each refresh's number; a result older than one already applied is
+  // dropped. (Declared here: C1's return handler below reads it.)
+  const refreshSeqRef = useRef(0)
+  // C1: the refresh a long return starts resets the tabs again when it
+  // lands (the stories that came in while away are sorted in, not
+  // appended): every refresh numbered above this one does, unless the
+  // user has done anything since the return (below).
+  const resetAfterSeqRef = useRef<number | null>(null)
+  // When that return was (``Date.now``), and what takes its listeners off.
+  const returnAtRef = useRef(0)
+  const disarmRef = useRef<(() => void) | null>(null)
+  // The second reset is called off: the refresh's stories then append or
+  // wait like a poll's, and nothing moves under someone already reading.
+  const disarmReturnReset = useCallback(() => {
+    resetAfterSeqRef.current = null
+    disarmRef.current?.()
+    disarmRef.current = null
+  }, [])
+  // Armed by a long return, until its refresh lands. A touch, a click
+  // (even one that comes alone), a key or the wheel calls it off
+  // (``RETURN_INPUTS``; a story opened from a card starts with one of
+  // these), and so does a list moved off its top (VoiceOver scrolls
+  // without them). The return's own scroll to the top leaves the list at
+  // 0, so it doesn't count.
+  const armReturnReset = useCallback(() => {
+    disarmRef.current?.()
+    resetAfterSeqRef.current = refreshSeqRef.current
+    returnAtRef.current = Date.now()
+    const onInput = () => disarmReturnReset()
+    const onScroll = (e: Event) => {
+      const t = e.target
+      if (t instanceof Element && t.hasAttribute('data-scroller') && t.scrollTop > 0) disarmReturnReset()
+    }
+    for (const t of RETURN_INPUTS) window.addEventListener(t, onInput, { capture: true, passive: true })
+    document.addEventListener('scroll', onScroll, { capture: true, passive: true })
+    disarmRef.current = () => {
+      for (const t of RETURN_INPUTS) window.removeEventListener(t, onInput, { capture: true })
+      document.removeEventListener('scroll', onScroll, { capture: true })
+    }
+  }, [disarmReturnReset])
+  useEffect(() => () => disarmRef.current?.(), [])
+  const scrollersRef = useRef({ phone: phoneScroller, desktop: desktopScroller })
+  scrollersRef.current = { phone: phoneScroller, desktop: desktopScroller }
+  // C1, coming back. PR1r's update check has already started (it may
+  // reload onto a new build). After RETURN_RESET_MS or more away, unless
+  // the page hid within 2 s of opening a story (that story stays put for
+  // ▲ or Save), every tab starts over and the lists go back to their
+  // tops; App's own visibility listener then starts the silent refresh,
+  // which resets the tabs once more when it lands if the user hasn't
+  // done anything meanwhile.
+  const onReturn = useCallback(
+    ({ away, openedBefore }: Return) => {
+      if (away < RETURN_RESET_MS || openedBefore) return
+      resetSnapshot()
+      armReturnReset()
+      const { phone, desktop } = scrollersRef.current
+      phone?.scrollTo({ top: 0 })
+      desktop?.scrollTo({ top: 0 })
+    },
+    [resetSnapshot, armReturnReset],
+  )
   // A newer build on the server: the phone reloads onto it when the user
   // comes back after 10 min away; the desktop shows a Reload button.
-  const update = useUpdateCheck(isDesktop)
+  const update = useUpdateCheck(isDesktop, onReturn)
   const [briefTone, setBriefToneState] = useState<BriefTone>(() => {
     const stored = safeGetItem(STORAGE_KEYS.briefTone)
     return stored === 'narrative' || stored === 'alert' ? stored : 'terse'
@@ -743,10 +802,12 @@ export function App() {
   // an effect (Column's memo keeps old callbacks, so a closure's
   // ``state`` can be renders old).
   const prefs = usePreferences()
+  // Seen marks: ``seen:<category>`` rows (PR3b on) and the legacy
+  // ``read_entries:<column>`` rows older builds wrote (read, never
+  // written; see ``seenIds``).
+  const seenEntries = prefs.state.seenEntries
   const readEntries = prefs.state.readEntries
-  const lastViewed = prefs.state.lastViewed
   const columnPrefs = prefs.state.columnPrefs as Record<string, ColumnPrefs>
-  const columnSections = prefs.state.columnSections as ColumnSections
   const hiddenEntries = prefs.state.hiddenEntries
   const starredEntries = prefs.state.starredEntries
   const votedEntries = prefs.state.votedEntries
@@ -759,19 +820,10 @@ export function App() {
   // Stable references to the provider's calls, aliased so the
   // handlers below read like they did. All stable across renders.
   const { addIds, removeIds, setVotes, latest: latestPrefs } = prefs
-  const setLastViewed: (
-    columnId: string,
-    iso: string,
-  ) => void = prefs.setLastViewed
-  const clearLastViewed: (columnId: string) => void = prefs.clearLastViewed
   const setColumnPrefs: (
     columnId: string,
     prefs: ColumnPrefsValue,
   ) => void = prefs.setColumnPrefs
-  const setColumnSections: (
-    columnId: string,
-    sections: ColumnSectionsValue,
-  ) => void = prefs.setColumnSections
   const setFilterPresets: (presets: FilterPresetValue[]) => void =
     prefs.setFilterPresets
   // ▲ / ▼ on a card (``null`` clears its vote).
@@ -787,20 +839,12 @@ export function App() {
   // are read through ``latestPrefs()`` instead.)
   // The pattern: a tiny useEffect keeps the ref in sync with
   // the state on every render; the handlers read the ref.
-  const lastViewedRef = useRef(lastViewed)
   const columnPrefsRef = useRef(columnPrefs)
-  const columnSectionsRef = useRef(columnSections)
   const filterPresetsRef = useRef(filterPresets)
   const historyGroupByRef = useRef(historyGroupBy)
   useEffect(() => {
-    lastViewedRef.current = lastViewed
-  }, [lastViewed])
-  useEffect(() => {
     columnPrefsRef.current = columnPrefs
   }, [columnPrefs])
-  useEffect(() => {
-    columnSectionsRef.current = columnSections
-  }, [columnSections])
   useEffect(() => {
     filterPresetsRef.current = filterPresets
   }, [filterPresets])
@@ -828,6 +872,15 @@ export function App() {
   // moves (Edit tabs) keeps the selection; null is the first column.
   const [selectedColumnKey, setSelectedColumnKey] = useState<ColKey | null>(null)
   const [selectedCardId, setSelectedCardId] = useState<number | null>(null)
+  // A Column folded Earlier with the selected card inside (its button, or
+  // a new snapshot): the selection goes, so the shortcuts never act on a
+  // card that isn't drawn. Only while it is still that card: a guard
+  // only, since Column calls it from a layout effect of the very commit
+  // in which that card is selected, so no path today reaches it with
+  // another (no flow can pin it). Stable: Column's memo keeps callbacks.
+  const dropSelection = useCallback((entryId: number) => {
+    setSelectedCardId((cur) => (cur === entryId ? null : cur))
+  }, [])
   // Per-card summary expansion. Session-scoped on purpose — the user
   // typically expands once to scan, and re-expanding after a reload
   // is cheap (the column has been refetched and the backend serves
@@ -841,15 +894,6 @@ export function App() {
   // place of them).
   const [shortcutsOpen, setShortcutsOpen] = useState(false)
 
-  // Set of entry ids observed on the previous successful refresh.
-  // Used to compute "new since last refresh" — entries whose id is
-  // not in this set are flagged. ``null`` means "haven't completed a
-  // refresh yet" — the new-entry indicator stays hidden until the
-  // first refresh lands so the initial dashboard load doesn't flag
-  // every entry as new.
-  const seenEntryIdsRef = useRef<Set<number> | null>(null)
-  // When the tab was last hidden. ``null`` while visible.
-  const hiddenAtRef = useRef<number | null>(null)
   // Latest in-flight brief generation's AbortController. Each
   // generate call replaces the ref with a fresh controller so the
   // previous loop sees the abort and exits; the unmount cleanup
@@ -1068,8 +1112,10 @@ export function App() {
   )
 
   // Apply per-column prefs: the age filter, then the tab's sort, once
-  // (the sections below keep this order). Saved is never sorted.
-  const columns = useMemo<Array<TabColumn & { totalCount: number }>>(() => {
+  // (each tab's snapshot keeps this order). Saved is never sorted.
+  // ``order`` names both for the tab's snapshot: a change of either
+  // starts a new one (lib/feedOrder.ts).
+  const columns = useMemo<Array<TabColumn & { order: string }>>(() => {
     const now = Date.now()
     return baseColumns.map((col) => {
       const prefs = prefsFor(col)
@@ -1081,14 +1127,15 @@ export function App() {
           return new Date(e.fetched_at).getTime() >= cutoff
         })
       }
-      filtered = sortEntries(filtered, normalizeSort(prefs.sort, col.key), col.key)
+      const sort = normalizeSort(prefs.sort, col.key)
+      filtered = sortEntries(filtered, sort, col.key)
       return {
         key: col.key,
         name: col.name,
         label: col.label,
         entries: filtered,
         sourceName: col.sourceName,
-        totalCount: col.entries.length,
+        order: `${sort}|${prefs.maxAgeHours ?? 'all'}`,
       }
     })
   }, [baseColumns, prefsFor])
@@ -1107,107 +1154,36 @@ export function App() {
   const selectedKeyColumn: TabColumn | undefined =
     keyIndex >= 0 ? keyColumns[keyIndex] : selectedColumnKey == null ? keyColumns[0] : undefined
 
-  // Read state is stored per-column (``readEntries[columnName]``)
-  // because "mark all read" and its Undo are column-scoped
-  // actions, but the same entry can appear in several columns at
-  // once (For You, its category column, a multi-source filter).
-  // "Read" is a property of the entry, not of any one column it
-  // happens to appear in — so membership here is the UNION of
-  // every column's manual read-set, not just this column's own.
-  // Without this, marking (or hiding, which also marks read) an
-  // entry from For You left it looking unread in its category
-  // column, and vice versa.
-  const globalReadIds = useMemo(() => {
+  // Seen (PR3b, D3): a story is used up once it is opened (or by Mark
+  // all; from PR3c by scrolling past it on the phone). A mark is stored
+  // under the story's category, ``seen:<category>``, wherever it was
+  // seen, so it holds in every tab that shows the story (its category,
+  // For You, a filter, search). Older builds marked stories read per
+  // column (``read_entries:<column>``): those rows still count, and are
+  // never written again.
+  const seenIds = useMemo(() => {
     const out = new Set<number>()
-    for (const ids of Object.values(readEntries)) {
-      for (const id of ids) out.add(id)
+    for (const map of [seenEntries, readEntries]) {
+      for (const ids of Object.values(map)) for (const id of ids) out.add(id)
     }
     return out
-  }, [readEntries])
+  }, [seenEntries, readEntries])
+  // D33: stories fetched more than 48 h before this device's first load
+  // of the read model count as seen too (locally only).
+  const [firstRunAt] = useState(loadFirstRunAt)
+  const isSeen = useMemo(() => seenTest(seenIds, firstRunAt), [seenIds, firstRunAt])
 
-  // New-entry per column. An entry is "new" when it hasn't already
-  // been marked read (from ANY view — see ``globalReadIds`` above)
-  // AND either its id isn't in the seen-set from the previous
-  // refresh, or it's newer than the user's last visit to this
-  // column.
-  //
-  // The read-state exclusion matters because an entry frequently
-  // shows up in more than one place (its category column AND the
-  // For You row, say). Without it, reading something from For You
-  // didn't stop its category column's "+N new" chip from counting
-  // it — the chip would claim N new items, but expanding the
-  // column showed mostly already-read (History) entries, because
-  // the chip and the Fresh/History split were reading two
-  // completely different signals (fetch/visit timing vs. manual
-  // read state).
-  const newCountByColumn = useMemo(() => {
-    const out = new Map<ColKey, number>()
-    const seen = seenEntryIdsRef.current
-    for (const col of columns) {
-      const last = lastViewed[col.name]
-      const lastMs = last ? new Date(last).getTime() : 0
-      let n = 0
-      for (const e of col.entries) {
-        if (globalReadIds.has(e.id)) continue
-        const isNewSinceRefresh = seen != null && !seen.has(e.id)
-        const isNewSinceVisit =
-          lastMs > 0 && e.fetched_at != null && new Date(e.fetched_at).getTime() > lastMs
-        if (isNewSinceRefresh || isNewSinceVisit) n++
-      }
-      if (n > 0) out.set(col.key, n)
-    }
-    return out
-  }, [columns, lastViewed, globalReadIds])
-
-  // Fresh/History split per column. Fresh = the user has not
-  // manually marked this entry read. History = the user has.
-  // Independent of ``lastViewed`` so the column always has
-  // content — a first-time visit (no ``lastViewed`` set)
-  // still shows all entries as Fresh, and a "mark all read"
-  // move (which sets ``lastViewed``) doesn't make the column
-  // body empty. The ``lastViewed`` is still used for the
-  // "N new" chip on the column header, computed separately
-  // in ``newCountByColumn``. ``globalReadIds`` is defined above,
-  // next to ``newCountByColumn``, since both now depend on it.
-  const unreadIdsByColumn = useMemo(() => {
-    const out = new Map<ColKey, Set<number>>()
-    for (const col of columns) {
-      const ids = new Set<number>()
-      for (const e of col.entries) {
-        if (!globalReadIds.has(e.id)) ids.add(e.id)
-      }
-      if (ids.size > 0) out.set(col.key, ids)
-    }
-    return out
-  }, [columns, globalReadIds])
-
-  // New / History split per column. The split happens AFTER the
-  // per-column sort/filter (the ``columns`` memo), and each section
-  // keeps that order: the tab's Newest | Best is the order shown.
-  //
-  // Membership rule (matches ``unreadIdsByColumn``): an entry is
-  // "new" if it isn't in the manual ``readEntries`` set. Everything
-  // else is "history". The Card's ``unread`` prop is derived from
-  // section membership in Column, so we don't need to pass the Set
-  // down anymore.
-  const sectionsByColumn = useMemo(() => {
-    const out = new Map<ColKey, { new: Entry[]; history: Entry[] }>()
-    for (const col of columns) {
-      const unread = unreadIdsByColumn.get(col.key) ?? new Set<number>()
-      const fresh: Entry[] = []
-      const past: Entry[] = []
-      for (const e of col.entries) {
-        if (unread.has(e.id)) fresh.push(e)
-        else past.push(e)
-      }
-      out.set(col.key, { new: fresh, history: past })
-    }
-    return out
-  }, [columns, unreadIdsByColumn])
+  // The stories held now, for a manual refresh's "N new" (the ids held
+  // before its request).
+  const storiesRef = useRef({ entries, forYou })
+  storiesRef.current = { entries, forYou }
 
   // ``silent`` skips the toasts (errors still set the banner): Settings
   // refreshes after adding a feed, and its own "Added …" toast should
-  // stay up instead of being replaced by "refreshed".
+  // stay up instead of being replaced by "Nothing new".
+  // A refresh that isn't silent (Refresh, ``r``) also starts every tab
+  // over once its stories land: what arrived is sorted into place and
+  // what was read goes under the marker. Polls never do.
   // Each refresh also reads what changed in the preferences since the
   // last read (a save made on another device shows within a poll).
   const resyncPrefs = prefs.resync
@@ -1216,6 +1192,7 @@ export function App() {
     void resyncPrefs()
     const seq = ++refreshSeqRef.current
     const startedAt = Date.now()
+    const held = new Set([...storiesRef.current.entries, ...storiesRef.current.forYou].map((x) => x.id))
     let forYouOk = true
     try {
       const sourceArg = activeSources.size > 0 ? Array.from(activeSources) : undefined
@@ -1223,9 +1200,9 @@ export function App() {
       // fetch lets one high-volume or high-scoring category (Hacker
       // News' 5-minute refresh, say) crowd a slower/lower-scoring one
       // out of the response entirely once the table has enough rows
-      // — the category still shows the "+N new" chip (it's fed by
-      // whatever landed) but the column itself renders almost
-      // nothing, because its actual rows never made the cut. The
+      // — the category's tab still shows up, but the column itself
+      // renders almost nothing, because its actual rows never made
+      // the cut. The
       // multi-source filter view doesn't have this problem (it's
       // already scoped to a handful of sources), so only the
       // unfiltered path uses ``perCategoryLimit`` instead of ``limit``.
@@ -1254,23 +1231,6 @@ export function App() {
       const isDeleted = (id: number) => changes.deleted.has(id)
       const e = rawEntries.filter((x) => !isDeleted(x.source_id))
       const fy = rawForYou.filter((x) => !isDeleted(x.source_id))
-      const prevSeen = seenEntryIdsRef.current
-      const newSeen = new Set(e.map((x) => x.id))
-      if (
-        hiddenAtRef.current != null &&
-        Date.now() - hiddenAtRef.current > HIDDEN_RESET_MS
-      ) {
-        // Long absence → reset so everything surfaces as new.
-        seenEntryIdsRef.current = new Set()
-      } else if (prevSeen == null) {
-        // First refresh — don't flag every entry.
-        seenEntryIdsRef.current = newSeen
-      } else {
-        const merged = new Set(prevSeen)
-        for (const id of newSeen) merged.add(id)
-        seenEntryIdsRef.current = capSetFIFO(merged, MAX_SEEN_ENTRY_IDS)
-      }
-      hiddenAtRef.current = null
       setEntries((prev) => reconcileById(prev, e))
       setSources((prev) => {
         const local = new Map(prev.map((row) => [row.id, row]))
@@ -1292,34 +1252,41 @@ export function App() {
       setTabsLoadedFor(filterScope(activeSources))
       setForYouLoaded(forYouOk)
       setError(null)
-      // Surface a brief success toast so the user knows the
-      // pull actually happened — the Refresh button's …→
-      // normal transition is otherwise invisible if the request
-      // was sub-second. The count is the most useful signal:
-      // "0 new" tells the user nothing landed, which is honest
-      // and saves them a second click.
-      const newCount = prevSeen == null
-        ? 0
-        : e.reduce((acc, row) => (prevSeen.has(row.id) ? acc : acc + 1), 0)
-      if (!opts?.silent) toast(newCount > 0 ? `${newCount} new since last refresh` : 'refreshed', 'info')
+      // C1: the refresh a long return started lands: start the tabs
+      // over again, so what came in while away is sorted in. Not when the
+      // user did anything first (``disarmReturnReset``), nor when a story
+      // was opened since the return, by any path: that story stays in its
+      // place for ▲ or Save, as the open guard keeps it.
+      const armed = resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current
+      const afterReturn = armed && lastStoryOpenAt() < returnAtRef.current
+      if (armed) disarmReturnReset()
+      if (!opts?.silent || afterReturn) resetSnapshot()
+      // Surface a brief success toast so the user knows the pull
+      // actually happened: how many stories it brought that weren't
+      // here before it was asked for, or "Nothing new". (PR6b replaces
+      // it with its status row.)
+      if (!opts?.silent) {
+        const fresh = new Set([...e, ...fy].map((x) => x.id).filter((id) => !held.has(id)))
+        toast(fresh.size > 0 ? `${fresh.size} new` : 'Nothing new', 'info')
+      }
     } catch (err) {
       // Plain words, never the raw "<status> for <url>" text.
       const message = errorMessage(err)
       setError(message)
       setFirstRefreshDone(true)
+      // A long return's refresh that failed: the reset on the return
+      // stands; a later poll must not reset again.
+      if (resetAfterSeqRef.current != null && seq > resetAfterSeqRef.current) disarmReturnReset()
       if (!opts?.silent) toast(message, 'error')
     } finally {
       setRefreshing(false)
     }
-  }, [activeSources, resyncPrefs])
+  }, [activeSources, resyncPrefs, resetSnapshot, disarmReturnReset])
   // The latest ``refresh`` for callers that must stay stable: Column's
   // memo ignores callbacks, so it would keep calling an old one with
   // an old filter.
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
-  const manualRefresh = useCallback(() => {
-    void refreshRef.current()
-  }, [])
 
   // Cold path: health pings (DB / sources count). Pulled on
   // its own slower interval so a single 5xx doesn't sit visible
@@ -1365,7 +1332,8 @@ export function App() {
     }
     // Server-backed reading state needs an explicit reset too --
     // the localStorage wipe above only affects what's still
-    // on this device. We DELETE the read marks, last-viewed
+    // on this device. We DELETE the seen marks (``seen:*``, and
+    // the ``read_entries:*`` rows older builds wrote), last-viewed
     // times, column prefs and section folds (every per-column
     // row), plus the History grouping, then reload; the next
     // mount's GET reads what is left. Saves, hides, votes and
@@ -1375,9 +1343,10 @@ export function App() {
     // the rest of the reset (the reload happens regardless).
     const allKeys: string[] = [PREFERENCE_KEYS.historyGroupBy]
     // Per-column keys: the keys we know about from the
-    // current state (writes still queued included) plus the four
+    // current state (writes still queued included) plus the five
     // per-column kinds.
     const perColumnKinds = [
+      PREFERENCE_KEYS.seen,
       PREFERENCE_KEYS.readEntries,
       PREFERENCE_KEYS.lastViewed,
       PREFERENCE_KEYS.columnPrefs,
@@ -1386,7 +1355,9 @@ export function App() {
     const columnIds = new Set<string>()
     const m = latestPrefs()
     for (const k of perColumnKinds) {
-      if (k === PREFERENCE_KEYS.readEntries) {
+      if (k === PREFERENCE_KEYS.seen) {
+        for (const id of Object.keys(m.seenEntries)) columnIds.add(id)
+      } else if (k === PREFERENCE_KEYS.readEntries) {
         for (const id of Object.keys(m.readEntries)) columnIds.add(id)
       } else if (k === PREFERENCE_KEYS.lastViewed) {
         for (const id of Object.keys(m.lastViewed)) columnIds.add(id)
@@ -1496,9 +1467,12 @@ export function App() {
       }
     }
 
+    // (C1's reset on a long return runs before this, from the update
+    // check's listener, which is registered first: useUpdateCheck's
+    // effect runs on App's first commit, this one only once auth is
+    // probed.)
     const onVisibility = () => {
       if (document.visibilityState === 'hidden') {
-        hiddenAtRef.current = Date.now()
         stopPolling()
       } else {
         // Back in front: every preference row, which is also how rows
@@ -1703,6 +1677,106 @@ export function App() {
       ?.scrollIntoView({ inline: 'nearest', block: 'nearest' })
   }, [shownTab, stripOrder])
 
+  // --- The read model (PR3b) -----------------------------------------------
+  // The tabs drawn now, partitioned (lib/feedOrder.ts): the phone's tab
+  // and, on the desktop, every grid column (the phone layout stays
+  // mounted there, hidden, so its tab is drawn too). They are drawn
+  // under a search too, so searching doesn't start a tab over. Saved has
+  // no read model: it lists every save, with no marker. A tab not drawn
+  // starts over the next time it is (a tab switch resets both tabs).
+  // Nothing is kept until the preferences have answered and the first
+  // refresh is done, so the first snapshot sees the stored marks.
+  // The source filter's one column is another tab for each filter, and
+  // again once that filter's own fetch has landed (until then it shows
+  // the unfiltered stories of those feeds): its order names both, so
+  // either starts it over. (PR8b removes the filter.)
+  const asFeedTab = (c: TabColumn & { order: string }): FeedTab<Entry> =>
+    c.key === FILTER_KEY ? { ...c, order: `${c.order}|${activeScope}|${tabsLoadedFor ?? ''}` } : c
+  const drawnTabs: FeedTab<Entry>[] = []
+  if (phoneCol && phoneCol.key !== SAVED_KEY) drawnTabs.push(asFeedTab(phoneCol))
+  if (isDesktop) for (const c of keyColumns) if (c.key !== SAVED_KEY) drawnTabs.push(asFeedTab(c))
+  // Out of a snapshot at once, cached copies too: a hidden story, and
+  // one from a feed that was deleted. (PR5b adds muted feeds here.)
+  const isRemoved = (e: Entry) => hiddenSet.has(e.id) || (sourcesLoaded && !sourcesById.has(e.source_id))
+  const parts = feed.partition(drawnTabs, { isSeen, isRemoved, ready: !prefs.loading && firstRefreshDone })
+  // One count per tab (D4): the partition's for a tab drawn now (held
+  // arrivals and stories a poll dropped included), otherwise the tab's
+  // stories not seen yet. It is the badge, the marker, the md+ "N new"
+  // and C8's. Saved and Brief have none.
+  const countFor = (col: { key: ColKey; entries: Entry[] }) =>
+    col.key === SAVED_KEY ? 0 : (parts.get(col.key)?.unseenCount ?? countUnseen(col.entries, isSeen))
+  // C8: under a caught-up tab's marker, the next tab with stories not
+  // seen yet, walking the strip (``columns`` is ``orderColumns().shown``,
+  // so a hidden tab is never named). One object per tab while its value
+  // holds, so Column's memo can compare it by reference.
+  const tabCounts: TabCount[] = columns
+    .filter((c) => c.key !== SAVED_KEY)
+    .map((c) => ({ key: c.key, label: c.label, count: countFor(c) }))
+  const nextTabsRef = useRef(new Map<string, TabCount>())
+  const nextTabFor = (key: ColKey): TabCount | null => {
+    const found = findNextTab(tabCounts, key)
+    if (!found) return null
+    const kept = nextTabsRef.current.get(key)
+    if (kept && kept.key === found.key && kept.label === found.label && kept.count === found.count) return kept
+    nextTabsRef.current.set(key, found)
+    return found
+  }
+  // A tab's ``sections`` for Column: its partition's, or for Saved every
+  // save above no marker. The same object while nothing changed (Column's
+  // memo compares it by reference).
+  const savedSectionsRef = useRef(NO_SECTIONS)
+  const sectionsFor = (col: { key: ColKey; entries: Entry[] }) => {
+    if (col.key !== SAVED_KEY) return parts.get(col.key)?.sections ?? NO_SECTIONS
+    if (savedSectionsRef.current.unseen !== col.entries) savedSectionsRef.current = { unseen: col.entries, earlier: NO_ENTRIES }
+    return savedSectionsRef.current
+  }
+  // Every story App fetched: a key's oldest marks outside these go first
+  // when it reaches its cap (``pruneIds``), so pruning never brings back
+  // a story still on screen as unseen. (PR4c adds the Saved-by-id cache,
+  // PR4d every wider tab's rows.)
+  const keepIds = useMemo(
+    () => new Set([...entries.map((e) => e.id), ...forYou.map((e) => e.id), ...starredEntries]),
+    [entries, forYou, starredEntries],
+  )
+  const readRefs = useRef({ categoriesBySourceId, keepIds })
+  readRefs.current = { categoriesBySourceId, keepIds }
+  // The one way seen marks are written: each story under its category's
+  // ``seen:`` key, one ``addIds`` per key, synchronously (so a mark made
+  // as the page hides is in the queue its keepalive flush sends). Returns
+  // the ids each key gained, for an Undo. (PR3c's seen-on-scroll collector
+  // drains into this too.)
+  const addSeenMarks = useCallback(
+    (stories: readonly Entry[]) => {
+      const { categoriesBySourceId: cats, keepIds: keep } = readRefs.current
+      const had = latestPrefs().seenEntries
+      const added = new Map<`seen:${string}`, number[]>()
+      for (const e of stories) {
+        const category = cats.get(e.source_id) ?? 'other'
+        if ((had[category] ?? []).includes(e.id)) continue
+        const key = seenKey(category)
+        const ids = added.get(key) ?? []
+        if (!ids.includes(e.id)) ids.push(e.id)
+        added.set(key, ids)
+      }
+      for (const [key, ids] of added) addIds(key, ids, keep)
+      return added
+    },
+    [addIds, latestPrefs],
+  )
+  // Opening a story uses it up (D3), from a tab, the desktop For You row
+  // or search, whichever way out (Card's ``onActivate``). It also stamps
+  // the open for C1's guard and PR1r's (``noteStoryOpened``). Stable:
+  // Column's and Card's memos keep old callbacks.
+  const openEntry = useCallback(
+    (entry: Entry) => {
+      noteStoryOpened()
+      // An open calls off C1's second reset (the story stays in place).
+      disarmReturnReset()
+      addSeenMarks([entry])
+    },
+    [addSeenMarks, disarmReturnReset],
+  )
+
   // Edit tabs: the order and the Show switches (``lib/categories``).
   // Each change is one PUT of the whole ``category_layout``, built from
   // ``latestPrefs()`` so two taps in one tick both count. A move stores
@@ -1823,180 +1897,57 @@ export function App() {
     }
   }, [searchQuery])
 
-  // Per-card mark-read. Hoisted above the keyboard effect so the
-  // ``m`` shortcut (defined further down) can reference it without
-  // tripping TypeScript's "used before declaration" check. Adds the
-  // entry id to the column's manual read-set; ``unreadIdsByColumn``
-  // uses the set to exclude that entry on the next render, dimming
-  // its ring without touching the column-wide ``lastViewed``
-  // timestamp. Idempotent — re-marking a read card is a no-op so the
-  // keyboard ``m`` shortcut stays side-effect free when pressed on
-  // a card the user has already acknowledged.
-  //
-  // Recording the engagement event (``view``) is the caller's job
-  // — the keyboard shortcut and the ✓ button each fire
-  // ``recordImmediate`` themselves so the ranker sees both paths.
-  // This function is a pure UI flip.
-  //
-  // ``useCallback`` so the keyboard-shortcut effect doesn't re-bind
-  // on every render. ``addIds`` is stable across renders.
-
-
-  // Reverse of ``markColumnRead``: remove a set
-  // of ids from ``readEntries[col]`` and clear
-  // ``lastViewed[col]``. Used by the column-mark-read
-  // Undo action. The cleared lastViewed means the
-  // "N new" chip will repopulate on the next
-  // refresh.
+  // Mark all as read's Undo: remove exactly the ids it added, per
+  // ``seen:<category>`` key (a change, not a new list: a mark made
+  // meanwhile, here or on another device, stays), then start the tab
+  // over, so the stories are back above the marker.
   const unmarkColumnRead = useCallback(
-    (columnName: string, ids: number[]) => {
-      if (ids.length === 0) return
-      // A change, not a new list: a mark made meanwhile (here or on
-      // another device) stays.
-      removeIds(readEntriesKey(columnName), ids)
-      // Clear lastViewed for this column so the "N new" chip
-      // repopulates on the next refresh. The provider issues
-      // a DELETE on the server (not a sentinel PUT) so the
-      // row is actually gone.
-      if (columnName in lastViewedRef.current) {
-        clearLastViewed(columnName)
-      }
-      if (seenEntryIdsRef.current != null) {
-        const merged = new Set(seenEntryIdsRef.current)
-        for (const id of ids) merged.delete(id)
-        seenEntryIdsRef.current = merged
-      }
+    (key: ColKey, added: ReadonlyMap<`seen:${string}`, number[]>) => {
+      for (const [k, ids] of added) removeIds(k, ids)
+      resetSnapshot(key)
     },
-    [removeIds, clearLastViewed],
+    [removeIds, resetSnapshot],
   )
 
-  // Reverse of ``markEntryRead``: remove the id
-  // from ``readEntries[col]`` so the entry moves
-  // back to the Fresh section. Used by the
-  // mark-read Undo action on the per-card check
-  // click.
-  const unmarkEntryRead = useCallback(
-    (columnName: string, entryId: number) => {
-      removeIds(readEntriesKey(columnName), [entryId])
-    },
-    [removeIds],
-  )
-
-  // Reverse of ``hideEntry`` / ``toggleHideEntry``
-  // (hide branch): remove the id from
-  // ``hiddenEntries`` so the entry surfaces in
-  // the dashboard again. Used by the hide Undo
-  // action on both the per-card eye button and
-  // the context-menu "Hide this entry" item.
-  // Note: this does NOT reverse the
-  // ``markEntryRead`` that ``toggleHideEntry``
-  // also fires. The user has to tap check Undo
-  // separately to restore the Fresh/History
-  // split. This matches the prior
-  // one-step-at-a-time model.
+  // Reverse of ``hideEntry`` / ``toggleHideEntry`` (hide branch):
+  // remove the id from ``hiddenEntries`` so the entry surfaces in the
+  // dashboard again, in its place (its tab's snapshot kept it). Used by
+  // the hide Undo action on both the per-card eye button and the
+  // context-menu "Hide this entry" item.
   const restoreHiddenEntry = useCallback((entryId: number) => {
     removeIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
   }, [removeIds])
 
-  const markEntryRead = useCallback((columnName: string, entryId: number) => {
-    // A no-op for an id already marked; past the cap the oldest
-    // marks go in the same PATCH (``lib/prefSync.ts``).
-    addIds(readEntriesKey(columnName), [entryId])
-  }, [addIds])
-
-  // The per-card ✓ (and swipe-right) toggles, like Mail: an unread
-  // card is marked read, a read card goes back to unread. "Read" is
-  // the union of every column's read-set (see ``globalReadIds``), so
-  // unread has to clear the id from all of them. Reads
-  // ``latestPrefs()``, not ``globalReadIds``, because Column's memo
-  // keeps old callbacks.
-  const toggleEntryRead = useCallback((columnName: string, entryId: number) => {
-    const readIn = Object.entries(latestPrefs().readEntries)
-      .filter(([, ids]) => ids.includes(entryId))
-      .map(([col]) => col)
-    if (readIn.length === 0) {
-      markEntryRead(columnName, entryId)
-      toast('Marked as read', {
-        kind: 'info',
-        action: { label: 'Undo', onClick: () => unmarkEntryRead(columnName, entryId) },
-      })
-      return
-    }
-    for (const col of readIn) unmarkEntryRead(col, entryId)
-    toast('Marked as unread', {
-      kind: 'info',
-      action: {
-        label: 'Undo',
-        onClick: () => { for (const col of readIn) markEntryRead(col, entryId) },
-      },
-    })
-  }, [latestPrefs, markEntryRead, unmarkEntryRead])
-
   // Hide an entry from every column + the For You row. The
   // entry stays in the DB; it just gets filtered out of the
   // dashboard until the user clears the hidden set (a future
-  // "show hidden" affordance in Settings). Records a ``never``
-  // engagement event so the ranker can also learn the user's
-  // dismissal signal — same pattern as ``markEntryRead``'s
-  // ``view`` event for the "I read this" signal.
+  // "show hidden" affordance in Settings). The caller records a
+  // ``never`` engagement event so the ranker can also learn the
+  // user's dismissal signal.
   const hideEntry = useCallback((entryId: number) => {
     addIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
   }, [addIds])
 
-  // Toggle the eye-button hidden state. When transitioning
-  // from visible -> hidden, ALSO mark the entry read so it
-  // moves to the column's History section. The user can
-  // still scroll the column to find it; the eye button
-  // effectively combines "I read this" + "I never want to
-  // see it in the For You row again".
-  //
-  // The context menu's "Hide this entry" item uses the
-  // bare ``hideEntry`` (above) and is the stronger
-  // "permanently dismiss" affordance — the entry
-  // disappears from every column, surfaces only in
-  // Settings/Hidden.
-  //
-  // The column lookup here uses the currently-selected
-  // column's lastViewed for the mark-read. The user's
-  // exact current column is best-effort (we use
-  // the selected column or the first) because the mark-read flip
-  // is per-column, not per-entry.
+  // Toggle the eye-button hidden state. A hide doesn't mark the story
+  // seen (PR3b: only opening it or Mark all uses a story up); the story
+  // leaves its tab at once and its Undo puts it back in its place.
   const toggleHideEntry = useCallback(
-    (columnName: string, entryId: number) => {
+    (entryId: number) => {
       // ``latestPrefs()``: Column's memo keeps old callbacks, whose
       // render-time hidden set can be out of date.
       const isHidden = latestPrefs().hiddenEntries.includes(entryId)
       if (isHidden) {
-        // Unhide: just remove from the hidden set. Don't
-        // touch readEntries — the entry stays in its
-        // current section (typically History because we
-        // marked it read on the original hide).
         removeIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
         toast('Entry unhidden.', 'info')  // no Undo: the act of un-hiding IS the undo
       } else {
-        // Hide: add to hidden set AND mark read so the
-        // entry moves to the column's History section.
         addIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
-        markEntryRead(columnName, entryId)
         toast('Hidden.', {
           kind: 'info',
-          action: {
-            label: 'Undo',
-            // Undo the WHOLE action, not just the hidden-set half —
-            // this used to only call restoreHiddenEntry, which
-            // unhid the entry but left it marked read, so it stayed
-            // sitting in History instead of returning to Fresh. A
-            // user hitting Undo on "Hidden." expects
-            // the entry back where it was, not half-moved.
-            onClick: () => {
-              restoreHiddenEntry(entryId)
-              unmarkEntryRead(columnName, entryId)
-            },
-          },
+          action: { label: 'Undo', onClick: () => restoreHiddenEntry(entryId) },
         })
       }
     },
-    [latestPrefs, addIds, removeIds, markEntryRead, restoreHiddenEntry, unmarkEntryRead],
+    [latestPrefs, addIds, removeIds, restoreHiddenEntry],
   )
 
   // Star / unstar an entry. Stars are a long-term save-for-later
@@ -2091,8 +2042,8 @@ export function App() {
   )
 
   // Toggle the inline-summary panel for an entry. Independent of
-  // mark-read — expanding a card doesn't mark it, and marking a
-  // card doesn't collapse its summary. ``useCallback`` so the
+  // seen — expanding a card doesn't mark it seen, and marking a
+  // card seen doesn't collapse its summary. ``useCallback`` so the
   // keyboard-shortcut effect can list it as a stable dependency
   // (and so child re-renders are minimized when nothing changes).
   const toggleSummary = useCallback((entryId: number) => {
@@ -2167,34 +2118,28 @@ export function App() {
       } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault()
         const col = selectedKeyColumn
-        if (!col || col.entries.length === 0) return
+        if (!col) return
+        // The column as it is drawn: its unseen stories, then Earlier
+        // (which the Column opens when the selection reaches it).
+        const part = latestPart(col.key)
+        const list = part ? [...part.unseen, ...part.earlier] : col.entries
+        if (list.length === 0) return
         setSelectedColumnKey(col.key)
-        const idx = col.entries.findIndex((e2) => e2.id === selectedCardId)
+        const idx = list.findIndex((e2) => e2.id === selectedCardId)
         const next =
           e.key === 'ArrowDown'
-            ? Math.min(col.entries.length - 1, idx + 1)
+            ? Math.min(list.length - 1, idx + 1)
             : Math.max(0, idx - 1)
-        setSelectedCardId(col.entries[next]?.id ?? null)
+        setSelectedCardId(list[next]?.id ?? null)
       } else if (e.key === 'Enter' && selectedCardId != null) {
         e.preventDefault()
         const card = cardRefs.current.get(selectedCardId)
         const link = card?.querySelector('a')
         link?.click()
-      } else if (e.key === 'm' && selectedCardId != null) {
-        // Mark the selected card read. Mirrors the ✓ button on the
-        // card so keyboard users get the same affordance. Modifier
-        // guards below — Cmd+M minimizes the window on macOS, so we
-        // only fire on bare ``m``.
-        if (e.metaKey || e.ctrlKey || e.altKey) return
-        e.preventDefault()
-        const col = selectedKeyColumn
-        if (!col) return
-        markEntryRead(col.name, selectedCardId)
-        recordImmediate({ entry_id: selectedCardId, type: 'view' })
       } else if (e.key === 's' && selectedCardId != null) {
         // Toggle inline summary on the selected card. Mirrors the
-        // chevron button. Same modifier guards as ``m`` so Cmd+S
-        // (Save Page As) still works when the dashboard has focus.
+        // chevron button. Modifier guards so Cmd+S (Save Page As)
+        // still works when the dashboard has focus.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
         toggleSummary(selectedCardId)
@@ -2228,8 +2173,8 @@ export function App() {
                         )
       } else if (e.key === 'h' && selectedCardId != null) {
         // Toggle the eye button (hide) on the selected card.
-        // ``h`` for hide is the natural mirror of ``m``
-        // (mark read) and ``b`` (bookmark). It conflicts
+        // ``h`` for hide is the natural mirror of ``b``
+        // (bookmark). It conflicts
         // with browser-level shortcuts less often than
         // ``e`` (which is "find previous" in some
         // browsers). Same modifier guards as the other
@@ -2238,8 +2183,6 @@ export function App() {
         // focus.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const col = selectedKeyColumn
-        if (!col) return
         // Mirrors the eye button's onClick (Card.tsx): record the
         // 'never' signal only on the hide direction (not unhide),
         // same guard the button uses. Without this the preference
@@ -2249,11 +2192,12 @@ export function App() {
         if (!hiddenSet.has(selectedCardId)) {
           recordImmediate({ entry_id: selectedCardId, type: 'never' })
         }
-        toggleHideEntry(col.name, selectedCardId)
+        toggleHideEntry(selectedCardId)
       } else if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // Refresh the dashboard. Bare ``r``; Cmd+R / Ctrl+R
         // already triggers the browser reload so we don't fight
-        // it. Same affordance as the header Refresh button.
+        // it. Same affordance as the header Refresh button: it
+        // starts every tab over once the stories land.
         e.preventDefault()
         void refresh()
       }
@@ -2267,7 +2211,7 @@ export function App() {
     selectedKeyColumn,
     selectedCardId,
     searchQuery,
-    markEntryRead,
+    latestPart,
     toggleSummary,
     refresh,
     toggleHideEntry,
@@ -2285,68 +2229,32 @@ export function App() {
     if (el) el.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
   }, [selectedCardId])
 
-  // Slice 21: wrapped in ``useCallback`` so the JSX-passed closures
-  // (``onMarkRead={() => markColumnRead(col.name)}``) can become
-  // stable across renders once we lift them out of inline arrows.
-  // Without this wrap, the inline closures re-allocate every render
-  // and defeat the ``Column.memo`` comparator (slice 21, same
-  // commit). The deps below are the minimum that captures every
-  // state the body reads.
-  const markColumnRead = useCallback((columnName: string) => {
-    // Three updates in one render cycle:
-    //   1. lastViewed[columnName] = now  (chips to 0)
-    //   2. readEntries[columnName] += all current entry ids
-    //      (moves every entry from Fresh to History)
-    //   3. seenEntryIdsRef adds them  (next-refresh delta
-    //      doesn't re-flag them as "new since refresh")
-    //
-    // We read ``latestPrefs()`` (not the closed-over state) so
-    // the Undo removes only what this call added. The marks go
-    // out as one change (``addIds``), so two calls in one tick,
-    // or another device, can't drop each other's.
-    const col = columns.find((c) => c.name === columnName)
-    setLastViewed(columnName, new Date().toISOString())
-    const addedIds: number[] = []
-    if (col) {
-      const cur = latestPrefs().readEntries[columnName] ?? []
-      // Add only ids not already in the set. The
-      // dedup happens in O(n + m) where n is the
-      // column's entry count and m is the existing
-      // set size.
-      const curSet = new Set(cur)
-      const toAdd: number[] = []
-      for (const e of col.entries) {
-        if (!curSet.has(e.id)) toAdd.push(e.id)
-      }
-      if (toAdd.length > 0) {
-        addedIds.push(...toAdd)
-        // Past the key's cap the oldest marks go, never these.
-        addIds(readEntriesKey(columnName), toAdd)
-      }
-      if (seenEntryIdsRef.current != null) {
-        const merged = new Set(seenEntryIdsRef.current)
-        for (const e of col.entries) merged.add(e.id)
-        seenEntryIdsRef.current = merged
-      }
+  // Mark all as read (D4): the ⋯'s first row, and the end row's "N not
+  // seen · Mark as read" (D24). Every story of the tab not seen yet (held
+  // arrivals and stories a poll dropped included) is marked under its
+  // ``seen:<category>`` key, and the tab starts over: they go under
+  // "Earlier". Undo removes exactly the marks this added and starts the
+  // tab over again, so they are back above the marker.
+  //
+  // Slice 21: a ``useCallback`` whose body reads the tab's latest
+  // partition (``latestPart``) and refs, never the render it was made
+  // in: Column's memo keeps old callbacks.
+  const markColumnRead = useCallback((key: ColKey) => {
+    const part = latestPart(key)
+    if (!part || part.unseenIds.length === 0) return
+    const stories: Entry[] = []
+    for (const id of part.unseenIds) {
+      const e = part.snapshot.cache.get(id)
+      if (e) stories.push(e)
     }
-    // Surface the action as an Undo-able toast.
-    // The user can tap Undo to restore the column
-    // to its pre-mark state. We capture
-    // ``addedIds`` and the column name;
-    // the Undo handler unmarks them in lockstep.
-    if (addedIds.length > 0) {
-      toast(`Marked ${addedIds.length} ${addedIds.length === 1 ? 'entry' : 'entries'} as read`, {
-        kind: 'info',
-        action: {
-          label: 'Undo',
-          onClick: () => {
-            unmarkColumnRead(columnName, addedIds)
-            toast('Column restored.', 'info')
-          },
-        },
-      })
-    }
-  }, [columns, latestPrefs, seenEntryIdsRef, setLastViewed, addIds, unmarkColumnRead, toast])
+    const added = addSeenMarks(stories)
+    resetSnapshot(key)
+    const n = stories.length
+    toast(`Marked ${n} as read`, {
+      kind: 'info',
+      action: { label: 'Undo', onClick: () => unmarkColumnRead(key, added) },
+    })
+  }, [latestPart, addSeenMarks, resetSnapshot, unmarkColumnRead])
 
   const toggleSource = useCallback((name: string) => {
     setActiveSources((prev) => {
@@ -2549,57 +2457,13 @@ export function App() {
     setColumnPrefs(columnName, prefs as ColumnPrefsValue)
   }, [setColumnPrefs])
 
-  // Toggle a single section's collapsed bit for a column. Lazily
-  // creates the column's entry on first toggle so the persisted
-  // record stays small (columns the user has never collapsed
-  // don't take up a key at all). The default is "expanded" — we
-  // only ever write when the user explicitly flips the bit, so
-  // the next mount picks up the right state.
-  //
-  // The server-backed store has the same "drop the key when
-  // both bits are false" behavior. The provider's
-  // ``setColumnSections`` replaces the per-column value, so
-  // we just compute the next value (or the empty marker) and
-  // hand it off.
-  const setColumnSection = useCallback((columnName: string, key: 'new' | 'history') => {
-    const cur = columnSectionsRef.current[columnName] ?? { newCollapsed: false, historyCollapsed: false }
-    const flag = key === 'new' ? 'newCollapsed' : 'historyCollapsed'
-    const next: SectionCollapse = { ...cur, [flag]: !cur[flag] }
-    if (!next.newCollapsed && !next.historyCollapsed) {
-      // Both bits are back to false. Persist an empty
-      // object so the loader treats the column as
-      // "both expanded" (it ignores extra keys but
-      // bails on missing ones).
-      setColumnSections(columnName, {} as ColumnSectionsValue)
-    } else {
-      setColumnSections(columnName, next as ColumnSectionsValue)
-    }
-  }, [columnSectionsRef, setColumnSections])
-
-  // Slice 21: memoize the per-column collapse-state lookup so
-  // ``Column.memo`` can skip on reference equality. Without this,
-  // the inline ``sectionsCollapsedFor(col.name)`` call returns a
-  // fresh ``{ new, history }`` object every render and the
-  // comparator's ``===`` check always fails for this prop. Keyed
-  // on the column name + the underlying bits so a real flip
-  // produces a new object identity and the memo correctly
-  // re-renders.
-  const sectionsCollapsedCache = useMemo(() => {
-    const cache: Record<string, { new: boolean; history: boolean }> = {}
-    for (const colName of Object.keys(columnSections)) {
-      const cur = columnSections[colName]
-      cache[colName] = {
-        new: cur?.newCollapsed ?? false,
-        history: cur?.historyCollapsed ?? false,
-      }
-    }
-    return cache
-  }, [columnSections])
-  const sectionsCollapsedFor = useCallback((columnName: string): { new: boolean; history: boolean } => {
-    return (
-      sectionsCollapsedCache[columnName] ?? { new: false, history: false }
-    )
-  }, [sectionsCollapsedCache])
+  // C8's row opens its tab the way the Menu's Jump to column does: the
+  // phone's tab, or the desktop column scrolled into view. Stable: the
+  // row's Column keeps old callbacks, and ``jumpToCategory`` changes
+  // with the columns.
+  const jumpRef = useRef(jumpToCategory)
+  jumpRef.current = jumpToCategory
+  const openTab = useCallback((key: ColKey) => jumpRef.current(key), [])
 
   // The outer div lets us register a per-column ref on a wrapper
   // without breaking the grid layout — the wrapper uses
@@ -2976,10 +2840,9 @@ export function App() {
               searching={searching}
               categoriesBySourceId={categoriesBySourceId}
               faviconBySourceId={faviconBySourceId}
-              readIds={globalReadIds}
+              onOpenEntry={openEntry}
               expandedSummaries={expandedSummaries}
               onToggleSummary={toggleSummary}
-              onMarkRead={(entryId) => toggleEntryRead('Search', entryId)}
               onHide={(entryId) => {
                 hideEntry(entryId)
                 toast('Entry hidden.', {
@@ -2990,7 +2853,7 @@ export function App() {
                   },
                 })
               }}
-              onHideToggle={(entryId) => toggleHideEntry('Search', entryId)}
+              onHideToggle={toggleHideEntry}
               hiddenSet={hiddenSet}
               onStar={(entryId) => {
                 const wasStarred = toggleStarEntry(entryId)
@@ -3052,32 +2915,18 @@ export function App() {
                 )}
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                   {visibleForYou.map((e) => {
-                    // Per-card engagement props. The For You
-                    // row was previously read-only — no
-                    // mark-read, no hide, no star. The user
-                    // could see the personal feed but
-                    // couldn't engage with it. Now every
-                    // card has the full set of per-card
-                    // actions wired to App-level callbacks
-                    // so the user can mark-read, hide, or
-                    // star a For You card the same way
-                    // they would in a category column.
+                    // Per-card engagement props: hide, save and
+                    // vote, the same as in a category column.
+                    // Opening a card uses its story up
+                    // (``onActivate``), here as anywhere. The row
+                    // keeps the server's order and draws no marker
+                    // and no dimming: on the desktop a story is used
+                    // up only by opening it or by Mark all (C2).
                     //
-                    // ``unread`` reflects ``globalReadIds``, the
-                    // union of every column's manual read-set —
-                    // so marking this card read here also dims
-                    // it in its category column, and marking it
-                    // read there dims it here too. The per-column
-                    // lastViewed isn't used here (the For You row
-                    // has no "mark all read" button).
-                    //
-                    // ``selected`` / ``onActivate`` /
-                    // ``cardRef`` are not passed because
-                    // keyboard nav is per-column, not
-                    // per-row, and the For You row is
-                    // not a "column" the user can scroll
-                    // into.
-                    const isRead = globalReadIds.has(e.id)
+                    // ``selected`` / ``cardRef`` are not passed
+                    // because keyboard nav is per-column, not
+                    // per-row, and the For You row is not a
+                    // "column" the user can scroll into.
                     return (
                       <Card
                         key={e.id}
@@ -3085,10 +2934,9 @@ export function App() {
                         sourceName={sourcesById.get(e.source_id)}
                         sourceFaviconPath={faviconBySourceId.get(e.source_id)}
                         category={categoriesBySourceId.get(e.source_id)}
-                        unread={!isRead}
                         expanded={expandedSummaries.has(e.id)}
                         onToggleSummary={() => toggleSummary(e.id)}
-                        onMarkRead={() => toggleEntryRead('For You', e.id)}
+                        onActivate={() => openEntry(e)}
                         onHide={() => {
                           hideEntry(e.id)
                           toast('Entry hidden.', {
@@ -3099,7 +2947,7 @@ export function App() {
                             },
                           })
                         }}
-                        onHideToggle={() => toggleHideEntry('For You', e.id)}
+                        onHideToggle={() => toggleHideEntry(e.id)}
                         hidden={hiddenSet.has(e.id)}
                         onStar={() => {
                           const wasStarred = toggleStarEntry(e.id)
@@ -3136,18 +2984,22 @@ export function App() {
                       label={col.label}
                       sourceName={col.sourceName}
                       sentinelRoot={desktopScroller}
-                      sections={sectionsByColumn.get(col.key) ?? { new: [], history: [] }}
+                      sections={sectionsFor(col)}
+                      unseenCount={countFor(col)}
+                      nextTab={nextTabFor(col.key)}
+                      generation={parts.get(col.key)?.snapshot.generation}
                       sourcesById={sourcesById}
                       sourcesByName={sourcesByName}
                       noOwnFeeds={noOwnFeeds}
                       onAddFeed={openFeeds}
-                      newCount={newCountByColumn.get(col.key)}
-                      onRefresh={manualRefresh}
                       onSourceTap={onSourceTap}
                       selectedId={col.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined}
                       cardRefs={cardRefs}
-                      onMarkRead={() => markColumnRead(col.name)}
-                      onMarkEntryRead={(entryId) => toggleEntryRead(col.name, entryId)}
+                      onOpenEntry={openEntry}
+                      onMarkAll={() => markColumnRead(col.key)}
+                      onOpenTab={openTab}
+                      onHoldChange={(hold) => setHold(col.key, hold)}
+                      onSelectionFolded={dropSelection}
                       onHideEntry={(entryId) => {
                         hideEntry(entryId)
                         toast('Entry hidden.', {
@@ -3158,7 +3010,7 @@ export function App() {
                           },
                         })
                       }}
-                      onHideToggle={(entryId) => toggleHideEntry(col.name, entryId)}
+                      onHideToggle={toggleHideEntry}
                       hiddenSet={hiddenSet}
                       onStarEntry={(entryId) => {
                         const wasStarred = toggleStarEntry(entryId)
@@ -3180,13 +3032,10 @@ export function App() {
                       votedMap={votedMap}
                       prefs={prefsFor(col)}
                       onPrefsChange={(next) => setPrefsFor(col.name, next)}
-                      totalCount={col.totalCount}
                       categoriesBySourceId={categoriesBySourceId}
                       faviconBySourceId={faviconBySourceId}
                       expandedSummaries={expandedSummaries}
                       onToggleSummary={toggleSummary}
-                      sectionsCollapsed={sectionsCollapsedFor(col.name)}
-                      onToggleSection={(key) => setColumnSection(col.name, key)}
                     />
                   </div>
                 ))}
@@ -3236,19 +3085,18 @@ export function App() {
                     </span>
                   </button>
                   {columns.map((c) => {
-                    const newCount = newCountByColumn.get(c.key)
+                    // The badge: how many of the tab's stories aren't
+                    // seen yet (D4), 99+ past 99. None on Saved (and
+                    // Brief has no column). Opening a tab marks nothing.
+                    const count = countFor(c)
                     const shown = c.key === shownTab
                     return (
-                      // Navigation, not mark-read. Merely peeking at a
-                      // column shouldn't drop its "+N new" chip — that
-                      // violates the universal-inbox rule. The column
-                      // header (desktop) and the per-card ✓ button are
-                      // the explicit mark-read affordances.
                       <button
                         type="button"
                         key={c.key}
                         role="tab"
                         aria-selected={shown}
+                        aria-label={count > 0 ? `${c.label}, ${count} new` : undefined}
                         onClick={() => onPhoneTabTap(c.key)}
                         className="group shrink-0 min-h-[44px] flex items-center"
                       >
@@ -3260,13 +3108,14 @@ export function App() {
                           }`}
                         >
                           {c.label}
-                          {!!newCount && (
+                          {count > 0 && (
                             <span
+                              data-badge
                               className={`rounded-full px-1.5 text-[11px] leading-4 font-semibold ${
                                 shown ? 'bg-white/25 text-white' : 'bg-accent-soft text-accent'
                               }`}
                             >
-                              {newCount}
+                              {count > 99 ? '99+' : count}
                             </span>
                           )}
                         </span>
@@ -3316,20 +3165,24 @@ export function App() {
                     columnKey={phoneCol.key}
                     label={phoneCol.label}
                     sourceName={phoneCol.sourceName}
-                    sections={sectionsByColumn.get(phoneCol.key) ?? { new: [], history: [] }}
+                    sections={sectionsFor(phoneCol)}
+                    unseenCount={countFor(phoneCol)}
+                    nextTab={nextTabFor(phoneCol.key)}
+                    generation={parts.get(phoneCol.key)?.snapshot.generation}
                     sourcesById={sourcesById}
                     sourcesByName={sourcesByName}
                     noOwnFeeds={noOwnFeeds}
                     onAddFeed={openFeeds}
-                    newCount={newCountByColumn.get(phoneCol.key)}
-                    onRefresh={manualRefresh}
                     onSourceTap={onSourceTap}
                     selectedId={
                       phoneCol.key === selectedKeyColumn?.key ? selectedCardId ?? undefined : undefined
                     }
                     cardRefs={cardRefs}
-                    onMarkRead={() => markColumnRead(phoneCol.name)}
-                    onMarkEntryRead={(entryId) => toggleEntryRead(phoneCol.name, entryId)}
+                    onOpenEntry={openEntry}
+                    onMarkAll={() => markColumnRead(phoneCol.key)}
+                    onOpenTab={openTab}
+                    onHoldChange={(hold) => setHold(phoneCol.key, hold)}
+                    onSelectionFolded={dropSelection}
                     onHideEntry={(entryId) => {
                       hideEntry(entryId)
                       toast('Entry hidden.', {
@@ -3340,7 +3193,7 @@ export function App() {
                         },
                       })
                     }}
-                    onHideToggle={(entryId) => toggleHideEntry(phoneCol.name, entryId)}
+                    onHideToggle={toggleHideEntry}
                     hiddenSet={hiddenSet}
                     onStarEntry={(entryId) => {
                       const wasStarred = toggleStarEntry(entryId)
@@ -3362,13 +3215,10 @@ export function App() {
                     votedMap={votedMap}
                     prefs={prefsFor(phoneCol)}
                     onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
-                    totalCount={phoneCol.totalCount}
                     categoriesBySourceId={categoriesBySourceId}
                     faviconBySourceId={faviconBySourceId}
                     expandedSummaries={expandedSummaries}
                     onToggleSummary={toggleSummary}
-                    sectionsCollapsed={sectionsCollapsedFor(phoneCol.name)}
-                    onToggleSection={(key) => setColumnSection(phoneCol.name, key)}
                   />
                 )}
               </div>

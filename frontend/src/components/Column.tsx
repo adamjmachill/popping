@@ -1,7 +1,8 @@
-import { memo, useCallback, useEffect, useId, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import type { Entry } from '../api'
 import { Card } from './Card'
 import { FORYOU_KEY, SAVED_KEY, type ColKey } from '../lib/columns'
+import type { TabCount } from '../lib/feedOrder'
 import { FirstFeedButton } from './FirstFeedButton'
 import { normalizeSort, type Sort, type TabPrefs } from '../lib/sorting'
 
@@ -35,19 +36,27 @@ type Props = {
   // one feed a filter shows, or for a category the feed named like it.
   // Saved, For You and a filter of several feeds leave it unset.
   sourceName?: string
-  // Pre-split entry lists. App owns the "what's new" semantics
-  // (derived from per-column lastViewed timestamps + the manual
-  // readEntries set), and ships the two slices down in the tab's
-  // order (Newest or Best). The Column only renders — the split and the
-  // sort are data-layer concerns, not visual ones.
-  //
-  // When a slice is empty, its section (header + divider) is
-  // omitted entirely. So a column with no new entries just shows
-  // its History section under the column header with no divider.
+  // The tab as its snapshot draws it (lib/feedOrder.ts, PR3b): the
+  // stories not seen yet, in the tab's order (Newest or Best), with
+  // arrivals at the end; then the seen ones, drawn dimmed under the
+  // marker and the folded "Earlier (N)". App partitions; the Column only
+  // renders. Saved has everything in ``unseen`` and no marker.
   sections: {
-    new: Entry[]
-    history: Entry[]
+    unseen: Entry[]
+    earlier: Entry[]
   }
+  // How many of the tab's stories aren't seen yet (the partition's
+  // count: held arrivals and stories a poll dropped included). 0 shows
+  // "You're all caught up"; above 0 the end row reads "N not seen ·
+  // Mark as read" (D24), and the header shows "N new" on md+.
+  unseenCount?: number
+  // C8: the next shown tab with stories not seen yet, named under the
+  // marker of a caught-up tab. App keeps one object per value, so the
+  // memo compares it by reference.
+  nextTab?: TabCount | null
+  // The snapshot's generation: when it changes, the batches start over
+  // and Earlier folds again.
+  generation?: number
   sourcesById: Map<number, string>
   // Source objects keyed by name, so the empty-state JSX can show
   // the source's last_fetch_at / error_count / last_error and
@@ -62,48 +71,35 @@ type Props = {
   // the memo comparator ignores it).
   noOwnFeeds?: boolean
   onAddFeed?: () => void
-  // Number of entries in this column that are "new since the user's
-  // last visit to this column". Rendered as a chip in the header so
-  // the user knows to come look. ``undefined`` means we haven't
-  // computed it yet (initial mount) and we show nothing. The
-  // chip count and the New section count may differ (e.g. when the
-  // age filter hides some new entries) — that's intentional:
-  // the chip is the feed-level signal, the section is the
-  // post-filter view.
-  newCount?: number
   // The id of the currently keyboard-selected entry in this column.
   // Only the matching Card renders the blue focus ring. ``-1``
   // (or undefined) means no selection in this column.
   selectedId?: number
   // Ref callback so App can focus + scroll-into-view on keyboard nav.
   cardRefs?: Map<number, HTMLElement | null> | React.MutableRefObject<Map<number, HTMLElement | null>>
-  // Triggered when the user taps the column header. App uses this
-  // to mark the column read in localStorage.
-  onMarkRead?: () => void
-  // Triggered when the user taps the +N new chip. App uses this
-  // to re-fetch the column's entries (same as the global refresh
-  // button). When absent, the chip stays a non-interactive badge
-  // (preserves the prior visual for callers that don't pass the
-  // prop). The chip stops click propagation so the header's
-  // mark-read handler doesn't also fire.
-  onRefresh?: () => void
   // A card's source name was tapped: open that feed's editor. Must be
   // stable (the memo comparator ignores callbacks).
   onSourceTap?: (sourceId: number) => void
-  // Per-card mark-read. App flips the entry's read state via this —
-  // see ``markEntryRead`` in App.tsx. The Column just forwards the
-  // clicked entry id up so the keyboard ``m`` shortcut and the
-  // button on each card share one code path.
-  onMarkEntryRead?: (entryId: number) => void
-  // Prefs + setter for the ⋯ popover (Newest | Best, and the age
-  // filter). Without a setter there is no ⋯.
+  // A story was opened (Card's ``onActivate``): App marks it seen.
+  onOpenEntry?: (entry: Entry) => void
+  // Mark all as read: the ⋯'s first row and the "N not seen · Mark as
+  // read" end row. App marks the tab's unseen stories and shows Undo.
+  onMarkAll?: () => void
+  // C8's row: open that tab.
+  onOpenTab?: (key: ColKey) => void
+  // Whether the marker is above the scroller's visible top. While it
+  // is, App holds new arrivals back (Safari has no scroll anchoring),
+  // and the rows under the marker stay as they were drawn.
+  onHoldChange?: (hold: boolean) => void
+  // Earlier folded with the keyboard selection inside it (its button,
+  // or a new snapshot): App drops the selection, so no shortcut acts on
+  // a card that isn't drawn. Called with the selected id. Must be stable
+  // (the memo comparator ignores callbacks).
+  onSelectionFolded?: (entryId: number) => void
+  // Prefs + setter for the ⋯ popover (Mark all, Newest | Best, and the
+  // age filter). Without a setter there is no ⋯.
   prefs?: ColumnPrefs
   onPrefsChange?: (next: ColumnPrefs) => void
-  // The total number of entries before prefs filtering. We render
-  // "X of Y" so the user can see when their filters are hiding
-  // content. App passes this; falls back to entries.length when
-  // prefs are not in play.
-  totalCount?: number
   // Optional map sourceId → category. Passed through to each Card so
   // it can render the colored left stripe. Without it the cards just
   // skip the stripe.
@@ -121,27 +117,19 @@ type Props = {
   onToggleSummary?: (entryId: number) => void
   // Per-card "hide this entry" action. When present, each card's
   // context menu gets a "Hide this entry" item. App wires this
-  // to the localStorage-backed hidden set; the entry disappears
-  // from every column + the For You row immediately.
+  // to the hidden set; the entry disappears from every column + the
+  // For You row immediately.
   onHideEntry?: (entryId: number) => void
   // Per-card "star" / "unstar" action. When present, each card
-  // gets a star button next to the mark-read checkmark, and
-  // the context menu gets a "Save for later" / "Unsave" item.
-  // App wires this to the localStorage-backed starred set; the
-  // entry surfaces in the dedicated "Saved" column at the top
-  // of the dashboard.
+  // gets a star button, and the context menu gets a "Save for
+  // later" / "Unsave" item. App wires this to the starred set; the
+  // entry surfaces in the dedicated "Saved" column.
   onStarEntry?: (entryId: number) => void
   // Per-card "is this entry currently starred" lookup. App
   // passes a Set so each card render is an O(1) check rather
   // than a linear search.
   starredSet?: Set<number>
   // Per-card "hide" / "unhide" action for the eye button.
-  // When present, each card gets an eye button next to the
-  // mark-read checkmark and the star. App wires this to a
-  // callback that ALSO marks the entry read so the entry
-  // moves to the column's History section. Different from
-  // ``onHideEntry`` (above) which is the context-menu's
-  // "permanently dismiss" affordance.
   onHideToggle?: (entryId: number) => void
   // Per-card "is this entry currently hidden" lookup. App
   // passes the same Set the eye button uses for its
@@ -152,14 +140,6 @@ type Props = {
   // since a vote isn't a boolean membership test.
   onVoteEntry?: (entryId: number, direction: 'up' | 'down' | null) => void
   votedMap?: Map<number, 'up' | 'down'>
-  // Per-section collapse state (Miniflux-style). When a section
-  // is collapsed, only its header renders — the cards are
-  // unmounted. Persisted in localStorage by App, keyed by column
-  // name, so the user's preference survives reloads.
-  sectionsCollapsed?: { new: boolean; history: boolean }
-  // Toggle callback for a section header click. App flips the
-  // appropriate bit in the per-column storage record.
-  onToggleSection?: (key: 'new' | 'history') => void
   // The phone only: a callback ref for the story list, which is the
   // phone's real scroller (this section is h-full inside App's
   // wrapper). The list it lands on is marked ``data-scroller``. Pass a
@@ -168,13 +148,14 @@ type Props = {
   // compares it, so crossing 768px re-renders the list and moves the
   // ref and ``data-scroller`` with it.
   scrollerRef?: (el: HTMLElement | null) => void
-  // The scroller the "load more" sentinel is observed against: this
-  // Column's own list on the phone (the element ``scrollerRef`` hands
-  // App), App's one desktop wrapper on the desktop. Not the viewport:
-  // a margin on the viewport doesn't reach past the phone list's
-  // clipped edge. Not this list on the desktop either: there it grows
-  // to fit its cards, so it would always hold the sentinel. Null until
-  // App has the element; nothing more loads until then.
+  // The scroller the "load more" sentinel (and the marker, for
+  // ``onHoldChange``) is observed against: this Column's own list on
+  // the phone (the element ``scrollerRef`` hands App), App's one
+  // desktop wrapper on the desktop. Not the viewport: a margin on the
+  // viewport doesn't reach past the phone list's clipped edge. Not this
+  // list on the desktop either: there it grows to fit its cards, so it
+  // would always hold the sentinel. Null until App has the element;
+  // nothing more loads until then.
   sentinelRoot?: HTMLElement | null
 }
 
@@ -183,28 +164,33 @@ type Props = {
 // ``sentinelRoot``.
 const BATCH = 30
 const MORE_MARGIN = '0px 0px 600px 0px'
+// The limit that draws the first ``n`` cards, in whole batches.
+const batchesFor = (n: number) => Math.ceil(n / BATCH) * BATCH
+
+// What the rows between the marker and Earlier show, for one snapshot:
+// the count the marker reads (0: "You're all caught up") and C8's tab
+// (null: no row).
+type EndRows = { generation: number | undefined; count: number; next: TabCount | null }
 
 // Slice 21: renamed ``Column`` to ``ColumnInner`` and added a
 // ``React.memo`` wrap with a custom comparator (``_columnPropsEqual``,
 // below) so App's per-render closures don't defeat memoization. The
-// comparator ignores the per-card callback props (``onMarkEntryRead``,
-// ``onHideEntry``, ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
-// ``onToggleSummary``, ``onToggleSection``, ``onPrefsChange``,
-// ``onMarkRead``, ``onRefresh``) and the per-card ``cardRefs`` —
-// they're inherently per-render at the App layer; the data-driven
-// props (``sections``, ``sourcesById``, ``sourcesByName``,
-// ``starredSet``, ``hiddenSet``, ``votedMap``, ``prefs``,
-// ``sectionsCollapsed``, ``sentinelRoot``) and the phone's
-// ``scrollerRef`` (a stable setter or undefined, so comparing it costs
-// no render) are what we actually re-render against.
+// comparator ignores the callback props (``onOpenEntry``,
+// ``onMarkAll``, ``onOpenTab``, ``onHoldChange``,
+// ``onSelectionFolded``, ``onHideEntry``,
+// ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
+// ``onToggleSummary``, ``onPrefsChange``) and the per-card
+// ``cardRefs`` — they're inherently per-render at the App layer; the
+// data-driven props (``sections``, ``unseenCount``, ``nextTab``,
+// ``generation``, ``sourcesById``, ``sourcesByName``, ``starredSet``,
+// ``hiddenSet``, ``votedMap``, ``prefs``, ``sentinelRoot``) and the
+// phone's ``scrollerRef`` (a stable setter or undefined, so comparing
+// it costs no render) are what we actually re-render against.
 //
 // Trade-off: if a callback's logic changes without the data
-// changing, this Column won't re-render. That can't happen in
-// practice because callbacks here only depend on data props
-// (``onMarkEntryRead(e.id)`` reads from the same entry id, which is
-// stable across renders for the same card) and App-level state. If
-// a future caller starts passing callbacks that close over mutable
-// refs, lift this to a stable ref and re-evaluate.
+// changing, this Column won't re-render. App's callbacks here read
+// refs or the latest partition (``useFeedOrder``'s ``latest``), never
+// a render-old closure, so a kept callback still does the right thing.
 //
 // Pair with the ``useCallback`` wraps in ``App.tsx`` (slice 21, same
 // commit) so the App-level handlers keep stable identity between
@@ -215,6 +201,9 @@ export function ColumnInner({
   label,
   sourceName,
   sections,
+  unseenCount,
+  nextTab,
+  generation,
   sourcesById,
   // Slice 19: optional sourcesByName map for context-aware empty-state.
   // Meta columns (Saved / For You / Multisub) pass undefined; the
@@ -222,16 +211,16 @@ export function ColumnInner({
   sourcesByName,
   noOwnFeeds,
   onAddFeed,
-  newCount,
   selectedId,
   cardRefs,
-  onMarkRead,
-  onRefresh,
   onSourceTap,
-  onMarkEntryRead,
+  onOpenEntry,
+  onMarkAll,
+  onOpenTab,
+  onHoldChange,
+  onSelectionFolded,
   prefs,
   onPrefsChange,
-  totalCount,
   categoriesBySourceId,
   faviconBySourceId,
   expandedSummaries,
@@ -243,20 +232,62 @@ export function ColumnInner({
   hiddenSet,
   onVoteEntry,
   votedMap,
-  sectionsCollapsed,
-  onToggleSection,
   scrollerRef,
   sentinelRoot,
 }: Props) {
   const [popoverOpen, setPopoverOpen] = useState(false)
-  // How many cards render, counted over the open sections in order
-  // (Fresh, then History). It only grows: the phone remounts its Column
-  // per tab, which starts it at 30 again.
+  // How many unseen cards render, and how many of Earlier's once it is
+  // open. Both start over (and Earlier folds again) with every new
+  // snapshot, so a tab that resets opens at its first 30.
   const [limit, setLimit] = useState(BATCH)
+  const [earlierOpen, setEarlierOpen] = useState(false)
+  const [earlierLimit, setEarlierLimit] = useState(BATCH)
+  // Every unseen card has been drawn in this snapshot. From then on a
+  // story that arrives is drawn at once (the limit grows with it): the
+  // marker, C8's row and an open Earlier never go away for a frame while
+  // a batch waits for the sentinel. Only a snapshot's first load goes
+  // through the sentinel.
+  const [drewAllUnseen, setDrewAllUnseen] = useState(false)
+  // The keyboard selection that opened Earlier. Earlier opens when the
+  // selection moves into it, once per card, so the Earlier button can
+  // still fold it with the selection inside. A new snapshot keeps it: a
+  // selection already inside Earlier hasn't moved, so Earlier stays
+  // folded (and App drops the selection, below). A selection the reset
+  // itself moves into Earlier (Mark all) still opens it.
+  const [openedFor, setOpenedFor] = useState<number | undefined>(undefined)
+  const [shownGeneration, setShownGeneration] = useState(generation)
+  // A new snapshot (React's "adjust state when a prop changes"). React
+  // renders again with these before it draws anything, so the
+  // adjustments below wait for that render instead of acting on the old
+  // snapshot's limits.
+  const newSnapshot = shownGeneration !== generation
+  if (newSnapshot) {
+    setShownGeneration(generation)
+    setLimit(BATCH)
+    setEarlierOpen(false)
+    setEarlierLimit(BATCH)
+    setDrewAllUnseen(false)
+  }
   const [sentinel, setSentinel] = useState<HTMLElement | null>(null)
+  const [marker, setMarker] = useState<HTMLElement | null>(null)
+  // The marker is above the scroller's visible top (its observer, below).
+  // App holds arrivals back meanwhile; the rows between the marker and
+  // Earlier stay as they were drawn (``end``, below).
+  const [held, setHeld] = useState(false)
+  // Set when the end row's "Mark as read" was pressed with the keyboard
+  // or a screen reader: the snapshot it was pressed in. The row turns
+  // into "You're all caught up" and the focus goes there, not to <body>.
+  const refocusRef = useRef<{ generation: number | undefined } | null>(null)
+  // The pointer type ("mouse", "pen", "touch") of a pointerdown on the
+  // end row's button, until the click it starts reads and clears it.
+  const endPointerRef = useRef<string | null>(null)
   const sortLabelId = useId()
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const prefsButtonRef = useRef<HTMLButtonElement | null>(null)
+  // The latest hold callback, for the marker's observer (the memo keeps
+  // old callbacks; this one must reach App's current tab).
+  const holdRef = useRef(onHoldChange)
+  holdRef.current = onHoldChange
 
   // Keep the latest ``cardRefs`` value in a ref so we can ship a
   // stable ref callback to each ``Card``. Without this, the inline
@@ -277,6 +308,8 @@ export function ColumnInner({
   // that card: the same story can be registered by the phone layout
   // and the desktop grid, and the grid unmounting (the window crossing
   // 768px) must not drop the phone card's entry.
+  // (PR3c registers the unseen cards it tracks for seen-on-scroll here,
+  // when ``trackSeen`` is set, so Card's memo stays untouched.)
   const setCardRef = useCallback((entryId: number) => (el: HTMLElement | null, prev?: HTMLElement | null) => {
     const refs = cardRefsLatest.current
     if (!refs) return
@@ -313,112 +346,180 @@ export function ColumnInner({
     return () => document.removeEventListener('keydown', onKey)
   }, [popoverOpen])
 
+  const isSaved = columnKey === SAVED_KEY
+  const count = isSaved ? 0 : (unseenCount ?? 0)
+  const unseenTotal = sections.unseen.length
+  const earlierTotal = isSaved ? 0 : sections.earlier.length
+
+  // The keyboard-selected card always renders, so App can scroll to it
+  // (ArrowDown walks past a batch, and from the unseen cards into
+  // Earlier): the limits grow, by whole batches, to reach it. Earlier
+  // opens when the selection moves into it; folded again with the
+  // selection inside (its button, or a new snapshot), it takes the
+  // selection with it (``onSelectionFolded``, below).
+  let selectedUnseen = -1
+  let selectedEarlier = -1
+  if (selectedId != null) {
+    selectedUnseen = sections.unseen.findIndex((e) => e.id === selectedId)
+    if (selectedUnseen < 0 && !isSaved) selectedEarlier = sections.earlier.findIndex((e) => e.id === selectedId)
+  }
+  if (!newSnapshot) {
+    if (selectedEarlier >= 0 && selectedId !== openedFor) {
+      setOpenedFor(selectedId)
+      setEarlierOpen(true)
+    } else if (selectedEarlier < 0 && openedFor !== undefined) {
+      setOpenedFor(undefined)
+    }
+  }
+  const reachEarlier = earlierOpen && selectedEarlier >= 0
+  const needUnseen = Math.max(reachEarlier ? unseenTotal : selectedUnseen + 1, drewAllUnseen ? unseenTotal : 0)
+  if (!newSnapshot && needUnseen > limit) setLimit(batchesFor(needUnseen))
+  if (!newSnapshot && reachEarlier && selectedEarlier >= earlierLimit) setEarlierLimit(batchesFor(selectedEarlier + 1))
+  const shown = Math.max(limit, needUnseen)
+  const unseenShown = sections.unseen.slice(0, shown)
+  // The marker, C8's row and Earlier come only once every unseen card
+  // is drawn, so nothing under them moves while the batches load.
+  const unseenDone = shown >= unseenTotal
+  if (!newSnapshot && unseenDone && !drewAllUnseen) setDrewAllUnseen(true)
+  const earlierShownCount = Math.max(earlierLimit, reachEarlier ? selectedEarlier + 1 : 0)
+  const earlierShown = unseenDone && earlierOpen ? sections.earlier.slice(0, earlierShownCount) : []
+  // Which list the "load more" sentinel grows.
+  const more: 'unseen' | 'earlier' | null = !unseenDone
+    ? 'unseen'
+    : earlierOpen && earlierShownCount < earlierTotal
+      ? 'earlier'
+      : null
+
+  // The rows between the marker and Earlier: the marker's form ("You're
+  // all caught up" or "N not seen · Mark as read") and C8's row. While
+  // the marker is above the screen they stay as last drawn, so a row
+  // that comes or goes up there (a held arrival turning the count from 0
+  // to 1, another tab's first story bringing C8's row) can't move what
+  // is being read below them: Safari has no scroll anchoring. They catch
+  // up when the marker is back on screen, the moment App lets the held
+  // arrivals in, and with every new snapshot.
+  const liveEnd: EndRows = { generation, count, next: count === 0 ? (nextTab ?? null) : null }
+  const [drawnEnd, setDrawnEnd] = useState<EndRows>(liveEnd)
+  const keepEnd = held && drawnEnd.generation === generation
+  const end = keepEnd ? drawnEnd : liveEnd
+  if (!keepEnd && (drawnEnd.generation !== generation || drawnEnd.count !== count || drawnEnd.next !== liveEnd.next)) {
+    setDrawnEnd(liveEnd)
+  }
+
   // Load more: the sentinel near the bottom of ``sentinelRoot`` adds 30
-  // cards. A fresh observer per ``limit`` (hence the dependency): its
-  // first callback reports where the sentinel is now, so a batch that
-  // still leaves the sentinel inside the margin loads the next one too,
-  // and one that pushes it out waits for the next scroll. The observer
-  // stops after one batch, so a second callback can't add 60.
+  // cards to the list it ends. A fresh observer per limit (hence the
+  // dependencies): its first callback reports where the sentinel is
+  // now, so a batch that still leaves the sentinel inside the margin
+  // loads the next one too, and one that pushes it out waits for the
+  // next scroll. The observer stops after one batch, so a second
+  // callback can't add 60.
   useEffect(() => {
-    if (!sentinel || !sentinelRoot) return
+    if (!sentinel || !sentinelRoot || !more) return
     const io = new IntersectionObserver(
       (entries) => {
         if (!entries.some((e) => e.isIntersecting)) return
         io.disconnect()
-        setLimit((n) => n + BATCH)
+        if (more === 'unseen') setLimit((n) => n + BATCH)
+        else setEarlierLimit((n) => n + BATCH)
       },
       { root: sentinelRoot, rootMargin: MORE_MARGIN },
     )
     io.observe(sentinel)
     return () => io.disconnect()
-  }, [sentinel, sentinelRoot, limit])
+  }, [sentinel, sentinelRoot, more, limit, earlierLimit])
 
-  // Header tap on desktop marks the column read. On mobile the same
-  // element exists (the column header is visible on touch layouts
-  // too — the swipe changes the visible column but the header is
-  // always rendered). The handler stays the same on both.
-  //
-  // The sort/filter popover and its trigger button are DOM children
-  // of this header (they need to be, for the ``absolute`` positioning
-  // below), so they rely on ``stopPropagation`` to keep their clicks
-  // from also firing "mark read". That's fragile — a native
-  // ``<select>``'s change event doesn't reliably respect
-  // ``stopPropagation`` on every browser/mobile webview, and any
-  // future control added to the popover has to remember to opt out
-  // too. Guard here as well: if the click actually landed inside the
-  // popover or its button, bail out regardless of whether it was
-  // supposed to have been stopped upstream. This is what was behind
-  // "changing the sort marked the column read" — interacting with
-  // the popover's controls could still reach this handler.
-  const onHeaderClick = (e: React.MouseEvent) => {
-    const target = e.target as Node
-    if (popoverRef.current?.contains(target)) return
-    if (prefsButtonRef.current?.contains(target)) return
-    onMarkRead?.()
-  }
-  // Keyboard support — the header is interactive (it triggers an
-  // action), so it should be a button. role="button" + tabIndex={0}
-  // matches the pattern BriefCard uses for its collapse header.
-  //
-  // Same guard as onHeaderClick: Space or Enter on a focused control
-  // in the popover (the Newest | Best buttons, the max-age dropdown)
-  // is exactly "Enter or Space" from the
-  // header's point of view once it bubbles, so without this check
-  // adjusting the sort from the keyboard would ALSO mark the column
-  // read (and Space would fight the select for its default
-  // open-the-dropdown behavior).
-  const onHeaderKey = (e: React.KeyboardEvent) => {
-    const target = e.target as Node
-    if (popoverRef.current?.contains(target)) return
-    if (prefsButtonRef.current?.contains(target)) return
-    if (e.key === 'Enter' || e.key === ' ') {
-      e.preventDefault()
-      onMarkRead?.()
-    }
-  }
+  // Is the marker above the scroller's visible top? Then a story that
+  // arrives now would be drawn above what is being read and push it
+  // down, so App holds arrivals back until it isn't. The observer's
+  // first callback reports where the marker is now, so a marker that
+  // changes (the row turning into "You're all caught up") keeps the
+  // hold true to its place; a marker that goes (unseen cards still
+  // loading) or a Column that goes (another tab) lets arrivals in. A new
+  // snapshot measures it again too: an observer calls back only when
+  // the marker crosses the screen's edge, and C1's jump to the top takes
+  // a marker above the screen to below it with no frame in between, so
+  // the hold (and the end rows it keeps) would stay on until the next
+  // crossing.
+  useEffect(() => {
+    if (!marker || !sentinelRoot) return
+    const io = new IntersectionObserver((entries) => {
+      const e = entries[entries.length - 1]
+      const top = e.rootBounds ? e.rootBounds.top : sentinelRoot.getBoundingClientRect().top
+      const hold = !e.isIntersecting && e.boundingClientRect.bottom <= top
+      setHeld(hold)
+      holdRef.current?.(hold)
+    }, { root: sentinelRoot })
+    io.observe(marker)
+    return () => io.disconnect()
+  }, [marker, sentinelRoot, generation])
+  useEffect(() => {
+    if (marker) return
+    setHeld(false)
+    holdRef.current?.(false)
+  }, [marker])
+  useEffect(() => () => holdRef.current?.(false), [])
 
-  // Pre-split count: total entries across both sections. Used for
-  // the "X of Y" header count, where Y is the pre-filter total
-  // (passed via ``totalCount``). Naming this ``entryCount`` instead
-  // of ``entries`` to avoid shadowing the prop shape — the
-  // sections-based model means we no longer have an ``entries``
-  // prop to refer to here.
-  const entryCount = sections.new.length + sections.history.length
-  const visible = totalCount ?? entryCount
-  const showTotal = totalCount != null && totalCount !== entryCount
+  // A folded Earlier never keeps the keyboard selection. Its button, or
+  // a new snapshot, folded it with the selected card inside, and the
+  // selection didn't move, so it stays folded: App drops the selection,
+  // and ``s``, ``b``, ``h`` and Enter can't act on a story no one can
+  // see. The next arrow starts at the column's first card. A layout
+  // effect: App's update then renders before the browser takes the next
+  // key (from a passive effect it waits behind it, and the key acts on
+  // the card that went).
+  const foldedSelection = selectedEarlier >= 0 && !earlierOpen ? selectedId : undefined
+  useLayoutEffect(() => {
+    if (foldedSelection != null) onSelectionFolded?.(foldedSelection)
+  }, [foldedSelection, onSelectionFolded])
 
-  // Batching. The cards the list draws, in order: Fresh (unless it is
-  // collapsed), then History (unless it is collapsed). The first
-  // ``limit`` of them render.
-  const freshOpen = !(sections.history.length > 0 && (sectionsCollapsed?.new ?? false))
-  const historyOpen = !(sectionsCollapsed?.history ?? false)
-  const freshDrawn = freshOpen ? sections.new.length : 0
-  const drawn = freshDrawn + (historyOpen ? sections.history.length : 0)
-  // The keyboard-selected card always renders, so App can scroll to it
-  // (ArrowDown walks past the batch): the limit grows, by whole
-  // batches, to reach it.
-  let selectedAt = -1
-  if (selectedId != null) {
-    const i = freshOpen ? sections.new.findIndex((e) => e.id === selectedId) : -1
-    const j = i < 0 && historyOpen ? sections.history.findIndex((e) => e.id === selectedId) : -1
-    selectedAt = i >= 0 ? i : j >= 0 ? freshDrawn + j : -1
+  // The end row's "Mark as read" was pressed with the keyboard or a
+  // screen reader (never a mouse, pen or finger: its ``onClick``): once
+  // the tab has started over, caught up, the focus that fell to <body>
+  // with the button goes to "You're all caught up" in its place, so the
+  // reader keeps their place in the page. The first run
+  // after the press can still see the button that went (the new row's
+  // element reaches ``marker`` a render later), so it waits for a marker
+  // in the page. Focused without a scroll, then brought into view only
+  // if it isn't all inside ``sentinelRoot``'s box: on the phone the list
+  // has shrunk to it and nothing moves, but in the desktop grid the
+  // other columns of its row keep the page tall, so a shorter column's
+  // marker can be thousands of pixels above the screen.
+  useEffect(() => {
+    const from = refocusRef.current
+    if (!from || from.generation === generation || !marker?.isConnected) return
+    refocusRef.current = null
+    const active = document.activeElement
+    if (count !== 0 || (active && active !== document.body)) return
+    marker.focus({ preventScroll: true })
+    const box = sentinelRoot?.getBoundingClientRect()
+    const at = marker.getBoundingClientRect()
+    if (box && (at.top < box.top || at.bottom > box.bottom)) marker.scrollIntoView({ block: 'nearest' })
+  }, [generation, count, marker, sentinelRoot])
+
+  const empty = unseenTotal === 0 && earlierTotal === 0
+  const cardProps = {
+    sourcesById,
+    selectedId,
+    cardRefs,
+    setCardRef,
+    categoriesBySourceId,
+    faviconBySourceId,
+    onOpenEntry,
+    expandedSummaries,
+    onToggleSummary,
+    onHideEntry,
+    onHideToggle,
+    hiddenSet,
+    onStarEntry,
+    starredSet,
+    onVoteEntry,
+    votedMap,
+    onSourceTap,
   }
-  if (selectedAt >= limit) setLimit(Math.ceil((selectedAt + 1) / BATCH) * BATCH)
-  const shown = Math.max(limit, selectedAt + 1)
-  const freshShown = sections.new.slice(0, Math.min(freshDrawn, shown))
-  const historyShown = sections.history.slice(0, Math.max(0, shown - freshDrawn))
-  const hasMore = drawn > shown
 
   return (
     <section className="flex flex-col h-full overflow-visible">
-      <header
-        role="button"
-        tabIndex={0}
-        onClick={onHeaderClick}
-        onKeyDown={onHeaderKey}
-        className="relative flex items-center justify-between px-1 pb-2 min-h-[44px] cursor-pointer select-none"
-        title="tap to mark this column read"
-      >
+      <header className="relative flex items-center justify-between px-1 pb-2 min-h-[44px]">
         {/* Thin hairline underline. iOS-style list-header separator —
           a single 1px line right at the bottom of the title row,
           rendered slightly inset so the line reads as belonging to
@@ -431,46 +532,13 @@ export function ColumnInner({
           <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary truncate">
             {label}
           </h2>
-          {/* New-entry chip. Only renders when newCount > 0 — when
-              it hits 0 the user has acknowledged the column and the
-              chip just disappears. Pulses slightly via the accent
-              color rather than an animation, matching the iOS
-              "badge" pattern. */}
-          {newCount != null && newCount > 0 && (
-            onRefresh ? (
-              <button
-                type="button"
-                data-new-chip
-                onClick={(e) => {
-                  // Stop the click from bubbling to the
-                  // header (which would also call
-                  // onMarkRead). The chip is a refresh
-                  // affordance, not a mark-read one.
-                  e.stopPropagation()
-                  onRefresh()
-                }}
-                className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-ios-caption font-semibold uppercase tracking-wide text-white active:opacity-60 cursor-pointer"
-                title={`${newCount} new since last visit — tap to refresh`}
-                aria-label={`${newCount} new since last visit. Tap to refresh the column.`}
-              >
-                +{newCount} new
-              </button>
-            ) : (
-              <span
-                data-new-chip
-                className="shrink-0 rounded-full bg-accent px-2 py-0.5 text-ios-caption font-semibold uppercase tracking-wide text-white"
-                title={`${newCount} new since last visit`}
-              >
-                +{newCount} new
-              </span>
-            )
+          {/* How many stories aren't seen yet, on md+ (the phone's tab
+              strip carries the same count as a badge). */}
+          {count > 0 && (
+            <span data-new-count className="hidden md:inline shrink-0 text-ios-caption font-semibold text-accent">
+              {count} new
+            </span>
           )}
-          {/* Entry count. "X of Y" when filters are hiding some,
-              plain "X" otherwise. text-label-secondary to keep it
-              secondary to the new chip. */}
-          <span className="text-ios-caption text-label-secondary">
-            {showTotal ? `${entryCount} of ${visible}` : visible}
-          </span>
         </div>
 
         {/* Sort/filter popover trigger. Every tab has one: For You
@@ -479,14 +547,7 @@ export function ColumnInner({
           <button
             ref={prefsButtonRef}
             data-column-action="prefs"
-            onClick={(e) => {
-              // Don't let the click bubble up to the header — it
-              // would also fire onMarkRead. The header click is a
-              // useful action but not when the user is just opening
-              // preferences.
-              e.stopPropagation()
-              setPopoverOpen((p) => !p)
-            }}
+            onClick={() => setPopoverOpen((p) => !p)}
             className="shrink-0 w-11 h-11 -mr-1 flex items-center justify-center rounded-full text-label-secondary active:bg-bg-elevated"
             aria-label="column preferences"
             aria-expanded={popoverOpen}
@@ -506,8 +567,29 @@ export function ColumnInner({
             // place we still render a popover-shaped surface — the
             // rest of the dashboard uses sheets / grouped lists.
             className="absolute right-0 top-full mt-2 z-20 min-w-[240px] rounded-ios-lg bg-bg-elevated shadow-2xl p-3 text-ios-body space-y-3"
-            onClick={(e) => e.stopPropagation()}
           >
+            {/* Mark all as read: the tab's stories not seen yet, with
+                Undo (App). Disabled at 0; Saved has no read state. */}
+            {!isSaved && onMarkAll && (
+              <button
+                type="button"
+                data-mark-all
+                disabled={count === 0}
+                onClick={(e) => {
+                  // The row goes with the popover. Pressed with the
+                  // keyboard or VoiceOver (focus on it, or a click with
+                  // ``detail`` 0), focus goes back to ⋯, not to <body>, so
+                  // it keeps its place and can reach the toast's Undo.
+                  const focused = e.detail === 0 || e.currentTarget === document.activeElement
+                  setPopoverOpen(false)
+                  if (focused) prefsButtonRef.current?.focus({ preventScroll: true })
+                  onMarkAll()
+                }}
+                className="w-full min-h-[44px] -my-1 rounded-ios px-1 text-left text-ios-body text-accent active:bg-bg-surface disabled:text-label-tertiary"
+              >
+                Mark all as read
+              </button>
+            )}
             {/* Newest | Best. Not on Saved, which keeps its own order
                 (lib/sorting), so a control there would do nothing. */}
             {columnKey !== SAVED_KEY && (
@@ -583,7 +665,7 @@ export function ColumnInner({
         data-scroller={scrollerRef ? '' : undefined}
         className="flex-1 overflow-x-clip overflow-y-auto overscroll-contain space-y-2 pr-1"
       >
-        {entryCount === 0 ? (
+        {empty ? (
           // Slice 19: context-aware empty state. The source's
           // ``last_fetch_at`` / ``last_error`` / ``error_count``
           // tell the user WHY the column is empty — has the
@@ -598,122 +680,104 @@ export function ColumnInner({
           />
         ) : (
           <>
-            {/* Fresh section. Rendered first (the only section
-                now \u2014 the History sub-section moved to the
-                Drawer). Omitted entirely when the fresh slice
-                is empty \u2014 no header, no "FRESH (0)" line. The
-                collapsed flag unmounts the cards but keeps
-                the header visible so the user can re-expand. */}
-            {/* Fresh section \u2014 the column's primary view. Apollo
-                terminology: "Fresh" is what the user hasn't
-                acted on yet, in the tab's order (Newest or Best,
-                sorted in App's columns memo). The user can
-                collapse the section but the per-column History
-                sub-section was removed \u2014 history now lives in
-                the Drawer's "History" tab where the user can
-                review past reads + hides + stars with full
-                context (entry title, source, timestamp,
-                polarity). Keeping history out of the column
-                makes the column read as a focused "what's
-                new" feed rather than a mixed bag of
-                unread / read. */}
-            {sections.new.length > 0 && (
-              <ColumnSection
-                label="Fresh"
-                count={sections.new.length}
-                // With no History section below, a "Fresh (n)" header
-                // only repeats the column header's count, so it's left
-                // out and the section can't be collapsed out of sight.
-                showHeader={sections.history.length > 0}
-                collapsed={sections.history.length > 0 && (sectionsCollapsed?.new ?? false)}
-                onToggle={onToggleSection ? () => onToggleSection('new') : undefined}
-                entries={freshShown}
-                // All entries in the Fresh section are unread
-                // by construction \u2014 that's the membership
-                // predicate App uses to build the slice. Pass
-                // ``unread=true`` uniformly so every card gets
-                // the thin accent ring.
-                unreadForCard={() => true}
-                sourcesById={sourcesById}
-                selectedId={selectedId}
-                cardRefs={cardRefs}
-                setCardRef={setCardRef}
-                categoriesBySourceId={categoriesBySourceId}
-                faviconBySourceId={faviconBySourceId}
-                onMarkEntryRead={onMarkEntryRead}
-                expandedSummaries={expandedSummaries}
-                onToggleSummary={onToggleSummary}
-                onHideEntry={onHideEntry}
-                onHideToggle={onHideToggle}
-                hiddenSet={hiddenSet}
-                onStarEntry={onStarEntry}
-                starredSet={starredSet}
-                onVoteEntry={onVoteEntry}
-                votedMap={votedMap}
-                onSourceTap={onSourceTap}
-              />
-            )}
-
-            {/* History sub-section. Shows entries the user
-                has marked read (per-column). Visually
-                dimmer than Fresh (Card's ``opacity-60``
-                when ``unread=false``). Acts as a quick
-                visual review for "what did I just read
-                in this column". The Drawer's History
-                tab is the full audit log with
-                timestamps + source metadata; this
-                section is the in-column glance.
-
-                The collapsed state is independent of
-                the Fresh section \u2014 the user can
-                collapse either or both. Default
-                expanded so the user always sees
-                something in the column after they've
-                read entries. The empty state
-                (``sections.history.length === 0``) is
-                handled by the parent \u2014 no
-                "HISTORY (0)" line. It waits until every
-                open Fresh card has rendered, so its header
-                never sits above Fresh cards still to load. */}
-
-            {sections.history.length > 0 && shown >= freshDrawn && (
-              <ColumnSection
-                label="History"
-                count={sections.history.length}
-                collapsed={sectionsCollapsed?.history ?? false}
-                onToggle={onToggleSection ? () => onToggleSection('history') : undefined}
-                entries={historyShown}
-                // All entries in the History section are
-                // read by construction \u2014 they were
-                // sorted OUT of the fresh set by the
-                // manual ``readEntries`` set. Pass
-                // ``unread=false`` uniformly so every
-                // card gets the dim opacity-60 + no
-                // accent ring.
-                unreadForCard={() => false}
-                sourcesById={sourcesById}
-                selectedId={selectedId}
-                cardRefs={cardRefs}
-                setCardRef={setCardRef}
-                categoriesBySourceId={categoriesBySourceId}
-                faviconBySourceId={faviconBySourceId}
-                onMarkEntryRead={onMarkEntryRead}
-                expandedSummaries={expandedSummaries}
-                onToggleSummary={onToggleSummary}
-                onHideEntry={onHideEntry}
-                onHideToggle={onHideToggle}
-                hiddenSet={hiddenSet}
-                onStarEntry={onStarEntry}
-                starredSet={starredSet}
-                onVoteEntry={onVoteEntry}
-                votedMap={votedMap}
-                onSourceTap={onSourceTap}
-              />
-            )}
-
+            {/* The stories not seen yet, in the tab's order. They never
+                dim, even once opened: nothing moves or fades under the
+                reader until the next snapshot. */}
+            {unseenShown.length > 0 && <CardList entries={unseenShown} dimmed={false} {...cardProps} />}
             {/* Load more. A div, never a <section>: smoke asserts one
                 section per <main>. */}
-            {hasMore && <div ref={setSentinel} data-more aria-hidden="true" className="h-px" />}
+            {more === 'unseen' && <div ref={setSentinel} data-more aria-hidden="true" className="h-px" />}
+            {unseenDone && !isSaved && (
+              <>
+                {/* The marker (D4), in the form ``end`` holds. Not
+                    role="status": smoke waits for no status region before
+                    every state, and it isn't news. Focusable from code
+                    only, for the end row's focus hand-over. */}
+                {end.count === 0 ? (
+                  <div
+                    ref={setMarker}
+                    data-caught-up
+                    tabIndex={-1}
+                    className="flex min-h-[44px] items-center justify-center gap-2 px-1 text-ios-body text-label-secondary"
+                  >
+                    <span aria-hidden="true" className="text-accent">✓</span>
+                    <span>You&apos;re all caught up</span>
+                  </div>
+                ) : (
+                  // D24: some stories are still unseen (none opened, or
+                  // flung past with PR3c). One tap marks them, with the
+                  // same path and Undo as ⋯ → Mark all as read.
+                  <button
+                    ref={setMarker}
+                    type="button"
+                    data-caught-up
+                    onPointerDown={(e) => {
+                      endPointerRef.current = e.pointerType
+                    }}
+                    onClick={(e) => {
+                      // Pressed with the keyboard or a screen reader, the
+                      // focus goes on to the row that replaces it (the
+                      // effect above). That is a click with ``detail`` 0
+                      // (a key, or a reader's simulated click: VoiceOver,
+                      // TalkBack, NVDA or JAWS in Chrome), or one on the
+                      // focused button that no pointerdown started (NVDA
+                      // and JAWS in Firefox send mouse events only). A
+                      // mouse, pen or finger press is neither, though
+                      // Chrome and Edge (and Firefox on Windows and
+                      // Linux) focus the button on mousedown or a tap: in
+                      // the desktop grid the new marker can be far above
+                      // the screen, and bringing it into view would move
+                      // the page under the pointer. (``:focus-visible``
+                      // can't tell them apart: a button focused with Tab
+                      // keeps it through a click.)
+                      const pointer = endPointerRef.current
+                      endPointerRef.current = null
+                      if (e.detail === 0 || (!pointer && e.currentTarget === document.activeElement)) refocusRef.current = { generation }
+                      onMarkAll?.()
+                    }}
+                    className="w-full min-h-[44px] rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated"
+                  >
+                    {end.count} not seen · Mark as read
+                  </button>
+                )}
+                {/* C8: the next shown tab with stories not seen yet, under
+                    "You're all caught up" only. Its name reads like the
+                    tab's own in the strip ("News, 12 new"), not "News dot
+                    12". */}
+                {end.next && (
+                  <button
+                    type="button"
+                    data-next-tab
+                    aria-label={`${end.next.label}, ${end.next.count} new`}
+                    onClick={() => end.next && onOpenTab?.(end.next.key as ColKey)}
+                    className="w-full min-h-[44px] flex items-center justify-between gap-2 rounded-ios px-3 text-ios-body text-accent active:bg-bg-elevated"
+                  >
+                    <span className="min-w-0 truncate">
+                      {end.next.label} · {end.next.count}
+                    </span>
+                    <ChevronIcon className="w-4 h-4 shrink-0" collapsed />
+                  </button>
+                )}
+                {earlierTotal > 0 && (
+                  <button
+                    type="button"
+                    data-earlier
+                    aria-expanded={earlierOpen}
+                    onClick={() => setEarlierOpen((o) => !o)}
+                    className="w-full flex items-center gap-1.5 px-1 min-h-[44px]
+                               text-ios-caption uppercase tracking-wide text-label-tertiary
+                               hover:text-label-secondary active:text-label-primary
+                               transition-colors select-none"
+                  >
+                    <ChevronIcon className="w-3 h-3" collapsed={!earlierOpen} />
+                    <span>Earlier ({earlierTotal})</span>
+                  </button>
+                )}
+                {/* The seen stories, dimmed, 30 at a time. */}
+                {earlierShown.length > 0 && <CardList entries={earlierShown} dimmed {...cardProps} />}
+                {more === 'earlier' && <div ref={setSentinel} data-more aria-hidden="true" className="h-px" />}
+              </>
+            )}
           </>
         )}
       </div>
@@ -721,22 +785,10 @@ export function ColumnInner({
   )
 }
 
-// One New/History section: clickable header + (when expanded) the
-// list of cards. ``unreadForCard`` is a per-card lookup that returns
-// true for every card in the New section and false for every card
-// in the History section — by construction, the slices App passes
-// in are uniform. (The function shape is reused so we can extend to
-// mixed slices later, e.g. for a "stale but unread" indicator on
-// the History section without restructuring.)
-type SectionProps = {
-  label: string
-  // False drops the collapsible "LABEL (n)" header row.
-  showHeader?: boolean
-  count: number
-  collapsed: boolean
-  onToggle?: () => void
+// A run of cards: the unseen ones, or Earlier's (``dimmed``).
+type CardListProps = {
   entries: Entry[]
-  unreadForCard: (e: Entry) => boolean
+  dimmed: boolean
   sourcesById: Map<number, string>
   selectedId: number | undefined
   cardRefs:
@@ -746,7 +798,7 @@ type SectionProps = {
   setCardRef: (entryId: number) => (el: HTMLElement | null, prev?: HTMLElement | null) => void
   categoriesBySourceId: Map<number, string> | undefined
   faviconBySourceId: Map<number, string | null> | undefined
-  onMarkEntryRead: ((entryId: number) => void) | undefined
+  onOpenEntry: ((entry: Entry) => void) | undefined
   expandedSummaries: Set<number> | undefined
   onToggleSummary: ((entryId: number) => void) | undefined
   onHideEntry: ((entryId: number) => void) | undefined
@@ -759,21 +811,16 @@ type SectionProps = {
   onSourceTap: ((sourceId: number) => void) | undefined
 }
 
-function ColumnSection({
-  label,
-  showHeader = true,
-  count,
-  collapsed,
-  onToggle,
+function CardList({
   entries,
-  unreadForCard,
+  dimmed,
   sourcesById,
   selectedId,
   cardRefs,
   setCardRef,
   categoriesBySourceId,
   faviconBySourceId,
-  onMarkEntryRead,
+  onOpenEntry,
   expandedSummaries,
   onToggleSummary,
   onHideEntry,
@@ -784,78 +831,45 @@ function ColumnSection({
   onVoteEntry,
   votedMap,
   onSourceTap,
-}: SectionProps) {
+}: CardListProps) {
   return (
-    <div>
-      {/* Section header. Click anywhere on the row to collapse /
-          expand. The chevron rotates 90° on expand so the user
-          gets a directional cue (right = collapsed, down =
-          expanded). text-ios-caption + uppercase matches the
-          column-header typography so the two read as the same
-          scale. */}
-      {showHeader && (
-      <button
-        type="button"
-        onClick={onToggle}
-        disabled={!onToggle}
-        aria-expanded={!collapsed}
-        data-section-header={label.toLowerCase()}
-        className="w-full flex items-center gap-1.5 px-1 py-1.5 min-h-[44px]
-                   text-ios-caption uppercase tracking-wide text-label-tertiary
-                   hover:text-label-secondary active:text-label-primary
-                   transition-colors select-none
-                   disabled:cursor-default disabled:hover:text-label-tertiary"
-      >
-        <ChevronIcon className="w-3 h-3" collapsed={collapsed} />
-        <span>{label}</span>
-        <span className="text-label-secondary font-semibold">({count})</span>
-      </button>
-      )}
-      {/* Cards. Unmounted when collapsed (no animation, just a
-          snap — matches BriefCard's collapse behavior and keeps
-          the section cheap to re-open). The list keys are stable
-          (entry.id) so React re-uses Card instances on re-expand
-          instead of remounting. */}
-      {!collapsed && (
-        <div className="space-y-2">
-          {entries.map((e) => {
-            // Stable ref callback. The previous version allocated a
-            // new closure per card per Column render, defeating the
-            // ``memo`` on ``Card``. Instead, ``Card`` writes its own
-            // DOM node into ``cardRefs`` keyed by entry id — the
-            // Column doesn't need to bind anything, the Card knows
-            // its own id and looks itself up.
-            //
-            // The custom-equal in ``Card.memo`` ignores the
-            // ``cardRef`` prop entirely (it's a sentinel ``null`` /
-            // ``undefined`` from Column), so any callback churn
-            // here is free.
-            return (
-              <Card
-                key={e.id}
-                entry={e}
-                sourceName={sourcesById.get(e.source_id)}
-                sourceFaviconPath={faviconBySourceId?.get(e.source_id)}
-                unread={unreadForCard(e)}
-                selected={selectedId === e.id}
-                cardRef={cardRefs ? setCardRef(e.id) : undefined}
-                category={categoriesBySourceId?.get(e.source_id)}
-                onMarkRead={onMarkEntryRead ? () => onMarkEntryRead(e.id) : undefined}
-                expanded={expandedSummaries?.has(e.id) ?? false}
-                onToggleSummary={onToggleSummary ? () => onToggleSummary(e.id) : undefined}
-                onHide={onHideEntry ? () => onHideEntry(e.id) : undefined}
-                onHideToggle={onHideToggle ? () => onHideToggle(e.id) : undefined}
-                hidden={hiddenSet?.has(e.id) ?? false}
-                onStar={onStarEntry ? () => onStarEntry(e.id) : undefined}
-                starred={starredSet?.has(e.id) ?? false}
-                onVote={onVoteEntry ? (dir) => onVoteEntry(e.id, dir) : undefined}
-                vote={votedMap?.get(e.id) ?? null}
-                onSourceTap={onSourceTap}
-              />
-            )
-          })}
-        </div>
-      )}
+    <div className="space-y-2" data-group={dimmed ? 'earlier' : 'unseen'}>
+      {entries.map((e) => {
+        // Stable ref callback. The previous version allocated a
+        // new closure per card per Column render, defeating the
+        // ``memo`` on ``Card``. Instead, ``Card`` writes its own
+        // DOM node into ``cardRefs`` keyed by entry id — the
+        // Column doesn't need to bind anything, the Card knows
+        // its own id and looks itself up.
+        //
+        // The custom-equal in ``Card.memo`` ignores the
+        // ``cardRef`` prop entirely (it's a sentinel ``null`` /
+        // ``undefined`` from Column), so any callback churn
+        // here is free.
+        return (
+          <Card
+            key={e.id}
+            entry={e}
+            sourceName={sourcesById.get(e.source_id)}
+            sourceFaviconPath={faviconBySourceId?.get(e.source_id)}
+            dimmed={dimmed}
+            selected={selectedId === e.id}
+            cardRef={cardRefs ? setCardRef(e.id) : undefined}
+            onActivate={onOpenEntry ? () => onOpenEntry(e) : undefined}
+            category={categoriesBySourceId?.get(e.source_id)}
+            expanded={expandedSummaries?.has(e.id) ?? false}
+            onToggleSummary={onToggleSummary ? () => onToggleSummary(e.id) : undefined}
+            onHide={onHideEntry ? () => onHideEntry(e.id) : undefined}
+            onHideToggle={onHideToggle ? () => onHideToggle(e.id) : undefined}
+            hidden={hiddenSet?.has(e.id) ?? false}
+            onStar={onStarEntry ? () => onStarEntry(e.id) : undefined}
+            starred={starredSet?.has(e.id) ?? false}
+            onVote={onVoteEntry ? (dir) => onVoteEntry(e.id, dir) : undefined}
+            vote={votedMap?.get(e.id) ?? null}
+            onSourceTap={onSourceTap}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -878,9 +892,9 @@ function MoreIcon({ className }: { className?: string }) {
   )
 }
 
-// Right-pointing chevron used for the New/History section header
-// disclosure. Rotates 90° (so it points down) when the section is
-// expanded. Single CSS transform, GPU-driven — no JS animation
+// Right-pointing chevron used for the "Earlier (N)" disclosure (and,
+// unrotated, C8's next-tab row). Rotates 90° (so it points down) when
+// Earlier is open. Single CSS transform, GPU-driven — no JS animation
 // loop, no reflow. The ``aria-hidden`` chevron is paired with the
 // surrounding button's ``aria-expanded`` so the disclosure state
 // is announced correctly.
@@ -900,13 +914,6 @@ function ChevronIcon({ className, collapsed }: { className?: string; collapsed?:
     </svg>
   )
 }
-
-
-
-
-
-
-
 
 // ---------------------------------------------------------------------------
 // Slice 19: context-aware empty-state
@@ -1005,7 +1012,11 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     prev.sourcesById === next.sourcesById &&
     prev.sourcesByName === next.sourcesByName &&
     prev.noOwnFeeds === next.noOwnFeeds &&
-    prev.newCount === next.newCount &&
+    prev.unseenCount === next.unseenCount &&
+    // C8's tab: one object per value (App caches them).
+    prev.nextTab === next.nextTab &&
+    // A new snapshot: the batches start over and Earlier folds.
+    prev.generation === next.generation &&
     prev.selectedId === next.selectedId &&
     // ``prefs`` is a fresh object per columnPrefs write, but its
     // contents only change when the user opens the popover and picks
@@ -1016,14 +1027,12 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     // reference is what makes this work — shallow-equal would
     // always differ because every render allocates a new object.
     prev.prefs === next.prefs &&
-    prev.totalCount === next.totalCount &&
     prev.categoriesBySourceId === next.categoriesBySourceId &&
     prev.faviconBySourceId === next.faviconBySourceId &&
     prev.expandedSummaries === next.expandedSummaries &&
     prev.starredSet === next.starredSet &&
     prev.hiddenSet === next.hiddenSet &&
     prev.votedMap === next.votedMap &&
-    prev.sectionsCollapsed === next.sectionsCollapsed &&
     // The element changes on every phone tab remount and once App has
     // the desktop wrapper; the sentinel's observer rebinds to it.
     prev.sentinelRoot === next.sentinelRoot &&
