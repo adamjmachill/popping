@@ -20,7 +20,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR4a Ingest rules, brief guard, On this day | B | merged | #30 |
 | PR4b Window parameters and by-ids projection | B | merged | #31 |
 | PR4c Saved by id | F | merged | #47 |
-| PR4d Window UI | F | in review | |
+| PR4d Window UI | F | in review | #49 |
 | PR5a Reddit card, action sheet, Hide hold | F | merged | #48 |
 | PR5b Muted feeds | F | not started | |
 | PR6a queue_check and the check-now route | B | merged | #33 |
@@ -59,5 +59,8 @@ Work in progress is pushed to `claude/ux-<unit>` branches as it goes.
 - D34: cards get preview text under the headline, and the Summary arrow stays for the full AI summary. PR5a builds it.
 - **Stop point.** The owner chose to stop after Gate 2 and PR9b. The units still to build are PR3c, PR4c, PR4d, PR5a, PR5b, PR6b, PR6c and PR9b. PR11a (built, #41) merges once the website-feed probe passes. PR7b, PR8a, PR8b, PR11b, PR11c, PR12a and PR12b are not built unless the owner asks later; they depend on each other, so they would be done as one stretch.
 - **Lighter process (2026-10-21).** Every unit keeps its full first review. After that, at most one re-check round, and only when a fix changed behaviour the owner would see; small test-only findings are fixed on the spot or noted. PR3b had three re-check rounds and PR3c one under the earlier rule; PR4c stops after its third.
+- **Gate 1 passed (2026-10-22)** on build 8516098: every phone check, the auto-reload, and the dwell feel (no retune).
+- **Wrap-up (2026-10-22).** The owner asked to finish the units in flight and stop: PR4d (#49) and PR5a (#48) are the last units of this run. PR5b, PR6b, PR6c and PR9b (and Gate 2) are not built; PR7b, PR8a, PR8b, PR11b, PR11c, PR12a and PR12b stay out unless the owner asks. PR11a is built (#41) and can merge any time; nothing calls it until PR11b.
+- **Bug fixed by PR4d:** a quieter feed (BNN Bloomberg) never reached its category tab, because the tabs were cut to each category's 100 best stories of all time. The 2-day window with the 25-per-feed cap fixes it; `flow-busy-feed-no-crowding` guards it.
 - The owner declined a fix for daily feeds waiting up to a day for their first check after each backend restart (the startup stagger ignores `last_attempt_at`). Not in the plan; left as is.
 - 3-hour website-feed probe (2026-10-21, about 9 h after the e1f0390 update): no feed shows an error. Nine of 14 were checked after the update. Four daily feeds were not due yet; the owner checked them by hand (nothing new) and deleted `bamboohr`. The day-later probe is still to come.
