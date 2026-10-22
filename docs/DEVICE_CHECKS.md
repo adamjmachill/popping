@@ -71,6 +71,15 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #47 · On For You, note the top three stories. Hide the first, wait a minute with Popping open, hide the third, and wait another minute. Open Menu → Settings → Hidden, tap Restore all, close Settings and open the first story's category tab. Pass: the story is there straight away; back on For You, the three are in the order you noted (a new story may sit between them).
 - [ ] #47 · (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
 - [ ] #47 · (If you have more than 30 saves) Open the Saved tab, force-quit Popping and reopen it. Pass: Saved fills in without the app freezing, and more stories load as you scroll to the end.
+- [ ] #<pr> · Open a category tab's ⋯. Pass: it shows "Show stories from" with 1 day · 2 days · 7 days · All and 2 days chosen, and no "Hide if older than".
+- [ ] #<pr> · Force-quit and reopen the app, then open a busy tab (News). Pass: its stories all arrived in the last 2 days (no story older than that above or below the line), and a feed that posts a lot shows at most 25 of its stories.
+- [ ] #<pr> · On that tab, tap ⋯ → 7 days. Pass: the older stories join the list in order (on Newest, at the end; ones you had read go under "Earlier"), the badge counts the new ones, and the choice holds after a force-quit and reopen.
+- [ ] #<pr> · With that tab at 7 days, switch to another tab and back. Pass: the 7-day list is there at once, in the same order; set it back to 2 days and the older stories leave.
+- [ ] #<pr> · Open Saved's ⋯. Pass: it has no "Show stories from", and Saved still lists every save, old ones included.
+- [ ] #<pr> · Open a tab whose feeds brought nothing in 2 days (or pick 1 day on a slow tab). Pass: the tab is still in the strip and reads "Nothing in 2 days · Show 7 days" (or "Nothing in 1 day"); tapping "Show 7 days" shows its stories.
+- [ ] #<pr> · Pause every feed of one category (Menu → Settings → Feeds), then force-quit and reopen. Pass: that tab is gone from the strip and from Edit tabs' list; resume one feed and reopen: it is back.
+- [ ] #<pr> · Open the On this day tab. Pass: the tab reads "On this day", and its cards say "On this day" where the time would be.
+- [ ] #<pr> · (If you have a desktop) On the laptop, look at the For You row. Pass: it shows 6 stories, and the rest of For You's stories are in their category columns.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

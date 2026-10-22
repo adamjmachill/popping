@@ -429,7 +429,8 @@ const STATES = [
     },
   }),
   {
-    // PR7: a column's ⋯ popover on the phone (Newest | Best from PR1c, age).
+    // PR7: a column's ⋯ popover on the phone (Newest | Best from PR1c,
+    // Show stories from, the 4-way window control, from PR4d).
     name: 'column-popover',
     setup: async ({ page }) => {
       await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').filter({ hasText: /^News/ }).first().click()
@@ -439,6 +440,19 @@ const STATES = [
     run: async ({ page, fail }) => {
       const POPOVER = `${MOBILE_MAIN} [data-column-popover]`
       const more = page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`)
+      // The window control (PR4d): four choices, 2 days chosen, each a
+      // 44px target that fits the popover at 320.
+      const windows = await page.$$eval(`${POPOVER} button[data-window]`, (els) =>
+        els.map((el) => ({ w: el.getAttribute('data-window'), pressed: el.getAttribute('aria-pressed'), h: el.getBoundingClientRect().height, right: el.getBoundingClientRect().right, clipped: el.scrollWidth > el.clientWidth + 1 })),
+      )
+      if (windows.map((x) => x.w).join() !== '1d,2d,7d,all') fail('POPOVER', `Show stories from offers ${JSON.stringify(windows.map((x) => x.w))}`)
+      if (!windows.some((x) => x.w === '2d' && x.pressed === 'true')) fail('POPOVER', '2 days is not shown as chosen')
+      const vw = await page.evaluate(() => window.innerWidth)
+      for (const x of windows) {
+        if (x.h < 43.5) fail('POPOVER', `the ${x.w} window button is ${x.h}px tall`)
+        if (x.right > vw + 0.5) fail('POPOVER', `the ${x.w} window button ends at ${x.right}px, past the ${vw}px viewport`)
+        if (x.clipped) fail('POPOVER', `the ${x.w} window button's label is clipped`)
+      }
       // iOS sends pointer events but no mousedown for a tap on empty
       // space, so the popover must close on pointerdown.
       await page.evaluate(() => document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })))

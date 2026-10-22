@@ -45,6 +45,19 @@ export function isBuiltIn(source: { name: string }): boolean {
   return KNOWN_BUILT_INS.includes(source.name)
 }
 
+// Feeds whose stories are from history, not from today: a card shows
+// "On this day" in place of a time (PR4d). Mirrors
+// brief._HISTORICAL_SOURCE_SLUGS (backend/app/brief.py), which keeps
+// them out of Brief and For You; test_frontend_feed_editor_rules.py
+// checks the two agree, so keep it a plain list.
+export const HISTORICAL_SOURCES: readonly string[] = [
+  'wikipedia_on_this_day',
+]
+
+export function isHistorical(sourceName: string | null | undefined): boolean {
+  return sourceName != null && HISTORICAL_SOURCES.includes(sourceName)
+}
+
 export function refreshLabel(seconds: number): string {
   const preset = REFRESH_PRESETS.find((p) => p.value === seconds)
   if (preset) return preset.label

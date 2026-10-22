@@ -21,6 +21,7 @@
 import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } from 'react'
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
 import { noteStoryOpened, recordImmediate } from '../lib/interactions'
+import { isHistorical } from '../lib/feedRules'
 import { sourceLabel } from '../lib/labels'
 import { useSourceLabels } from '../lib/useSourceLabels'
 import { SourceIcon } from './SourceIcon'
@@ -916,7 +917,12 @@ export function CardInner({ entry, sourceName, dimmed, selected, cardRef, onActi
             <span className={`min-w-0 truncate font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>
           ))}
         {sourceName && <span className="shrink-0 whitespace-nowrap">·</span>}
-        <time className="shrink-0 whitespace-nowrap" dateTime={entry.published_at ?? ''}>{timeAgo(entry.published_at)}</time>
+        {/* A feed of history (On this day) has no "ago" (PR4d). */}
+        {isHistorical(sourceName) ? (
+          <span className="shrink-0 whitespace-nowrap">On this day</span>
+        ) : (
+          <time className="shrink-0 whitespace-nowrap" dateTime={entry.published_at ?? ''}>{timeAgo(entry.published_at)}</time>
+        )}
       </div>
       {/* Reddit cross-reference footer. Rendered between the meta row
           and the summary block so it reads as "extra metadata about

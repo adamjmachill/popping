@@ -72,6 +72,12 @@ export type PartitionInput<E extends Item> = {
    *  once it lands (ids keep their group). The counts wait for the mark,
    *  so one written batch is one change of the badge. */
   isPending?: (e: E) => boolean
+  /** A story new to the snapshot that goes in at its place in
+   *  ``entries`` (the tab's order), not at the end of its group: the
+   *  rows a wider window fetched for the tab (PR4d), which are older
+   *  than what the snapshot holds, never arrivals. It still waits with
+   *  the arrivals while ``hold`` is on. */
+  inOrder?: (e: E) => boolean
 }
 
 const keepAll = () => false
@@ -101,6 +107,37 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
     const unseen = [...prev.unseen]
     const earlier = [...prev.earlier]
     let held = [...prev.held]
+    // Where a story goes into a group: at the end, or at its place in
+    // ``entries`` when ``inOrder`` says so: after every story before it
+    // there, and before the first story after it, or before the
+    // arrivals appended out of order (the first break in the group's
+    // order). A story the input no longer holds is stepped over.
+    const inOrder = input.inOrder ?? keepAll
+    let at: Map<number, number> | null = null
+    const place = (group: number[], e: E) => {
+      if (!inOrder(e)) {
+        group.push(e.id)
+        return
+      }
+      if (!at) at = new Map(entries.map((x, i) => [x.id, i]))
+      const mine = at.get(e.id)
+      if (mine == null) {
+        group.push(e.id)
+        return
+      }
+      let prev = -1
+      let i = group.length
+      for (let j = 0; j < group.length; j++) {
+        const pos = at.get(group[j])
+        if (pos == null) continue
+        if (pos > mine || pos < prev) {
+          i = j
+          break
+        }
+        prev = pos
+      }
+      group.splice(i, 0, e.id)
+    }
     for (const e of entries) {
       // The latest copy (a poll replaces a story whose summary, score or
       // comment count changed).
@@ -109,11 +146,15 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
       known.add(e.id)
       // A story that comes in already seen (marked on another device
       // first) isn't new: it goes under the marker, at the end.
-      if (placedSeen(e)) earlier.push(e.id)
+      if (placedSeen(e)) place(earlier, e)
       else held.push(e.id)
     }
     if (!input.hold && held.length) {
-      unseen.push(...held)
+      for (const id of held) {
+        const e = cache.get(id)
+        if (e) place(unseen, e)
+        else unseen.push(id)
+      }
       held = []
     }
     snap = { generation: prev.generation, order, unseen, earlier, held, cache, out: prev.out }
@@ -199,12 +240,14 @@ export type Held = {
    *  unsaved since they were fetched, which the unsave's Undo draws
    *  again from it; no other group holds those. */
   savedById: ReadonlyMap<number, unknown>
+  /** The rows the wider tabs fetched for themselves (PR4d's
+   *  ``extraByTab``), every tab's, shown or not. */
+  extra: readonly Item[]
 }
 
-/** App's keep set: every story it holds (``Held``). PR4d adds every
- *  wider tab's rows. */
+/** App's keep set: every story it holds (``Held``). */
 export function keepIdsFor(held: Held): Set<number> {
-  return keepSet(held.entries, held.forYou, held.starred, held.savedById.keys())
+  return keepSet(held.entries, held.forYou, held.starred, held.savedById.keys(), held.extra)
 }
 
 export type TabCount = { key: string; label: string; count: number }
