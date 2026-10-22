@@ -2,10 +2,11 @@
 
 Stacked on PR3b (`claude/ux-pr3b`, #45, in its re-check), built as if it
 were merged. PR4b (#31, merged) provides the by-ids projection. PR3c
-(seen on scroll) is being built at the same time in another worktree and
-lands between PR3b and this unit; nothing here touches seen-on-scroll
+(seen on scroll) was built at the same time in another worktree and
+landed between PR3b and this unit; nothing here touches seen-on-scroll
 code, and the App.tsx changes stay inside Saved, the hide Undo and the
-keep set.
+keep set. Since then the unit was rebased onto main with both merged
+("Rebased onto main", at the end).
 
 ## What changed
 
@@ -864,3 +865,151 @@ a number):
 - On For You, note the top three stories. Hide the first, wait a minute with Popping open, hide the third, and wait another minute. Open Menu → Settings → Hidden, tap Restore all, close Settings and open the first story's category tab. Pass: the story is there straight away; back on For You, the three are in the order you noted (a new story may sit between them).
 - (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
 - (If you have more than 30 saves) Open the Saved tab, force-quit Popping and reopen it. Pass: Saved fills in without the app freezing, and more stories load as you scroll to the end.
+
+## Rebased onto main
+
+Main moved under this unit: PR3b's final version (#45, the re-check
+rounds after 45aac1e) and PR3c, seen on scroll (#46). The five commits
+were rebased from 45aac1e onto main 8516098 (`git rebase --onto`), each
+keeping its message, with the conflict resolutions inside them; a sixth
+commit makes the hide flows hold up under seen on scroll, the way PR3c
+did for PR3b's flows.
+
+### What conflicted
+
+- First commit, `docs/DEVICE_CHECKS.md`: main's new lines (PR3b's two
+  desktop end-row checks, PR3c's six `#46` lines) and PR4c's five
+  `#<pr>` lines in the same place. Both kept, main's first.
+- Second commit, `docs/DEVICE_CHECKS.md` again: the review fix's wording
+  of the first `#<pr>` line ("except any you also hid") beside main's
+  lines.
+- Third commit, `frontend/scripts/iphone-audit/README.md`, the Helpers
+  table: PR3c's rows (`holdClock` to `requestsSettled`) and PR4c's
+  (`phoneIds` to `pollDone`) at the same spot. Both kept, PR3c's first.
+  The flow table merged on its own, row by row.
+- The other files merged on their own in every commit (`App.tsx`,
+  `Column.tsx`, `flows.cjs`, `capture.cjs`, `feedOrder.ts` and its
+  test, `PROGRESS.md`: main's rows with PR3b #45 and PR3c #46 merged,
+  PR4c in review with no number). Checked: for every file, the added and
+  removed lines of the rebased stack against main are the same as the
+  old stack's against 45aac1e, so the rebase changed no line of PR4c's.
+  Fourth and fifth commits: clean.
+
+### How the two units sit together (read, then probed)
+
+- **Saved** is open only in PR3c (`trackSeen` false for Saved, and
+  `markSeen` looks ids up in the phone tab's partition, which Saved
+  doesn't have). The by-id cache and Saved's order change nothing
+  there. Column's rule that Saved's saves go through the batches
+  (re-check round 3) sits next to PR3c's new-snapshot scroll (a layout
+  effect on `trackSeen`, never on for Saved).
+- **The put-back never starts a snapshot.** `putBackHiddenStories` and
+  `refresh`'s lay-over only change `entries` and `forYou`. A story the
+  drawn tab's snapshot still holds (a hide leaves it in the cache; only
+  `isRemoved` keeps it off the screen) is drawn again in its place; one
+  a later snapshot lost comes back as an arrival (held while the marker
+  is above the screen, PR3b). Neither moves the generation, so PR3c's
+  scroll to the top for a new snapshot never runs for an Undo. Probed
+  below.
+- **The put-back never reaches the collector.** A hidden story's card
+  unmounts and unregisters, so the observer can't report it; coming back
+  it registers afresh, with no time on screen. `isPending` (a story in
+  the collector placed as seen by a new snapshot) can't apply to it. An
+  Undo of a hide marks nothing; probed below. Mark all's flush and the
+  hide's before-flush are PR3c's and untouched.
+- **The keep set.** PR3c's `addSeenMarks` reads the keep set through
+  `readRefs`; it is PR4c's `keepIdsFor` (tabs, For You, the saves, the
+  by-id cache), so a scroll mark's prune keeps a save too
+  (`flow-seen-prune-keeps-saved` runs it through an open; the write
+  path is one).
+
+### The flows under seen on scroll
+
+The 22 Saved and hide flows were run on the rebased build. Four failed,
+all one way: `flow-hide-undo-after-poll` (twice),
+`flow-two-hides-restore-rows-adjacent` and
+`flow-hide-foryou-fails-then-undo` read For You afresh as "301, 102,
+201, …", without 101. A probe (a scratch flow, not kept) showed why:
+the flows hold the clock a second ahead at the start of `run`
+(`pauseAt`), which is the dwell for the cards on screen since the load,
+so 101 qualified; then the tap on 102's hide button brought it into
+view (the list went to 482), 101 left through the top, and the
+`runFor(1000)` that sends the hide's batch also drained the collector:
+`seen:news` added 101, and For You opened afresh put it under the
+marker, folded ("7 not seen"). The flows that hide 101 first passed
+only because 102's button then sits inside the list's 651 px with no
+scroll: the fixture's layout, not the flow.
+
+Changed (all in the sixth commit; every assertion kept, two added):
+
+- **`holdClockFromLoad(page)`** (new helper): `installClock` and a
+  pause before the page loads, for a flow whose tab under test is the
+  one the page opens on. No card has a second on screen before the
+  flow's first step, and only its `runFor`s give the cards time.
+  `holdClock` can't do this: it pauses a second ahead, which is the
+  dwell for a card on screen since the load. The page loads held (its
+  fetches and renders wait on no timer; PR3c's
+  `flow-new-arrival-appends` reloads under a held clock the same way).
+- **`hideAndPoll`** no longer pauses the clock itself (the flow's
+  `before` holds it from the load) and checks that the hide dropped the
+  badge by one and no more: a card read for a dwell and scrolled off
+  the top by the tap would be marked, and leave the order the flows
+  read whole afresh. A layout change now fails as a precondition with
+  that message, not as a wrong put-back.
+- **`flow-hide-undo-after-poll`**: held from the load. 102 is scrolled
+  to the top of the screen and read for a dwell before the hide (the
+  cards above it left the top with no time on screen), so the Undo puts
+  back a story that had qualified. Two checks added after the Undo:
+  the list isn't started over at its top and the card being read (the
+  first one wholly below the top edge, 201) is still on screen (no new
+  snapshot: PR3c's scroll to the top didn't run); and after the seen
+  batch runs the badge is as before the hide (the put-back 102 counts
+  as not seen; the Undo's own 1 s batch is still held, so the next step,
+  a poll before the Undo's change, is unchanged). The rest of the flow
+  is as it was.
+- **`flow-hide-two-undo-the-second`** and the six `hideAndPoll` flows
+  (`flow-hidden-restore-all-after-poll`, `flow-hide-undo-until-returned`,
+  `flow-hide-undo-feed-gone-after` / `-before`,
+  `flow-hide-undo-foryou-fails`, `flow-two-hides-restore-all` / `-rows` /
+  `-rows-adjacent`, `flow-hide-foryou-fails-then-undo`): `before` holds
+  the clock from the load in place of `installClock`; their own
+  `pauseAt` lines are gone. Nothing else in them changed.
+- README: the rows above, the two helpers.
+
+Unchanged, and why:
+
+- `flow-hide-all-downvoted-undo` opens under Settings (`modalOpen`: the
+  list is covered and no dwell runs); closing it starts the dwells on a
+  held clock, and nothing scrolls before the flow's last `runFor`.
+- The Saved flows (`flow-saved-*`, `flow-unsave-last-saved`): Saved
+  isn't tracked.
+- `flow-seen-prune-keeps-saved` runs in real time and opens 101 on
+  News; a card read for a second and scrolled off by the open adds one
+  more `seen:news` mark, which prunes one more of the 998 marks nothing
+  holds, so its four checks hold either way.
+- `flow-foryou-fails-keeps-tab`: no count is read.
+
+### What the probe found: Chromium's scroll anchoring
+
+With 102 exactly at the top of the screen (`scrollCardToTop`), Chromium
+anchors the scroll on 201, the first card wholly on screen. The hide
+then pulls the list back by 102's height to keep 201 in place, which
+shows the short 301 under the top edge for the hide's second (it
+qualifies), and the Undo puts 102 back exactly where it was (0..244,
+the list at 598 again) by pushing 301 out above the top: a scroll past
+in the tracker's eyes, and 301 is marked. 102, the restored story,
+never is, and the list is where the hide found it. WebKit has no scroll
+anchoring, so on the phone the hide leaves the list where it is (201
+moves up, 301 stays above the top) and the Undo pushes 201 down again:
+nothing crosses the top edge and nothing is marked. No app change: the
+tracker can't tell a re-layout from a scroll (PR3c, re-check round 1),
+Chromium at phone width isn't the device, and turning anchoring off for
+the list would change how arrivals and PR3b's holds feel in Chromium,
+another unit's call. The flow keeps a sliver of 301 on screen
+(`scrollListBy(page, -30)` after the scroll to 102), so Chromium anchors
+on 301 and neither the hide nor the put-back moves the cards below; its
+comment says why. Without the sliver the probe, which waits for the
+observers after the hide, saw the mark every time (the badge read 7);
+the flow's own badge check passed three runs without it, because the
+report of 301 coming on screen races the hide's `runFor(1000)` when
+nothing waits for it, and the sliver takes the race out.
