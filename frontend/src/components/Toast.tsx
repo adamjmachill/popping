@@ -7,15 +7,19 @@
 // an action) so the user has time to read the
 // message and decide whether to invoke the action.
 //
-// Auto-dismiss: 1.5s without an action, 5s with one.
+// Auto-dismiss: 3s without an action, 5s with one.
 // Errors render in red via the optional `kind` prop.
 //
 // The toast is a singleton — a new toast replaces
 // the previous one. Multi-stack toast UX is a worse
 // shape for a dashboard; one at a time keeps the
 // noise down.
+//
+// ``onExpire`` (PR5a) runs when the toast goes without its action: its
+// timer ran out, or another toast took its place. A Hide's held
+// ``never`` is released by it (D25); Undo cancels it instead.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useVisualViewport } from '../lib/visualViewport'
 
 type ToastAction = {
@@ -27,6 +31,9 @@ type ToastEvent = {
   message: string
   kind?: 'info' | 'error'
   action?: ToastAction
+  onExpire?: () => void
+  // Set when the action ran: the toast went by Undo, not by expiry.
+  acted?: boolean
 }
 
 type Listener = (e: ToastEvent) => void
@@ -45,12 +52,14 @@ const listeners = new Set<Listener>()
  *  adds an Undo-style right-aligned button to
  *  the toast. When action is set, the
  *  auto-dismiss timer extends to 5 seconds.
+ *  ``onExpire`` runs when the toast closes without
+ *  its action having run.
  */
 export function toast(
   message: string,
   options:
     | ToastEvent['kind']
-    | { kind?: ToastEvent['kind']; action?: ToastAction } = 'info',
+    | { kind?: ToastEvent['kind']; action?: ToastAction; onExpire?: () => void } = 'info',
 ): void {
   // Normalize both signatures into a single
   // ToastEvent shape. The old form passes a
@@ -58,23 +67,41 @@ export function toast(
   // an options object.
   let kind: ToastEvent['kind']
   let action: ToastAction | undefined
+  let onExpire: (() => void) | undefined
   if (typeof options === 'string') {
     kind = options
   } else {
     kind = options.kind ?? 'info'
     action = options.action
+    onExpire = options.onExpire
   }
-  const event: ToastEvent = { message, kind, action }
+  const event: ToastEvent = { message, kind, action, onExpire }
   for (const l of listeners) l(event)
 }
 
 export function ToastHost() {
   const [current, setCurrent] = useState<ToastEvent | null>(null)
+  // The toast showing now, for the paths that take it down: each calls
+  // its ``onExpire`` once, here, never from an effect's cleanup (React
+  // runs those twice in development).
+  const currentRef = useRef<ToastEvent | null>(null)
   // Lift the toast above the iOS keyboard while one is open.
   const { kbInset } = useVisualViewport()
 
+  // Takes the toast down. ``expired``: it went without its action.
+  const dismiss = (expired: boolean) => {
+    const ev = currentRef.current
+    currentRef.current = null
+    setCurrent(null)
+    if (expired && ev && !ev.acted) ev.onExpire?.()
+  }
+
   useEffect(() => {
     const onEvent: Listener = (e) => {
+      // The toast this one replaces went without its action.
+      const prev = currentRef.current
+      if (prev && !prev.acted) prev.onExpire?.()
+      currentRef.current = e
       setCurrent(e)
     }
     listeners.add(onEvent)
@@ -92,7 +119,9 @@ export function ToastHost() {
   useEffect(() => {
     if (!current) return
     const id = setTimeout(
-      () => setCurrent(null),
+      () => {
+        if (currentRef.current === current) dismiss(true)
+      },
       current.action || current.kind === 'error' ? 5000 : 3000,
     )
     return () => clearTimeout(id)
@@ -133,8 +162,10 @@ export function ToastHost() {
               // auto-dismiss timer's cleanup function
               // ensures the toast stays dismissed even
               // if the timer would have fired later.
+              // The action ran: no ``onExpire``.
+              current.acted = true
               current.action!.onClick()
-              setCurrent(null)
+              dismiss(false)
             }}
             className="shrink-0 text-accent active:opacity-60 font-semibold min-h-[44px] -my-2 -mr-2 px-3 rounded-ios"
             aria-label={current.action.label}

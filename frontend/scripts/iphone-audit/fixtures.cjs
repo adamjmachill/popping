@@ -101,7 +101,21 @@ const LONG_SUMMARY_C =
   'In this episode we sit down with the incident commander who ran the response when a ransomware crew got into a regional hospital network through a forgotten VPN concentrator. We talk about the first 48 hours, why the backups were technically fine but operationally useless, and what the team would do differently. This episode contains frank language.'
 const SHORT_SUMMARY = 'A short one-line summary.'
 
+// The preview under the headline (PR5a, D34), as the server computes
+// it: the cleaned feed blurb cut to 300 characters on a word boundary.
+// ``preview: null`` in ``extra`` is a story the server found nothing
+// for (a blurb that only repeats the title).
+function previewOf(summary) {
+  const text = String(summary || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()
+  if (!text) return null
+  if (text.length <= 300) return text
+  let cut = text.slice(0, 300)
+  if (cut.includes(' ')) cut = cut.slice(0, cut.lastIndexOf(' '))
+  return cut.trimEnd() + '…'
+}
+
 function mkEntry(id, source_id, title, extra = {}) {
+  const summary = extra.summary ?? LONG_SUMMARY_A
   return {
     id,
     source_id,
@@ -112,7 +126,8 @@ function mkEntry(id, source_id, title, extra = {}) {
     composite_score: extra.score ?? ((id * 37) % 100),
     personal_score: extra.score ?? ((id * 37) % 100),
     raw_score: extra.score ?? ((id * 37) % 100),
-    meta: { summary: extra.summary ?? LONG_SUMMARY_A },
+    meta: { summary },
+    preview: extra.preview !== undefined ? extra.preview : previewOf(summary),
     image_url: extra.image ? `https://example.invalid/thumbs/${id}.jpg` : null,
     image_path: extra.image ? `thumbs/${id}.jpg` : null,
     reddit_thread_url: extra.reddit ? `https://www.reddit.com/r/technology/comments/abc${id}/thread/` : null,
@@ -128,7 +143,8 @@ const ENTRIES = [
   // --- news (bbc=1, hn=2, long=3, verge=4) ---
   mkEntry(101, 3, TITLE_180, { image: true, score: 92, summary: LONG_SUMMARY_A, cluster: 7, ago: 12 }),
   mkEntry(102, 2, TITLE_WITH_TOKEN, { score: 81, summary: 'Changelog: ' + TOKEN_90 + ' and the migration guide.', ago: 25 }),
-  mkEntry(103, 1, 'BC wildfire season officially over, says province', { image: true, score: 64, summary: SHORT_SUMMARY, ago: 40 }),
+  // No preview (PR5a): the server found nothing worth showing.
+  mkEntry(103, 1, 'BC wildfire season officially over, says province', { image: true, score: 64, summary: SHORT_SUMMARY, ago: 40, preview: null }),
   mkEntry(104, 1, 'Interest rate decision: Bank of Canada holds at 2.75% as inflation cools but housing starts slip for a third straight month', { score: 70, reddit: true, ago: 55 }),
   mkEntry(105, 4, 'Apple quietly confirms the iPhone 17 Air will not get a second camera, and that is the point', { image: true, score: 58, ago: 70 }),
   mkEntry(106, 4, 'The Verge review: a $1,999 laptop that is somehow both too much and not enough', { score: 44, ago: 90 }),
@@ -173,9 +189,11 @@ const ENTRIES = [
   mkEntry(505, 14, 'I Spent $10,000 On A Single Photo', { image: true, score: 57, ago: 4000 }),
   mkEntry(506, 13, 'Model context protocol (MCP) deep dive with the team that built it, part two of the three part series', { score: 49, ago: 5000 }),
   // --- nhl (nhl_news=16): exactly 3 entries ---
-  mkEntry(601, 16, 'Canucks sign Pettersson to an eight-year extension', { image: true, score: 72, ago: 22, summary: SHORT_SUMMARY }),
-  mkEntry(602, 16, 'Oilers beat Flames 4-3 in overtime', { score: 46, ago: 140, summary: SHORT_SUMMARY }),
-  mkEntry(603, 16, 'Trade deadline primer: every team\'s cap space, needs and likely sellers', { score: 39, ago: 400 }),
+  // NHL's three cards have no preview (PR5a): the tab, with its end row,
+  // fits on one 390×844 screen, which the read-model flows lean on.
+  mkEntry(601, 16, 'Canucks sign Pettersson to an eight-year extension', { image: true, score: 72, ago: 22, summary: SHORT_SUMMARY, preview: null }),
+  mkEntry(602, 16, 'Oilers beat Flames 4-3 in overtime', { score: 46, ago: 140, summary: SHORT_SUMMARY, preview: null }),
+  mkEntry(603, 16, 'Trade deadline primer: every team\'s cap space, needs and likely sellers', { score: 39, ago: 400, preview: null }),
 ]
 
 const FOR_YOU_IDS = [101, 301, 102, 201, 401, 104, 303, 502]

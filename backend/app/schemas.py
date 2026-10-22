@@ -487,6 +487,12 @@ class EntryListOut(BaseModel):
     # trip to /api/entries/{id}/summary on cards that have been
     # expanded before.
     cached_summary: Optional[str] = None
+    # The blurb under the headline (D34): the cached summary when
+    # there is one, else the feed's own description cleaned and cut
+    # to about 300 characters; null when there is nothing to show.
+    # Computed at projection time (``routes.entries.card_preview``),
+    # never stored. Old bundles ignore it.
+    preview: Optional[str] = None
     image_url: Optional[str] = None
     image_path: Optional[str] = None
     # Reddit cross-reference footer. Both null = no cross-ref found

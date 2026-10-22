@@ -35,6 +35,8 @@ import { FirstFeedButton } from './components/FirstFeedButton'
 import { Hamburger } from './components/Hamburger'
 import { LoginPage } from './components/LoginPage'
 import { SearchResults } from './components/SearchResults'
+import { ActionSheetHost } from './components/ActionSheet'
+import { voteInteractionEvents } from './components/Card'
 import { ShortcutsSheet } from './components/ShortcutsSheet'
 import { ToastHost, toast } from './components/Toast'
 import { UserBadge } from './components/UserBadge'
@@ -42,7 +44,7 @@ import { Wallpaper } from './components/Wallpaper'
 import { SkeletonGrid } from './components/Skeleton'
 import { Settings } from './components/Settings'
 import { isSettingsTab, type SettingsTab } from './lib/settingsTabs'
-import { lastStoryOpenAt, noteStoryOpened, recordBatched, recordImmediate } from './lib/interactions'
+import { holdInteraction, lastStoryOpenAt, noteStoryOpened, recordBatched, recordImmediate } from './lib/interactions'
 import { categoryLabel, rememberDisplayNames, sourceLabel } from './lib/labels'
 import { fullOrder, moveKey, orderColumns, type Move } from './lib/categories'
 import { isBuiltIn } from './lib/feedRules'
@@ -1990,8 +1992,10 @@ export function App() {
   //
   // The dwell pauses while one of App's sheets covers the list. App's own
   // state, never ``[aria-modal]``: the closed Drawer is always mounted
-  // with it. (PR5a adds the card's ActionSheet here, PR8a the TabSheet.)
-  const modalOpen = drawerOpen || settingsOpen || shortcutsOpen || tabsEditorOpen
+  // with it. The card's ⋯ sheet (ActionSheet.tsx, PR5a) reports its
+  // state through ``onOpenChange``. (PR8a adds the TabSheet here.)
+  const [actionSheetOpen, setActionSheetOpen] = useState(false)
+  const modalOpen = drawerOpen || settingsOpen || shortcutsOpen || tabsEditorOpen || actionSheetOpen
   // Read when a card is seen: the phone tab, whose partition holds every
   // story it draws (one a poll dropped too), and what is seen by then.
   const seenReadRef = useRef({ isSeen, phoneKey: phoneCol?.key })
@@ -2220,9 +2224,8 @@ export function App() {
   // the stories surface in the dashboard again, in their places (a tab's
   // snapshot kept its place; ``putBackHiddenStories`` the stories
   // themselves, which a poll may have dropped meanwhile). Used by every
-  // unhide: the Undo of the per-card eye button, of the context-menu
-  // "Hide this entry" item and of "Hide all downvoted", the eye's
-  // unhide, and Settings' Hidden list (Restore and Restore all).
+  // unhide: the Undo of a card's hide (``hideStory``) and of "Hide all
+  // downvoted", and Settings' Hidden list (Restore and Restore all).
   const restoreHiddenEntries = useCallback((ids: readonly number[]) => {
     removeIds(PREFERENCE_KEYS.hiddenEntries, [...ids])
     putBackHiddenStories(ids)
@@ -2234,36 +2237,40 @@ export function App() {
 
   // Hide entries from every column + the For You row. The
   // entries stay in the DB; they just get filtered out of the
-  // dashboard until the user clears the hidden set (a future
-  // "show hidden" affordance in Settings). The caller records a
-  // ``never`` engagement event so the ranker can also learn the
-  // user's dismissal signal.
+  // dashboard until the user restores them (Settings → Hidden).
   const hideEntries = useCallback((ids: readonly number[]) => {
     keepHiddenStories(ids)
     addIds(PREFERENCE_KEYS.hiddenEntries, [...ids])
   }, [addIds, keepHiddenStories])
   const hideEntry = useCallback((entryId: number) => hideEntries([entryId]), [hideEntries])
 
-  // Toggle the eye-button hidden state. A hide doesn't mark the story
-  // seen (PR3b: only opening it or Mark all uses a story up); the story
-  // leaves its tab at once and its Undo puts it back in its place.
-  const toggleHideEntry = useCallback(
+  // Hide a story (PR5a, D2): the card's ⋯ → Hide, a swipe left, and
+  // the ``h`` key. The story leaves its tab at once (a hide doesn't
+  // mark it seen, PR3b) and the toast's Undo puts it back in its
+  // place. The ranking's ``never`` is held on the device until the
+  // Undo window closes (D25): the toast expiring releases it, Undo
+  // cancels it, and the page hiding sends whatever is still held.
+  // (PR5b merges quick hides into one toast, "2 hidden · Undo".)
+  //
+  // Slice 21: a ``useCallback`` over stable callbacks, so Column's and
+  // Card's memos can keep it.
+  const hideStory = useCallback(
     (entryId: number) => {
-      // ``latestPrefs()``: Column's memo keeps old callbacks, whose
-      // render-time hidden set can be out of date.
-      const isHidden = latestPrefs().hiddenEntries.includes(entryId)
-      if (isHidden) {
-        restoreHiddenEntry(entryId)
-        toast('Entry unhidden.', 'info')  // no Undo: the act of un-hiding IS the undo
-      } else {
-        hideEntry(entryId)
-        toast('Hidden.', {
-          kind: 'info',
-          action: { label: 'Undo', onClick: () => restoreHiddenEntry(entryId) },
-        })
-      }
+      hideEntry(entryId)
+      const hold = holdInteraction({ entry_id: entryId, type: 'never' })
+      toast('Hidden', {
+        kind: 'info',
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            hold.cancel()
+            restoreHiddenEntry(entryId)
+          },
+        },
+        onExpire: hold.release,
+      })
     },
-    [latestPrefs, hideEntry, restoreHiddenEntry],
+    [hideEntry, restoreHiddenEntry],
   )
 
   // Star / unstar an entry. Stars are a long-term save-for-later
@@ -2288,6 +2295,22 @@ export function App() {
     setStarred(entryId, !wasStarred)
     return wasStarred
   }, [latestPrefs, setStarred])
+  // The card's bookmark and the ``b`` key (PR5a, D2): saving is silent
+  // (the bookmark fills); an unsave shows "Removed from Saved · Undo",
+  // whose Undo saves it again (an add, not a toggle, so it puts back
+  // exactly that). In Saved the card leaves the list, so without this
+  // Undo an accidental unsave could not be undone.
+  const starStory = useCallback(
+    (entryId: number) => {
+      const wasStarred = toggleStarEntry(entryId)
+      if (!wasStarred) return
+      toast('Removed from Saved', {
+        kind: 'info',
+        action: { label: 'Undo', onClick: () => setStarred(entryId, true) },
+      })
+    },
+    [toggleStarEntry, setStarred],
+  )
 
   // Apply a saved preset: replace the active sources filter. The
   // per-column prefs a preset captured are no longer applied: they
@@ -2391,6 +2414,11 @@ export function App() {
         return
       }
 
+      // A sheet is up (the Menu, Settings, the shortcuts, Edit tabs, a
+      // card's ⋯): no shortcut acts on the page behind it. Each sheet
+      // takes its own Esc in the capture phase.
+      if (modalOpen) return
+
       if (e.key === '/' && columns.length > 0) {
         e.preventDefault()
         // Search is collapsed to an icon until opened; open it, then
@@ -2460,55 +2488,45 @@ export function App() {
         e.preventDefault()
         toggleSummary(selectedCardId)
       } else if (e.key === 'b' && selectedCardId != null) {
-        // Toggle star (save-for-later) on the selected card.
-        // ``b`` for bookmark is the standard iOS / Gmail
-        // affordance; doesn't conflict with browser defaults
-        // (Cmd+B is bold-text in form fields but does nothing
-        // on the dashboard surface). Same modifier guards as
-        // ``s`` so Cmd+B still works when the dashboard has
-        // focus and a form field is active.
+        // Save or unsave the selected card. ``b`` for bookmark is
+        // the standard iOS / Gmail affordance; doesn't conflict with
+        // browser defaults (Cmd+B is bold-text in form fields but
+        // does nothing on the dashboard surface). Same modifier
+        // guards as ``s`` so Cmd+B still works when the dashboard
+        // has focus and a form field is active.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        const wasStarred = toggleStarEntry(selectedCardId)
-        // Mirrors the star button's onClick (Card.tsx) — the ranker
+        // Mirrors the bookmark's onClick (Card.tsx) — the ranker
         // needs this event regardless of input path, or the
         // preference vector never learns from keyboard-driven saves.
         // Only a save records it: unsaving is not a save.
-        if (!wasStarred) recordImmediate({ entry_id: selectedCardId, type: 'bookmark' })
-        toast(
-                          wasStarred
-                            ? 'Removed from Saved.'
-                            : 'Saved for later — see the Saved column.',
-                          {
-                            kind: 'info',
-                            action: {
-                              label: 'Undo',
-                              onClick: () => setStarred(selectedCardId, wasStarred),
-                            },
-                          },
-                        )
+        if (!latestPrefs().starredEntries.includes(selectedCardId)) {
+          recordImmediate({ entry_id: selectedCardId, type: 'bookmark' })
+        }
+        starStory(selectedCardId)
       } else if (e.key === 'h' && selectedCardId != null) {
-        // Toggle the eye button (hide) on the selected card.
-        // ``h`` for hide is the natural mirror of ``b``
-        // (bookmark). It conflicts
-        // with browser-level shortcuts less often than
-        // ``e`` (which is "find previous" in some
-        // browsers). Same modifier guards as the other
-        // single-key shortcuts so Cmd+H (Hide App on
-        // macOS) still works when the dashboard has
-        // focus.
+        // Hide the selected card, with Undo. ``h`` for hide is the
+        // natural mirror of ``b`` (bookmark). It conflicts with
+        // browser-level shortcuts less often than ``e`` (which is
+        // "find previous" in some browsers). Same modifier guards as
+        // the other single-key shortcuts so Cmd+H (Hide App on
+        // macOS) still works when the dashboard has focus.
         if (e.metaKey || e.ctrlKey || e.altKey) return
         e.preventDefault()
-        // Mirrors the eye button's onClick (Card.tsx): record the
-        // 'never' signal only on the hide direction (not unhide),
-        // same guard the button uses. Without this the preference
-        // vector never sees keyboard-driven hides — a card hidden
-        // with 'h' looked identical to one never touched, so the
-        // ranker kept recommending the same kind of thing.
-        if (!hiddenSet.has(selectedCardId)) {
-          recordImmediate({ entry_id: selectedCardId, type: 'never' })
+        hideStory(selectedCardId)
+      } else if ((e.key === 'a' || e.key === 'z') && selectedCardId != null) {
+        // ▲ / ▼ on the selected card (C6), as its buttons do: the
+        // same key again takes the vote back. Modifier guards so
+        // Cmd+A (select all) and Cmd+Z (undo) still work.
+        if (e.metaKey || e.ctrlKey || e.altKey) return
+        e.preventDefault()
+        const dir = e.key === 'a' ? 'up' : 'down'
+        const prev = votedMap.get(selectedCardId) ?? null
+        const next = prev === dir ? null : dir
+        for (const type of voteInteractionEvents(prev, next)) {
+          recordImmediate({ entry_id: selectedCardId, type })
         }
-        toggleHideEntry(selectedCardId)
+        voteEntry(selectedCardId, next)
       } else if (e.key === 'r' && !e.metaKey && !e.ctrlKey && !e.altKey) {
         // Refresh the dashboard. Bare ``r``; Cmd+R / Ctrl+R
         // already triggers the browser reload so we don't fight
@@ -2530,11 +2548,12 @@ export function App() {
     latestPart,
     toggleSummary,
     refresh,
-    toggleHideEntry,
-    hiddenSet,
-    starredSet,
-    toggleStarEntry,
-    setStarred,
+    modalOpen,
+    hideStory,
+    starStory,
+    latestPrefs,
+    votedMap,
+    voteEntry,
     openSettings,
   ])
 
@@ -3166,33 +3185,8 @@ export function App() {
               onOpenEntry={openEntry}
               expandedSummaries={expandedSummaries}
               onToggleSummary={toggleSummary}
-              onHide={(entryId) => {
-                hideEntry(entryId)
-                toast('Entry hidden.', {
-                  kind: 'info',
-                  action: {
-                    label: 'Undo',
-                    onClick: () => restoreHiddenEntry(entryId),
-                  },
-                })
-              }}
-              onHideToggle={toggleHideEntry}
-              hiddenSet={hiddenSet}
-              onStar={(entryId) => {
-                const wasStarred = toggleStarEntry(entryId)
-                toast(
-                  wasStarred
-                    ? 'Removed from Saved.'
-                    : 'Saved for later — see the Saved column.',
-                  {
-                    kind: 'info',
-                    action: {
-                      label: 'Undo',
-                      onClick: () => setStarred(entryId, wasStarred),
-                    },
-                  },
-                )
-              }}
+              onHide={hideStory}
+              onStar={starStory}
               starredSet={starredSet}
               onVote={voteEntry}
               votedMap={votedMap}
@@ -3260,33 +3254,8 @@ export function App() {
                         expanded={expandedSummaries.has(e.id)}
                         onToggleSummary={() => toggleSummary(e.id)}
                         onActivate={() => openEntry(e)}
-                        onHide={() => {
-                          hideEntry(e.id)
-                          toast('Entry hidden.', {
-                            kind: 'info',
-                            action: {
-                              label: 'Undo',
-                              onClick: () => restoreHiddenEntry(e.id),
-                            },
-                          })
-                        }}
-                        onHideToggle={() => toggleHideEntry(e.id)}
-                        hidden={hiddenSet.has(e.id)}
-                        onStar={() => {
-                          const wasStarred = toggleStarEntry(e.id)
-                          toast(
-                            wasStarred
-                              ? 'Removed from Saved.'
-                              : 'Saved for later — see the Saved column.',
-                            {
-                              kind: 'info',
-                              action: {
-                                label: 'Undo',
-                                onClick: () => setStarred(e.id, wasStarred),
-                              },
-                            },
-                          )
-                        }}
+                        onHide={() => hideStory(e.id)}
+                        onStar={() => starStory(e.id)}
                         starred={starredSet.has(e.id)}
                         onVote={(dir) => voteEntry(e.id, dir)}
                         vote={votedMap.get(e.id) ?? null}
@@ -3323,33 +3292,8 @@ export function App() {
                       onOpenTab={openTab}
                       onHoldChange={(hold) => setHold(col.key, hold)}
                       onSelectionFolded={dropSelection}
-                      onHideEntry={(entryId) => {
-                        hideEntry(entryId)
-                        toast('Entry hidden.', {
-                          kind: 'info',
-                          action: {
-                            label: 'Undo',
-                            onClick: () => restoreHiddenEntry(entryId),
-                          },
-                        })
-                      }}
-                      onHideToggle={toggleHideEntry}
-                      hiddenSet={hiddenSet}
-                      onStarEntry={(entryId) => {
-                        const wasStarred = toggleStarEntry(entryId)
-                        toast(
-                            wasStarred
-                              ? 'Removed from Saved.'
-                              : 'Saved for later — see the Saved column.',
-                            {
-                              kind: 'info',
-                              action: {
-                                label: 'Undo',
-                                onClick: () => setStarred(entryId, wasStarred),
-                              },
-                            },
-                          )
-                      }}
+                      onHideEntry={hideStory}
+                      onStarEntry={starStory}
                       starredSet={starredSet}
                       onVoteEntry={voteEntry}
                       votedMap={votedMap}
@@ -3511,33 +3455,8 @@ export function App() {
                     onOpenTab={openTab}
                     onHoldChange={(hold) => setHold(phoneCol.key, hold)}
                     onSelectionFolded={dropSelection}
-                    onHideEntry={(entryId) => {
-                      hideEntry(entryId)
-                      toast('Entry hidden.', {
-                        kind: 'info',
-                        action: {
-                          label: 'Undo',
-                          onClick: () => restoreHiddenEntry(entryId),
-                        },
-                      })
-                    }}
-                    onHideToggle={toggleHideEntry}
-                    hiddenSet={hiddenSet}
-                    onStarEntry={(entryId) => {
-                      const wasStarred = toggleStarEntry(entryId)
-                      toast(
-                                wasStarred
-                                  ? 'Removed from Saved.'
-                                  : 'Saved for later — see the Saved column.',
-                                {
-                                  kind: 'info',
-                                  action: {
-                                    label: 'Undo',
-                                    onClick: () => setStarred(entryId, wasStarred),
-                                  },
-                                },
-                              )
-                    }}
+                    onHideEntry={hideStory}
+                    onStarEntry={starStory}
                     starredSet={starredSet}
                     onVoteEntry={voteEntry}
                     votedMap={votedMap}
@@ -3658,6 +3577,9 @@ export function App() {
         onShow={showTab}
       />
 
+      {/* The card's ⋯ sheet (PR5a). It reports open / closed so seen on
+          scroll pauses under it (``modalOpen``). */}
+      <ActionSheetHost onOpenChange={setActionSheetOpen} />
       <ToastHost />
     </div>
   )
