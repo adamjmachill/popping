@@ -166,7 +166,8 @@ function mockApi(context, opts = {}) {
     f.times--
     return f
   }
-  const forYouIds = F.FOR_YOU.map((e) => e.id)
+  // The ranking's order, paused feeds' stories included (dropped below).
+  const forYouIds = F.FOR_YOU_RANKED.map((e) => e.id)
   const sourceById = (id) => db.sources.find((s) => s.id === id)
   const sourceName = (id) => (sourceById(id) || {}).name || 'unknown'
   const entryById = (id) => db.entries.find((e) => e.id === id)
@@ -175,6 +176,23 @@ function mockApi(context, opts = {}) {
   const hiddenIds = () => {
     const v = db.preferences.has('hidden_entries') ? db.preferences.get('hidden_entries').value : null
     return new Set(Array.isArray(v) ? v.filter(isEntryId) : [])
+  }
+  // A story fetched inside the last ``hours``. (The server's
+  // ``fetched_at >=`` would drop a story with no fetched_at; none of the
+  // fixtures lacks one.)
+  const inWindow = (e, hours) => !e.fetched_at || Date.parse(e.fetched_at) >= F.NOW - hours * 3600000
+  // Each feed's ``cap`` best stories: by composite_score, then
+  // fetched_at, then id, descending (routes/entries.py's row_number).
+  const capPerSource = (rows, cap) => {
+    const ranked = [...rows].sort((a, b) => b.composite_score - a.composite_score || Date.parse(b.fetched_at) - Date.parse(a.fetched_at) || b.id - a.id)
+    const seen = new Map()
+    const keep = new Set()
+    for (const e of ranked) {
+      const n = (seen.get(e.source_id) || 0) + 1
+      seen.set(e.source_id, n)
+      if (n <= cap) keep.add(e.id)
+    }
+    return rows.filter((e) => keep.has(e.id))
   }
   let interactionId = 1000
   return context.route((u) => /^\/(api|auth|assets)\//.test(new URL(u).pathname), async (route) => {
@@ -249,6 +267,17 @@ function mockApi(context, opts = {}) {
       if (q) rows = rows.filter((e) => e.title.toLowerCase().includes(q) || String(e.meta?.summary || '').toLowerCase().includes(q))
       if (cat) rows = rows.filter((e) => (sourceById(e.source_id) || {}).category === cat)
       if (srcs.length) rows = rows.filter((e) => srcs.includes(sourceName(e.source_id)))
+      // The window (PR4b, PR4d): ``max_age_hours`` keeps the stories
+      // fetched since then, against F.NOW (the page's clock), and
+      // ``per_source_cap`` each feed's best-scoring ones in it (D28:
+      // score, then fetched_at, then id). The cap needs the window (422
+      // alone, as on the server). ``active_only`` leaves paused feeds out.
+      const hours = Number(u.searchParams.get('max_age_hours') || 0)
+      const cap = Number(u.searchParams.get('per_source_cap') || 0)
+      if (cap && !hours) return json(route, { detail: 'per_source_cap needs max_age_hours' }, 422)
+      if (u.searchParams.get('active_only') === 'true') rows = rows.filter((e) => sourceById(e.source_id).active)
+      if (hours) rows = rows.filter((e) => inWindow(e, hours))
+      if (cap) rows = capPerSource(rows, cap)
       const limit = Number(u.searchParams.get('limit') || 0)
       if (limit) rows = rows.slice(0, limit)
       return json(route, rows)
@@ -271,7 +300,14 @@ function mockApi(context, opts = {}) {
         })
       }
     }
-    if (p === '/api/foryou') return json(route, forYouIds.map(entryById).filter((e) => e && sourceById(e.source_id) && !hiddenIds().has(e.id)))
+    if (p === '/api/foryou') {
+      // As the server since PR4b: never a paused feed's story, nor a
+      // hidden one; ``max_age_hours`` as for /api/entries.
+      const hours = Number(u.searchParams.get('max_age_hours') || 0)
+      let rows = forYouIds.map(entryById).filter((e) => e && sourceById(e.source_id) && sourceById(e.source_id).active && !hiddenIds().has(e.id))
+      if (hours) rows = rows.filter((e) => inWindow(e, hours))
+      return json(route, rows)
+    }
     if (p === '/api/framing-clusters') return json(route, [])
     if (p === '/api/feed-recommendations' && m === 'GET') {
       return json(route, [

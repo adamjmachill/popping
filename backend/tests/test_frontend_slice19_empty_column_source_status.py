@@ -209,3 +209,26 @@ def test_empty_state_looks_up_the_columns_source_name():
     assert re.search(r"activeSources\.size === 1", app), (
         "a one-feed filter should name its feed as the column's sourceName"
     )
+
+
+# ---------------------------------------------------------------------------
+# 8. A quiet category says so, with one tap to a wider window (PR4d, D5)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.no_db
+def test_empty_state_offers_a_wider_window():
+    """A category tab whose feeds brought nothing in its window reads
+    "Nothing in 2 days · Show 7 days", and the offer widens the tab's
+    window through the same setter as the ⋯ control."""
+    src = _read_column()
+    # The line itself (EMPTY_WINDOW_LINES), not a comment that quotes it.
+    assert re.search(r"'2d':\s*'Nothing in 2 days · Show 7 days'", src), (
+        "the quiet-category line should be present verbatim as the 2-day entry"
+    )
+    assert "data-show-wider" in src, (
+        "the offer should be a button (data-show-wider) that widens the window"
+    )
+    assert re.search(r"onShowWider\?\.?\(|onShowWider\(", src), (
+        "the offer should call onShowWider"
+    )

@@ -6,14 +6,15 @@ import type { TabCount } from '../lib/feedOrder'
 import type { SeenRegistry } from '../lib/seen'
 import { FirstFeedButton } from './FirstFeedButton'
 import { normalizeSort, type Sort, type TabPrefs } from '../lib/sorting'
+import { WINDOWS, widerWindow, type Window } from '../lib/window'
 
 // Per-column sort/filter preferences. Owned by App (so it persists
 // across columns and across renders) and passed in here for the
-// popover to read/write. ``maxAgeHours === null`` means "no max-age
-// filter" — the popover's "all" option. The shape is ``lib/sorting``'s
-// ``TabPrefs`` (``sort`` may still hold an older build's ``top`` or
-// ``oldest``; ``normalizeSort`` reads it). ``minScore`` stays in the
-// stored shape but nothing filters on it any more.
+// popover to read/write. The shape is ``lib/sorting``'s ``TabPrefs``
+// (``sort`` may still hold an older build's ``top`` or ``oldest``;
+// ``normalizeSort`` reads it; ``window`` is the tab's window, PR4d).
+// ``minScore`` stays in the stored shape but nothing filters on it any
+// more.
 //
 // App reads a tab's prefs through ``prefsFor`` (lib/sorting), which
 // returns module constants for a tab with no stored row, because the
@@ -24,6 +25,16 @@ const SORTS: ReadonlyArray<{ value: Sort; label: string }> = [
   { value: 'newest', label: 'Newest' },
   { value: 'best', label: 'Best' },
 ]
+
+// What an empty category tab says at each window (D5), as "<said> ·
+// <offer>": the offer sets the tab's window to the next one up
+// (``widerWindow``). Nothing at All: that is the end.
+const EMPTY_WINDOW_LINES: Record<Window, string | null> = {
+  '1d': 'Nothing in 1 day · Show 7 days',
+  '2d': 'Nothing in 2 days · Show 7 days',
+  '7d': 'Nothing in 7 days · Show all',
+  all: null,
+}
 
 type Props = {
   // The tab's key (lib/columns): which sort it defaults to, whether it
@@ -97,8 +108,9 @@ type Props = {
   // a card that isn't drawn. Called with the selected id. Must be stable
   // (the memo comparator ignores callbacks).
   onSelectionFolded?: (entryId: number) => void
-  // Prefs + setter for the ⋯ popover (Mark all, Newest | Best, and the
-  // age filter). Without a setter there is no ⋯.
+  // Prefs + setter for the ⋯ popover (Mark all, Newest | Best, and
+  // Show stories from). Without a setter there is no ⋯. The empty
+  // state's "Show 7 days" writes through the same setter.
   prefs?: ColumnPrefs
   onPrefsChange?: (next: ColumnPrefs) => void
   // Optional map sourceId → category. Passed through to each Card so
@@ -288,6 +300,7 @@ export function ColumnInner({
   // end row's button, until the click it starts reads and clears it.
   const endPointerRef = useRef<string | null>(null)
   const sortLabelId = useId()
+  const windowLabelId = useId()
   const popoverRef = useRef<HTMLDivElement | null>(null)
   const prefsButtonRef = useRef<HTMLButtonElement | null>(null)
   // The latest hold callback, for the marker's observer (the memo keeps
@@ -720,27 +733,45 @@ export function ColumnInner({
                 </div>
               </div>
             )}
-            <div>
-              <label className="block text-ios-caption uppercase tracking-wide text-label-tertiary mb-1">
-                Hide if older than
-              </label>
-              <select
-                value={prefs.maxAgeHours == null ? 'all' : String(prefs.maxAgeHours)}
-                onChange={(e) => {
-                  const v = e.target.value
-                  onPrefsChange({
-                    ...prefs,
-                    maxAgeHours: v === 'all' ? null : Number(v),
-                  })
-                }}
-                className="select-ios w-full min-h-[44px] rounded-ios bg-bg-surface border border-hairline pl-3 pr-8 text-ios-body text-label-primary"
-              >
-                <option value="all">All</option>
-                <option value="1">1 hour</option>
-                <option value="4">4 hours</option>
-                <option value="24">24 hours</option>
-              </select>
-            </div>
+            {/* Show stories from: the tab's window (D5). Not on Saved,
+                which lists every save. */}
+            {columnKey !== SAVED_KEY && (
+              <div>
+                <div
+                  id={windowLabelId}
+                  className="text-ios-caption uppercase tracking-wide text-label-tertiary mb-1"
+                >
+                  Show stories from
+                </div>
+                <div
+                  role="group"
+                  aria-labelledby={windowLabelId}
+                  className="grid grid-cols-4 rounded-ios overflow-hidden border border-hairline"
+                >
+                  {WINDOWS.map((o) => {
+                    const active = prefs.window === o.value
+                    return (
+                      <button
+                        key={o.value}
+                        type="button"
+                        data-window={o.value}
+                        aria-pressed={active}
+                        onClick={() => {
+                          if (!active) onPrefsChange({ ...prefs, window: o.value })
+                        }}
+                        className={`min-h-[44px] px-1 text-ios-body whitespace-nowrap transition ${
+                          active
+                            ? 'bg-bg-elevated text-accent'
+                            : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
+                        }`}
+                      >
+                        {o.label}
+                      </button>
+                    )
+                  })}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </header>
@@ -768,6 +799,8 @@ export function ColumnInner({
             sourceName={sourceName}
             sourcesByName={sourcesByName}
             onAddFeed={noOwnFeeds && (columnKey === SAVED_KEY || columnKey === FORYOU_KEY) ? onAddFeed : undefined}
+            window={columnKey.startsWith('cat:') ? prefs?.window : undefined}
+            onShowWider={prefs && onPrefsChange ? (next) => onPrefsChange({ ...prefs, window: next }) : undefined}
           />
         ) : (
           <>
@@ -1020,19 +1053,49 @@ function EmptyColumnMessage({
   sourceName,
   sourcesByName,
   onAddFeed,
+  window: tabWindow,
+  onShowWider,
 }: {
   sourceName?: string
   sourcesByName?: Map<string, import('../api').Source>
   // Set on an empty Saved or For You while every feed is a built-in.
   onAddFeed?: () => void
+  // A category tab's window (PR4d, D5): at 1, 2 or 7 days an empty
+  // tab says "Nothing in 2 days · Show 7 days", and the offer widens
+  // it (``onShowWider``). Unset on Saved, For You and a filter.
+  window?: Window
+  onShowWider?: (next: Window) => void
 }) {
   // The column's feed: the one feed a filter shows, or the feed named
   // like a category.
   const source = sourceName != null ? sourcesByName?.get(sourceName) : undefined
-  // No such feed (Saved, For You, a filter of several feeds) or
-  // sourcesByName not provided: "No stories yet", with the first-feed
-  // button when set.
+  // A quiet category (D5): its feeds brought nothing in the window.
+  // After a feed's own trouble (below), which says why, but before
+  // "no entries match": the window is the filter.
+  const quiet = tabWindow != null && EMPTY_WINDOW_LINES[tabWindow] != null && widerWindow(tabWindow)
+  const quietLine = () => {
+    const [said, offer] = EMPTY_WINDOW_LINES[tabWindow!]!.split(' · ')
+    const next = widerWindow(tabWindow!)!
+    return (
+      <div data-window-empty className="flex min-h-[44px] items-center gap-1 px-1 text-ios-body text-label-secondary">
+        <span>{said}</span>
+        <span aria-hidden="true">·</span>
+        {onShowWider ? (
+          <button type="button" data-show-wider onClick={() => onShowWider(next)} className="min-h-[44px] px-1 text-accent active:opacity-70">
+            {offer}
+          </button>
+        ) : (
+          <span>{offer}</span>
+        )}
+      </div>
+    )
+  }
+  // No such feed (Saved, For You, a filter of several feeds, a category
+  // with no feed of its name) or sourcesByName not provided: the window
+  // line on a quiet category, else "No stories yet", with the
+  // first-feed button when set.
   if (!source) {
+    if (quiet) return quietLine()
     return (
       <div className="px-1 space-y-3">
         <p className="text-ios-body text-label-secondary">No stories yet</p>
@@ -1063,6 +1126,7 @@ function EmptyColumnMessage({
       </p>
     )
   }
+  if (quiet) return quietLine()
   if (source.last_fetch_at) {
     // Format the timestamp as "Xh ago" without pulling in a date
     // library. Sufficient granularity for "is the scheduler still

@@ -15,13 +15,13 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR2c Refuse whole-list PUTs of set keys | B (floating) | merged | #37 |
 | PR3a Desktop single scroller and batching | F | merged | #43 |
 | PR3b Read model | F | merged | #45 |
-| PR3c Seen on scroll | F | in review | #46 |
+| PR3c Seen on scroll | F | merged | #46 |
 | Gate 1 | owner | | |
 | PR4a Ingest rules, brief guard, On this day | B | merged | #30 |
 | PR4b Window parameters and by-ids projection | B | merged | #31 |
-| PR4c Saved by id | F | in review | #47 |
-| PR4d Window UI | F | not started | |
-| PR5a Reddit card, action sheet, Hide hold | F | in review | |
+| PR4c Saved by id | F | merged | #47 |
+| PR4d Window UI | F | in review | |
+| PR5a Reddit card, action sheet, Hide hold | F | merged | #48 |
 | PR5b Muted feeds | F | not started | |
 | PR6a queue_check and the check-now route | B | merged | #33 |
 | PR6b Pull to refresh and checkTabNow | F | not started | |

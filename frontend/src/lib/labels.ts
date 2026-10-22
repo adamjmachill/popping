@@ -92,10 +92,16 @@ export function sourceLabel(name: string | null | undefined): string {
   return displayNames.get(name) ?? slugLabel(name)
 }
 
+// Categories whose label isn't their title case.
+const KNOWN_CATEGORIES: Record<string, string> = {
+  on_this_day: 'On this day',
+}
+
 /** "ai" -> "AI", "erp" -> "ERP", "commodities" -> "Commodities".
  *  Labels with capitals already ("For You") are returned unchanged. */
 export function categoryLabel(name: string | null | undefined): string {
   if (!name) return ''
+  if (KNOWN_CATEGORIES[name]) return KNOWN_CATEGORIES[name]
   if (/[A-Z]/.test(name)) return name
   return name.split(/[_\s-]+/).filter(Boolean).map(titleWord).join(' ')
 }

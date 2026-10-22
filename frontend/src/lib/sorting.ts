@@ -11,24 +11,28 @@
 
 import type { ColKey } from './columns.ts'
 import { FORYOU_KEY, SAVED_KEY } from './columns.ts'
+import { DEFAULT_WINDOW, windowOf, type Window } from './window.ts'
 
 /** The two orders a tab offers. */
 export type Sort = 'newest' | 'best'
 
-/** What a stored ``column_prefs:<name>`` row may hold. ``top`` and
- *  ``oldest`` come from older builds; ``minScore`` is kept so the
- *  stored shape doesn't change, but nothing filters on it any more. */
+/** A tab's prefs as ``prefsFor`` reads them and Column writes them.
+ *  ``top`` and ``oldest`` come from older builds; ``minScore`` is kept
+ *  so the stored shape doesn't change, but nothing filters on it any
+ *  more. ``window`` is the tab's window (lib/window, PR4d); a row an
+ *  older build wrote has ``maxAgeHours`` instead, which ``prefsFor``
+ *  reads through ``windowOf`` and never writes back. */
 export type TabPrefs = {
   sort: 'top' | 'newest' | 'oldest' | 'best'
   minScore: number
-  maxAgeHours: number | null
+  window: Window
 }
 
 // Module constants, not fresh objects: Column's memo compares prefs by
 // reference, so a tab with no stored row must get the same object on
 // every render.
-export const NEWEST_PREFS: TabPrefs = { sort: 'newest', minScore: 0, maxAgeHours: null }
-export const BEST_PREFS: TabPrefs = { sort: 'best', minScore: 0, maxAgeHours: null }
+export const NEWEST_PREFS: TabPrefs = { sort: 'newest', minScore: 0, window: DEFAULT_WINDOW }
+export const BEST_PREFS: TabPrefs = { sort: 'best', minScore: 0, window: DEFAULT_WINDOW }
 
 /** The fields a story is ordered by. */
 export type Sortable = {
@@ -98,8 +102,10 @@ const merged = new WeakMap<object, Partial<Record<Sort, TabPrefs>>>()
 
 /** A tab's prefs: the stored row (``columnPrefs[tab.name]``; rows stay
  *  keyed by the column's name) over the tab's defaults, with the sort
- *  read by ``normalizeSort``. A spread of the result is what Column
- *  writes back, so a write can never store ``top`` or ``oldest``. */
+ *  read by ``normalizeSort`` and the window by ``windowOf``. A spread of
+ *  the result is what Column writes back, so a write can never store
+ *  ``top`` or ``oldest``, and a row that still holds an older build's
+ *  ``maxAgeHours`` is written back with ``window`` and without it. */
 export function prefsFor(
   columnPrefs: Readonly<Record<string, unknown>>,
   tab: { key: ColKey; name: string },
@@ -111,12 +117,11 @@ export function prefsFor(
   const r = row as Record<string, unknown>
   const sort = normalizeSort(r.sort, tab.key)
   const minScore = typeof r.minScore === 'number' && Number.isFinite(r.minScore) ? r.minScore : 0
-  const maxAgeHours =
-    typeof r.maxAgeHours === 'number' && Number.isFinite(r.maxAgeHours) && r.maxAgeHours > 0 ? r.maxAgeHours : null
-  if (r.sort === sort && r.minScore === minScore && r.maxAgeHours === maxAgeHours) return row as TabPrefs
+  const window = windowOf(row)
+  if (r.sort === sort && r.minScore === minScore && r.window === window && !('maxAgeHours' in r)) return row as TabPrefs
   const cached = merged.get(row)?.[fallback]
   if (cached) return cached
-  const out: TabPrefs = { sort, minScore, maxAgeHours }
+  const out: TabPrefs = { sort, minScore, window }
   merged.set(row, { ...merged.get(row), [fallback]: out })
   return out
 }

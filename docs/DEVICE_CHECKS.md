@@ -71,20 +71,29 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #47 · On For You, note the top three stories. Hide the first, wait a minute with Popping open, hide the third, and wait another minute. Open Menu → Settings → Hidden, tap Restore all, close Settings and open the first story's category tab. Pass: the story is there straight away; back on For You, the three are in the order you noted (a new story may sit between them).
 - [ ] #47 · (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
 - [ ] #47 · (If you have more than 30 saves) Open the Saved tab, force-quit Popping and reopen it. Pass: Saved fills in without the app freezing, and more stories load as you scroll to the end.
-- [ ] #<pr> · Open any tab. Pass: each card shows the feed's icon, name and a short time ("5h") on one line above the title, a line or two of preview text under the title (grey, cut after 2 lines; a card with nothing to show has none), and one row of buttons under it: ▲ ▼, a bookmark, Share, the Summary chevron and ⋯; no ✓, no eye, no "ago".
-- [ ] #<pr> · Tap the preview text under a title. Pass: the story opens in Safari; back in Popping that card is still in place and the tab's badge is one lower.
-- [ ] #<pr> · Tap the Summary chevron on a card with preview text. Pass: the full summary opens in place and the preview line is gone; tapping the chevron again closes it and the preview is back.
-- [ ] #<pr> · Tap ▲ on a card, then ▲ again; then ▼. Pass: the arrow turns orange, then grey, then ▼ turns blue; the card never moves and no toast shows.
-- [ ] #<pr> · Tap the bookmark on a card, then tap it again. Pass: it fills with no toast; the second tap empties it and shows "Removed from Saved · Undo", and Undo fills it again; the story is in Saved after that.
-- [ ] #<pr> · Tap Share on a card. Pass: the iOS share sheet opens with the story's own link (for a Reddit story, reddit.com, not old.reddit.com); cancelling it does nothing.
-- [ ] #<pr> · Tap a card's ⋯. Pass: a sheet rises from the bottom with the story's title and the rows Hide, Edit feed, Copy link, Open in browser and Cancel, all in reach; a tap on the dimmed area above closes it; Edit feed opens that feed in Settings; Copy link shows "Link copied".
-- [ ] #<pr> · ⋯ → Hide on a card, then Undo in the toast. Pass: the card leaves at once and comes back in its place; a few minutes later that story is not listed under Menu → Settings → History's hides (the ranking never heard about it).
-- [ ] #<pr> · ⋯ → Hide on a card and let the toast go. Pass: the card stays gone after a force-quit and reopen, and the story is listed under Settings → History's hides within a few minutes.
-- [ ] #<pr> · Swipe a card left, past about a third of its width. Pass: a red "Hide" shows under it as it moves, and letting go hides it with "Hidden · Undo"; a short drag left springs back and hides nothing.
-- [ ] #<pr> · Swipe a card right. Pass: it doesn't move and nothing happens.
-- [ ] #<pr> · With a card's ⋯ sheet open, wait 3 seconds with cards behind it, then close it and flick the top card off the screen. Pass: the badge doesn't drop (a story behind the sheet wasn't being read).
-- [ ] #<pr> · Tap a feed's name on a card. Pass: that feed opens in Settings (as before; a one-feed view comes later).
-- [ ] #<pr> · (If you have a desktop) On the laptop, right-click a card. Pass: a small menu with Hide, Edit feed, Copy link and Open in browser; with a card selected by the arrow keys, `a` and `z` vote and vote back, `h` hides with Undo, `b` saves silently and unsaves with "Removed from Saved · Undo", and `?` lists the four keys.
+- [ ] #48 · Open any tab. Pass: each card shows the feed's icon, name and a short time ("5h") on one line above the title, a line or two of preview text under the title (grey, cut after 2 lines; a card with nothing to show has none), and one row of buttons under it: ▲ ▼, a bookmark, Share, the Summary chevron and ⋯; no ✓, no eye, no "ago".
+- [ ] #48 · Tap the preview text under a title. Pass: the story opens in Safari; back in Popping that card is still in place and the tab's badge is one lower.
+- [ ] #48 · Tap the Summary chevron on a card with preview text. Pass: the full summary opens in place and the preview line is gone; tapping the chevron again closes it and the preview is back.
+- [ ] #48 · Tap ▲ on a card, then ▲ again; then ▼. Pass: the arrow turns orange, then grey, then ▼ turns blue; the card never moves and no toast shows.
+- [ ] #48 · Tap the bookmark on a card, then tap it again. Pass: it fills with no toast; the second tap empties it and shows "Removed from Saved · Undo", and Undo fills it again; the story is in Saved after that.
+- [ ] #48 · Tap Share on a card. Pass: the iOS share sheet opens with the story's own link (for a Reddit story, reddit.com, not old.reddit.com); cancelling it does nothing.
+- [ ] #48 · Tap a card's ⋯. Pass: a sheet rises from the bottom with the story's title and the rows Hide, Edit feed, Copy link, Open in browser and Cancel, all in reach; a tap on the dimmed area above closes it; Edit feed opens that feed in Settings; Copy link shows "Link copied".
+- [ ] #48 · ⋯ → Hide on a card, then Undo in the toast. Pass: the card leaves at once and comes back in its place; a few minutes later that story is not listed under Menu → Settings → History's hides (the ranking never heard about it).
+- [ ] #48 · ⋯ → Hide on a card and let the toast go. Pass: the card stays gone after a force-quit and reopen, and the story is listed under Settings → History's hides within a few minutes.
+- [ ] #48 · Swipe a card left, past about a third of its width. Pass: a red "Hide" shows under it as it moves, and letting go hides it with "Hidden · Undo"; a short drag left springs back and hides nothing.
+- [ ] #48 · Swipe a card right. Pass: it doesn't move and nothing happens.
+- [ ] #48 · With a card's ⋯ sheet open, wait 3 seconds with cards behind it, then close it and flick the top card off the screen. Pass: the badge doesn't drop (a story behind the sheet wasn't being read).
+- [ ] #48 · Tap a feed's name on a card. Pass: that feed opens in Settings (as before; a one-feed view comes later).
+- [ ] #48 · (If you have a desktop) On the laptop, right-click a card. Pass: a small menu with Hide, Edit feed, Copy link and Open in browser; with a card selected by the arrow keys, `a` and `z` vote and vote back, `h` hides with Undo, `b` saves silently and unsaves with "Removed from Saved · Undo", and `?` lists the four keys.
+- [ ] #<pr> · Open a category tab's ⋯. Pass: it shows "Show stories from" with 1 day · 2 days · 7 days · All and 2 days chosen, and no "Hide if older than".
+- [ ] #<pr> · Force-quit and reopen the app, then open a busy tab (News). Pass: its stories all arrived in the last 2 days (no story older than that above or below the line), and a feed that posts a lot shows at most 25 of its stories.
+- [ ] #<pr> · On that tab, tap ⋯ → 7 days. Pass: the older stories join the list in order (on Newest, at the end; ones you had read go under "Earlier"), the badge counts the new ones, and the choice holds after a force-quit and reopen.
+- [ ] #<pr> · With that tab at 7 days, switch to another tab and back. Pass: the 7-day list is there at once, in the same order; set it back to 2 days and the older stories leave.
+- [ ] #<pr> · Open Saved's ⋯. Pass: it has no "Show stories from", and Saved still lists every save, old ones included.
+- [ ] #<pr> · Open a tab whose feeds brought nothing in 2 days (or pick 1 day on a slow tab). Pass: the tab is still in the strip and reads "Nothing in 2 days · Show 7 days" (or "Nothing in 1 day"); tapping "Show 7 days" shows its stories.
+- [ ] #<pr> · Pause every feed of one category (Menu → Settings → Feeds), then force-quit and reopen. Pass: that tab is gone from the strip and from Edit tabs' list; resume one feed and reopen: it is back.
+- [ ] #<pr> · Open the On this day tab. Pass: the tab reads "On this day", and its cards say "On this day" where the time would be.
+- [ ] #<pr> · (If you have a desktop) On the laptop, look at the For You row. Pass: it shows 6 stories, and the rest of For You's stories are in their category columns.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 

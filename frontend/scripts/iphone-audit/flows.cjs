@@ -719,9 +719,10 @@ const jumpLabels = async (page) =>
 const gridLabels = async (page) => (await page.locator('main.grid section header h2').allTextContents()).map((t) => t.trim())
 const layoutWrites = (writes) => writes.filter((w) => w.key === 'category_layout')
 // The tab order a move stores, as every tab but Brief in the default
-// order: Saved, For You, then the fixture's categories with stories by
-// label (CATEGORY_40 has none until PR4d).
-const DEFAULT_ORDER = ['meta:saved', 'meta:foryou', 'cat:deals', 'cat:nhl', 'cat:news', 'cat:podcast', 'cat:security', 'cat:video']
+// order: Saved, For You, then the fixture's categories by label (from
+// PR4d every active feed's category, so CATEGORY_40, with no stories,
+// has a tab too).
+const DEFAULT_ORDER = ['meta:saved', 'meta:foryou', 'cat:deals', 'cat:nhl', 'cat:news', 'cat:podcast', `cat:${F.CATEGORY_40}`, 'cat:security', 'cat:video']
 
 async function openTabsEditor(page) {
   await tap(page, editPill(page))
@@ -1061,6 +1062,17 @@ async function swipeCard(page, card, dx) {
   const from = { x: box.x + Math.min(box.width * 0.5, 120), y: box.y + Math.min(box.height / 2, 14) }
   return touchDrag(page, { from, to: { x: from.x + dx, y: from.y }, steps: 12, stepMs: 30 })
 }
+
+// --- PR4d: the window ------------------------------------------------------------
+
+// A device that first loaded the read model a month ago: D33's baseline
+// (stories fetched more than 48 h before the first load count as seen)
+// then leaves the fixture's 3- and 10-day-old stories unseen, as a
+// story that arrived since the deploy is on a phone.
+const oldDevice = (page) =>
+  page.addInitScript((at) => {
+    localStorage.setItem('popping.v1.firstRunAt', String(at))
+  }, F.NOW - 30 * 24 * 3600000)
 
 module.exports = [
   flow('flow-fj-youtube-handle', {
@@ -4339,8 +4351,11 @@ module.exports = [
         )
       }
       if (visited.includes('News')) fail('TAB-HIDE-DESK', `the arrow keys reached the hidden News: ${JSON.stringify(visited)}`)
-      // The last press stays on the last column.
-      const want = [null, ...grid.slice(1), grid[grid.length - 1]]
+      // The last press stays on the last column. An empty column (Saved;
+      // from PR4d a category with no stories in 2 days) selects nothing.
+      const withCards = await page.evaluate(() => [...document.querySelectorAll('main.grid section')].map((s) => !!s.querySelector('article[data-card-id]')))
+      const stop = (i) => (withCards[i] ? grid[i] : null)
+      const want = [null, ...grid.slice(1).map((_, i) => stop(i + 1)), stop(grid.length - 1)]
       if (grid[0] !== 'Saved') fail('TAB-HIDE-DESK', `the grid starts with ${JSON.stringify(grid[0])}`)
       if (JSON.stringify(visited) !== JSON.stringify(want)) fail('TAB-HIDE-DESK', `the arrow keys visited ${JSON.stringify(visited)}, expected ${JSON.stringify(want)}`)
     },
@@ -4609,7 +4624,11 @@ module.exports = [
     },
     run: async ({ page, fail, shot }) => {
       const row = page.locator('section').filter({ visible: true, has: page.locator('header h2', { hasText: /^For You$/ }) })
-      if (!(await waitFor(async () => (await cardCount(row)) === 25, 5000))) return fail('DESK-LAYOUT', `the For You row has ${await cardCount(row)} cards, expected 25`)
+      // The row shows For You's top 6 (PR4d); a 400px window makes it
+      // taller than the window, as the 25 cards did at 800px.
+      if (!(await waitFor(async () => (await cardCount(row)) === 6, 5000))) return fail('DESK-LAYOUT', `the For You row has ${await cardCount(row)} cards, expected its top 6`)
+      await page.setViewportSize({ width: 1280, height: 400 })
+      await sleep(300)
       const scrollers = await page.evaluate(() =>
         [...document.querySelectorAll('[data-scroller]')].map((el) => ({ grid: !!el.querySelector('main.grid'), shown: el.getClientRects().length > 0 })),
       )
@@ -4620,11 +4639,12 @@ module.exports = [
         return {
           grid: document.querySelector('main.grid').getBoundingClientRect().height,
           forYou: fy ? fy.getBoundingClientRect().height : 0,
+          window: innerHeight,
           doc: document.scrollingElement.scrollHeight - innerHeight,
           scroller: sc ? sc.scrollHeight - sc.clientHeight : 0,
         }
       })
-      if (box.forYou <= 800) fail('DESK-LAYOUT', `the For You row is ${box.forYou}px tall; the flow needs one taller than the window`)
+      if (box.forYou <= box.window) fail('DESK-LAYOUT', `the For You row is ${box.forYou}px tall in a ${box.window}px window; the flow needs one taller than the window`)
       if (box.grid <= 300) fail('DESK-LAYOUT', `the grid is ${box.grid}px tall under a ${box.forYou}px For You row, expected more than 300px`)
       if (box.doc > 1) fail('DESK-LAYOUT', `the document scrolls by ${box.doc}px; only the wrapper should`)
       if (box.scroller <= 0) fail('DESK-LAYOUT', 'the wrapper has nothing to scroll')
@@ -6936,6 +6956,284 @@ module.exports = [
       const log = await harnessLog(page)
       if (!log.opened.some((o) => o.target === '_blank' && o.url.endsWith('/3/article-101'))) fail('PREVIEW', `a tap on the preview opened ${JSON.stringify(log.opened)}`)
       if (!(await waitFor(() => seenAdded(writes, 'news').includes(101), 3000))) fail('PREVIEW', `the open sent no PATCH adding 101 to seen:news: ${JSON.stringify(writes)}`)
+    },
+  }),
+
+  // --- PR4d: the window ---------------------------------------------------------
+  // (``oldDevice``, above: a device that loaded the read model a month
+  // ago, so D33's baseline doesn't count the 3- and 10-day fixture
+  // stories as seen.)
+
+  // Every tab loads the last 2 days (D5), the 25 best stories per feed in
+  // them (D28), from the feeds that aren't paused; For You loads 50 of
+  // the same 2 days. So Podcast is 401 and 402 (403 and 404 are the
+  // paused 12's, 405 is 4 days old), Video 501 to 504 (505 and 506 are
+  // older), Security has no 304 or 305 (10 is paused). The ⋯ offers Show
+  // stories from (1 day · 2 days · 7 days · All) with 2 days chosen, and
+  // no "Hide if older than"; Saved's ⋯ offers no window.
+  dashFlow('flow-window-default', {
+    before: async ({ page }) => {
+      await installClock(page)
+      page._gets = []
+      await page.route(
+        (u) => /^\/api\/(entries|foryou)$/.test(new URL(u).pathname),
+        (route) => {
+          const u = new URL(route.request().url())
+          page._gets.push(u.pathname + u.search)
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      await holdClock(page)
+      const first = page._gets.slice(0, 2).sort()
+      const want = ['/api/entries?per_category_limit=100&max_age_hours=48&per_source_cap=25&active_only=true', '/api/foryou?limit=50&max_age_hours=48']
+      if (JSON.stringify(first) !== JSON.stringify(want)) fail('WINDOW', `the first load asked ${JSON.stringify(first)}, expected ${JSON.stringify(want)}`)
+      const podcast = await openedIds(page, /^podcast/i)
+      if (JSON.stringify(podcast) !== JSON.stringify([401, 402])) fail('WINDOW', `Podcast shows ${podcast}, expected 401,402 (2 days, no paused feed)`)
+      const video = await openedIds(page, /^video/i)
+      if (JSON.stringify(video) !== JSON.stringify([501, 502, 503, 504])) fail('WINDOW', `Video shows ${video}, expected 501,502,503,504`)
+      const security = await openedIds(page, /^security/i)
+      if (security.some((id) => id === 304 || id === 305)) fail('WINDOW', `Security shows the paused feed's ${security.filter((id) => id === 304 || id === 305)}`)
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      const windows = await page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window]`).evaluateAll((els) => els.map((el) => [el.getAttribute('data-window'), el.getAttribute('aria-pressed')]))
+      if (JSON.stringify(windows) !== JSON.stringify([['1d', 'false'], ['2d', 'true'], ['7d', 'false'], ['all', 'false']])) fail('WINDOW', `Show stories from reads ${JSON.stringify(windows)}`)
+      if (await page.locator(`${MOBILE_MAIN} [data-column-popover] select`).count()) fail('WINDOW', 'the "Hide if older than" select is still there')
+      await shot('popover')
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await tap(page, phoneTab(page, /^saved/i))
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      if (await page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window]`).count()) fail('WINDOW', 'Saved offers a window')
+    },
+  }),
+
+  // ⋯ → 7 days on Nhl fetches the tab's own rows (category=nhl, 7 days,
+  // the per-feed cap, active feeds) and stores window: '7d' with no
+  // maxAgeHours; 604 (3 days old) joins at its place (Newest: last),
+  // 605 (10 days) doesn't. Away on News nothing is fetched for Nhl; back
+  // on it the rows draw at once, in order, and one more fetch goes. A
+  // cold load with the window stored opens Nhl in the same order, from
+  // its first wider answer (the snapshot starts over: the list is at its
+  // top). The clock is held so no card is used up meanwhile.
+  dashFlow('flow-tab-window-7d', {
+    before: async ({ page }) => {
+      await oldDevice(page)
+      await installClock(page)
+      page._wider = []
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries' && new URL(u).searchParams.get('category') === 'nhl',
+        (route) => {
+          const u = new URL(route.request().url())
+          page._wider.push(u.search)
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      await holdClock(page)
+      const before = await openedIds(page, /^nhl/i)
+      if (JSON.stringify(before) !== JSON.stringify([601, 602, 603])) return fail('WINDOW-7D', `Nhl opens as ${before}`)
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window="7d"]`))
+      if (!(await waitFor(() => page._wider.length === 1, 3000))) return fail('WINDOW-7D', `7 days sent ${page._wider.length} requests for Nhl: ${JSON.stringify(page._wider)}`)
+      const want = '?category=nhl&limit=200&max_age_hours=168&per_source_cap=25&active_only=true'
+      if (page._wider[0] !== want) fail('WINDOW-7D', `the wider request was ${page._wider[0]}, expected ${want}`)
+      if (!(await waitFor(async () => (await phoneIds(page)) === '601,602,603,604', 3000))) return fail('WINDOW-7D', `after 7 days Nhl shows ${await phoneIds(page)}, expected 601,602,603,604`)
+      if ((await page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window="7d"]`).getAttribute('aria-pressed')) !== 'true') fail('WINDOW-7D', '7 days is not shown as chosen')
+      await shot('7d')
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      // The write goes in its 1 s batch.
+      await page.clock.runFor(1100)
+      if (!(await waitFor(() => writes.some((w) => w.key === 'column_prefs:nhl'), 3000))) return fail('WINDOW-7D', '7 days sent no column_prefs PUT')
+      const row = writes.find((w) => w.key === 'column_prefs:nhl')
+      if (row.method !== 'PUT' || !row.value || row.value.window !== '7d' || 'maxAgeHours' in row.value) fail('WINDOW-7D', `the Nhl row was written as ${JSON.stringify(row)}`)
+      // Away: a poll fetches nothing for Nhl.
+      await tap(page, phoneTab(page, /^news/i))
+      await pollDone(page)
+      if (page._wider.length !== 1) fail('WINDOW-7D', `away on News, Nhl was fetched again: ${JSON.stringify(page._wider)}`)
+      // Back: the rows draw at once, in order; one more fetch goes.
+      const back = await openedIds(page, /^nhl/i)
+      if (JSON.stringify(back) !== JSON.stringify([601, 602, 603, 604])) fail('WINDOW-7D', `back on Nhl it shows ${back}, expected 601,602,603,604 at once`)
+      if (!(await waitFor(() => page._wider.length === 2, 3000))) fail('WINDOW-7D', `back on Nhl ${page._wider.length - 1} more fetches went, expected 1`)
+      // A cold load with the window stored.
+      await page.clock.runFor(1100)
+      await requestsSettled(page)
+      page._wider.length = 0
+      // (The page reloads under the held clock, as flow-new-arrival-appends does.)
+      await page.reload()
+      if (!(await waitFor(async () => /^nhl/i.test(await selectedTab(page)) && (await phoneIds(page)) === '601,602,603,604', 5000))) {
+        return fail('WINDOW-7D', `after a reload Nhl shows ${await phoneIds(page)} (tab ${JSON.stringify(await selectedTab(page))}), expected 601,602,603,604`)
+      }
+      if (page._wider.length !== 1) fail('WINDOW-7D', `the reload fetched Nhl ${page._wider.length} times`)
+      const top = await page.locator(PHONE_LIST).evaluate((el) => el.scrollTop)
+      if (top !== 0) fail('WINDOW-7D', `after the reload the list is at ${top}px`)
+    },
+  }),
+
+  // A wider tab's rows go in at their place in the tab's sort, never at
+  // the end like an arrival. Nhl on Best: 601, 602, 603 at 2 days. 7 days
+  // with the list untouched: the first answer starts the snapshot over,
+  // 601, 602, 604, 603. Then All, its answer held while 601 is opened
+  // (the list is touched, so no new snapshot: 601 stays where it is,
+  // read): 605 goes in at its place, 601, 605, 602, 604, 603. Appended,
+  // it would be last; a new snapshot would fold the read 601 under
+  // Earlier.
+  dashFlow('flow-tab-window-in-order', {
+    before: async ({ page }) => {
+      await oldDevice(page)
+      await installClock(page)
+      page._wider = []
+      page._widerHold = null
+      await page.route(
+        (u) => new URL(u).pathname === '/api/entries' && new URL(u).searchParams.get('category') === 'nhl',
+        async (route) => {
+          page._wider.push(new URL(route.request().url()).search)
+          if (page._widerHold) await page._widerHold
+          return route.fallback()
+        },
+      )
+    },
+    run: async ({ page, fail, shot }) => {
+      await holdClock(page)
+      await openedIds(page, /^nhl/i)
+      const more = page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`)
+      const choose = (sel) => tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[${sel}]`))
+      await tap(page, more)
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      await choose('data-sort="best"')
+      if (!(await waitFor(async () => (await phoneIds(page)) === '601,602,603', 3000))) return fail('WINDOW-ORDER', `Nhl on Best shows ${await phoneIds(page)}, expected 601,602,603`)
+      await choose('data-window="7d"')
+      if (!(await waitFor(async () => (await phoneIds(page)) === '601,602,604,603', 3000))) return fail('WINDOW-ORDER', `at 7 days Nhl on Best shows ${await phoneIds(page)}, expected 601,602,604,603`)
+      await tap(page, more)
+      // All, its answer held until 601 has been opened.
+      let release
+      page._widerHold = new Promise((r) => {
+        release = r
+      })
+      await tap(page, more)
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      await choose('data-window="all"')
+      if (!(await waitFor(() => page._wider.length === 2, 3000))) return fail('WINDOW-ORDER', `All sent ${page._wider.length - 1} requests for Nhl`)
+      await tap(page, more)
+      await openStory(page, 601)
+      page._widerHold = null
+      release()
+      if (!(await waitFor(async () => (await phoneIds(page)) === '601,605,602,604,603', 3000))) {
+        return fail('WINDOW-ORDER', `at All, after 601 was opened, Nhl on Best shows ${await phoneIds(page)}, expected 601,605,602,604,603 (605 at its place, 601 still on top)`)
+      }
+      await shot('in-order')
+    },
+  }),
+
+  // The badge counts inside the tab's window: Video at 1 day is 501 and
+  // 502, at 2 days 501 to 504, at 7 days 505 and 506 too (fetched for the
+  // tab). A wider tab that isn't on screen counts from the 2-day data.
+  dashFlow('flow-badge-in-window', {
+    before: async ({ page }) => {
+      await oldDevice(page)
+      await installClock(page)
+    },
+    run: async ({ page, fail }) => {
+      await holdClock(page)
+      const video = await openedIds(page, /^video/i)
+      if (JSON.stringify(video) !== JSON.stringify([501, 502, 503, 504])) return fail('BADGE-WINDOW', `Video opens as ${video}`)
+      if ((await badge(page, /^video/i)) !== '4') fail('BADGE-WINDOW', `Video's badge reads ${JSON.stringify(await badge(page, /^video/i))} at 2 days, expected 4`)
+      const pick = async (w) => {
+        await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+        await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+        await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window="${w}"]`))
+        await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      }
+      await pick('1d')
+      if (!(await waitFor(async () => (await phoneIds(page)) === '501,502', 3000))) return fail('BADGE-WINDOW', `at 1 day Video shows ${await phoneIds(page)}`)
+      if ((await badge(page, /^video/i)) !== '2') fail('BADGE-WINDOW', `Video's badge reads ${JSON.stringify(await badge(page, /^video/i))} at 1 day, expected 2`)
+      await pick('7d')
+      if (!(await waitFor(async () => (await phoneIds(page)) === '501,502,503,504,505,506', 3000))) return fail('BADGE-WINDOW', `at 7 days Video shows ${await phoneIds(page)}`)
+      if ((await badge(page, /^video/i)) !== '6') fail('BADGE-WINDOW', `Video's badge reads ${JSON.stringify(await badge(page, /^video/i))} at 7 days, expected 6`)
+      await tap(page, phoneTab(page, /^news/i))
+      await sleep(300)
+      if ((await badge(page, /^video/i)) !== '4') fail('BADGE-WINDOW', `off screen at 7 days, Video's badge reads ${JSON.stringify(await badge(page, /^video/i))}, expected 4 (the 2-day data)`)
+    },
+  }),
+
+  // The paused feed (krebs_on_security, 10) is in no tab: not in
+  // Security, not in For You (304 is in F.FOR_YOU_RANKED, the mock's list,
+  // as it would be in the server's ranking before PR4b's active filter).
+  dashFlow('flow-paused-hidden', {
+    run: async ({ page, fail }) => {
+      const fy = await openedIds(page, /^for you/i)
+      if (!fy.length) return fail('PAUSED', 'For You is empty')
+      if (fy.includes(304)) fail('PAUSED', `For You shows the paused feed's 304: ${fy}`)
+      const security = await openedIds(page, /^security/i)
+      if (!security.length) return fail('PAUSED', 'Security is empty')
+      if (security.some((id) => id === 304 || id === 305)) fail('PAUSED', `Security shows the paused feed's stories: ${security}`)
+    },
+  }),
+
+  // The same on the desktop: the For You row (its top 6) and the
+  // Security column have none of the paused feed's stories.
+  dashFlow('flow-paused-hidden-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    run: async ({ page, fail }) => {
+      const row = page.locator('section').filter({ visible: true, has: page.locator('header h2', { hasText: /^For You$/ }) })
+      if (!(await waitFor(async () => (await row.count()) === 1 && (await row.locator('article[data-card-id]').count()) > 0, 3000))) return fail('PAUSED-DESK', 'no For You row with stories')
+      const fy = await row.locator('article[data-card-id]').evaluateAll((els) => els.map((el) => Number(el.getAttribute('data-card-id'))))
+      if (fy.includes(304)) fail('PAUSED-DESK', `the For You row shows the paused feed's 304: ${fy}`)
+      if (fy.length !== 6) fail('PAUSED-DESK', `the For You row shows ${fy.length} stories, expected its top 6`)
+      const security = page.locator('main.grid section').filter({ has: page.locator('header h2', { hasText: /^Security$/ }) })
+      const ids = await security.locator('article[data-card-id]').evaluateAll((els) => els.map((el) => Number(el.getAttribute('data-card-id'))))
+      if (!ids.length) return fail('PAUSED-DESK', 'the Security column is empty')
+      if (ids.some((id) => id === 304 || id === 305)) fail('PAUSED-DESK', `the Security column shows the paused feed's stories: ${ids}`)
+    },
+  }),
+
+  // A category whose only stories are older than 2 days keeps its tab
+  // (nhl: the page's fetch drops 601 to 603, so only 604, 3 days old, and
+  // 605 are left): it says "Nothing in 2 days · Show 7 days"; ⋯ → 7 days
+  // shows 604 within 3 taps. Back at 2 days, the line's "Show 7 days"
+  // does the same. The category stays in the feed editor's picker. A
+  // category whose feeds are all paused leaves the strip.
+  dashFlow('flow-quiet-tab-kept', {
+    before: async ({ page }) => {
+      await oldDevice(page)
+      await keepOutOfTabs(page, [601, 602, 603])
+    },
+    run: async ({ page, fail, shot }) => {
+      if (!(await tabTexts(page)).some((t) => /^nhl/i.test(t))) return fail('QUIET', `no Nhl tab: ${JSON.stringify(await tabTexts(page))}`)
+      const empty = page.locator(`${MOBILE_MAIN} [data-window-empty]`)
+      await tap(page, phoneTab(page, /^nhl/i))
+      if (!(await waitFor(() => empty.isVisible(), 3000))) return fail('QUIET', 'the empty Nhl tab has no window line')
+      const line = ((await empty.textContent()) || '').replace(/\s*·\s*/g, ' · ').replace(/\s+/g, ' ').trim()
+      if (line !== 'Nothing in 2 days · Show 7 days') fail('QUIET', `the line reads ${JSON.stringify(line)}`)
+      await shot('quiet')
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await page.locator(`${MOBILE_MAIN} [data-column-popover]`).waitFor({ state: 'visible' })
+      await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window="7d"]`))
+      taps(page, 3, 'QUIET')
+      if (!(await waitFor(async () => (await phoneIds(page)) === '604', 3000))) return fail('QUIET', `at 7 days Nhl shows ${JSON.stringify(await phoneIds(page))}, expected 604`)
+      await tap(page, page.locator(`${MOBILE_MAIN} [data-column-popover] button[data-window="2d"]`))
+      if (!(await waitFor(() => empty.isVisible(), 3000))) return fail('QUIET', 'back at 2 days the window line is gone')
+      await tap(page, page.locator(`${MOBILE_MAIN} button[aria-label="column preferences"]`))
+      await tap(page, empty.locator('button[data-show-wider]'))
+      if (!(await waitFor(async () => (await phoneIds(page)) === '604', 3000))) return fail('QUIET', `after Show 7 days Nhl shows ${JSON.stringify(await phoneIds(page))}, expected 604`)
+      // The picker still offers nhl.
+      await openEditor(page, 16)
+      const options = await page.locator('#fe-category-16').evaluate((el) => [...el.options].map((o) => o.value))
+      if (!options.includes('nhl')) fail('QUIET', `the category picker lost nhl: ${JSON.stringify(options)}`)
+      await closeSettings(page)
+      // Every feed of the category paused (on another device): the tab goes.
+      const status = await page.evaluate(() => fetch('/api/sources/16', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ active: false }) }).then((r) => r.status))
+      if (status !== 200) return fail('QUIET', `pausing nhl_news answered ${status}`)
+      await page.reload()
+      // The tabs are in once News is (the sources and the stories land in
+      // one render).
+      if (!(await waitFor(async () => (await tabTexts(page)).some((t) => /^news/i.test(t)), 5000))) return fail('QUIET', `after the reload the strip is ${JSON.stringify(await tabTexts(page))}`)
+      if ((await tabTexts(page)).some((t) => /^nhl/i.test(t))) fail('QUIET', `with its only feed paused, Nhl is still a tab: ${JSON.stringify(await tabTexts(page))}`)
     },
   }),
 ]

@@ -26,6 +26,7 @@
 import { memo, useEffect, useRef, useState, type MouseEvent, type TouchEvent } from 'react'
 import { api, type Entry, type FramingCluster, safeExternalUrl } from '../api'
 import { noteStoryOpened, recordImmediate } from '../lib/interactions'
+import { isHistorical } from '../lib/feedRules'
 import { sourceLabel } from '../lib/labels'
 import { useSourceLabels } from '../lib/useSourceLabels'
 import { openActionSheet, type SheetAction } from './ActionSheet'
@@ -737,7 +738,10 @@ export function CardInner({ entry, sourceName, sourceFaviconPath, dimmed, select
     copyUrl(entry.url)
   }
 
-  const time = timeAgo(entry.published_at)
+  // A feed of history (On this day) has no "5h": its stories are about
+  // today's date, not from today (PR4d).
+  const historical = isHistorical(sourceName)
+  const time = historical ? '' : timeAgo(entry.published_at)
   const preview = entry.preview && !expanded ? entry.preview : null
 
   return (
@@ -825,11 +829,15 @@ export function CardInner({ entry, sourceName, sourceFaviconPath, dimmed, select
           ) : (
             <span className={`min-w-0 truncate font-semibold ${sourceTextClass}`}>{sourceLabel(sourceName)}</span>
           ))}
-        {sourceName && time && <span className="shrink-0 whitespace-nowrap">·</span>}
-        {time && (
-          <time className="shrink-0 whitespace-nowrap" dateTime={entry.published_at ?? ''}>
-            {time}
-          </time>
+        {sourceName && (historical || time) && <span className="shrink-0 whitespace-nowrap">·</span>}
+        {historical ? (
+          <span className="shrink-0 whitespace-nowrap">On this day</span>
+        ) : (
+          time && (
+            <time className="shrink-0 whitespace-nowrap" dateTime={entry.published_at ?? ''}>
+              {time}
+            </time>
+          )
         )}
       </div>
       {/* The title, the preview under it (D34) and the thumbnail are one

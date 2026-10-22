@@ -28,7 +28,8 @@ import { api, type Brief, type CurrentUser, type Entry, type Health, type Source
 import { BriefCard } from './components/BriefCard'
 import { Card } from './components/Card'
 import { Column, type ColumnPrefs } from './components/Column'
-import { normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
+import { normalizeSort, prefsFor as tabPrefsFor, sortEntries, type Sort } from './lib/sorting'
+import { DEFAULT_WINDOW, inWindow, isWider, windowHours, type Window } from './lib/window'
 import { Drawer } from './components/Drawer'
 import { FramingWatch } from './components/FramingWatch'
 import { FirstFeedButton } from './components/FirstFeedButton'
@@ -209,6 +210,17 @@ function loadFirstRunAt(): number {
 
 // No stories: Saved's (empty) Earlier, and a tab with no partition.
 const NO_ENTRIES: Entry[] = []
+// The desktop's For You row shows this many of For You's stories (PR4d);
+// the rest are in their category columns.
+const FORYOU_ROW_TOP = 6
+// What every tab loads (D5): the last 2 days, at most the 25
+// best-scoring stories per feed in them (D28).
+const TAB_HOURS = windowHours(DEFAULT_WINDOW)
+const PER_SOURCE_CAP = 25
+// How many stories a wider tab fetches for itself: a category's (its cut
+// is by arrival, PR4b), and For You's (which the 2-day load uses too).
+const WIDER_LIMIT = 200
+const WIDER_FORYOU_LIMIT = 50
 const NO_SECTIONS = { unseen: NO_ENTRIES, earlier: NO_ENTRIES }
 
 // A hidden story, kept for its Undo (``keepHiddenStories``): the story
@@ -496,6 +508,14 @@ function PresetChip({
 export function App() {
   const [entries, setEntries] = useState<Entry[]>([])
   const [forYou, setForYou] = useState<Entry[]>([])
+  // The rows a wider tab (7 days or All, PR4d) fetched for itself, by
+  // tab key. Kept across tab switches, so a tab opened again draws at
+  // once; only a tab on screen fetches (below, ``widerTabs``).
+  const [extraByTab, setExtraByTab] = useState<ReadonlyMap<ColKey, Entry[]>>(() => new Map())
+  const extraRef = useRef(extraByTab)
+  extraRef.current = extraByTab
+  // Bumped by every applied refresh: the wider tabs on screen fetch again.
+  const [refreshTick, setRefreshTick] = useState(0)
   const [sources, setSources] = useState<Source[]>([])
   // The latest sources for the feed editor's save store, which reads
   // them outside React.
@@ -1143,16 +1163,29 @@ export function App() {
   // shows; ``name`` is only the id its stored rows are kept under
   // (``read_entries:<name>``, ``column_prefs:<name>``, …), unchanged so
   // what is stored stays readable by every build.
+  //
+  // A category has a tab while an active feed is in it, stories or not
+  // (PR4d, D5: a quiet category keeps its tab, and with it the one
+  // control that widens its window), or while stories of it are held (a
+  // feed paused just now keeps its stories until the next poll). A
+  // category whose feeds are all paused leaves. (PR5b leaves muted feeds
+  // out of the union.)
+  const categories = useMemo(() => {
+    const out = new Set<string>()
+    for (const s of sources) if (s.active && s.category) out.add(s.category)
+    for (const cat of byCategory.keys()) out.add(cat)
+    return out
+  }, [sources, byCategory])
   const availableTabs = useMemo<TabColumn[]>(() => {
     const out: TabColumn[] = [
       { key: SAVED_KEY, name: 'Saved', label: 'Saved', entries: visibleStarred },
       { key: FORYOU_KEY, name: 'For You', label: 'For You', entries: visibleForYou },
     ]
-    for (const [cat, list] of byCategory) {
-      out.push({ key: colKey(cat), name: cat, label: categoryLabel(cat), entries: list, sourceName: cat })
+    for (const cat of categories) {
+      out.push({ key: colKey(cat), name: cat, label: categoryLabel(cat), entries: byCategory.get(cat) ?? NO_ENTRIES, sourceName: cat })
     }
     return out
-  }, [visibleForYou, byCategory, visibleStarred])
+  }, [visibleForYou, byCategory, categories, visibleStarred])
   // The strip's order (``lib/categories``): Brief, Saved, For You, then
   // the categories by label until the owner edits it; then as stored,
   // with a new category at the end. ``shown`` leaves out the hidden
@@ -1226,22 +1259,20 @@ export function App() {
     [columnPrefs],
   )
 
-  // Apply per-column prefs: the age filter, then the tab's sort, once
-  // (each tab's snapshot keeps this order). Saved is never sorted.
-  // ``order`` names both for the tab's snapshot: a change of either
-  // starts a new one (lib/feedOrder.ts).
-  const columns = useMemo<Array<TabColumn & { order: string }>>(() => {
+  // Apply per-column prefs: the tab's window (PR4d, D5: the stories
+  // that arrived inside it; the tabs load 2 days, so 1 day is a cut of
+  // that and 7 days or All add the rows ``extraByTab`` fetched, below),
+  // then the tab's sort, once (each tab's snapshot keeps this order).
+  // Saved is never cut or sorted: it lists every save. ``order`` names
+  // both for the tab's snapshot: a change of either starts a new one
+  // (lib/feedOrder.ts).
+  const columns = useMemo<Array<TabColumn & { order: string; sort: Sort; window: Window }>>(() => {
     const now = Date.now()
     return baseColumns.map((col) => {
       const prefs = prefsFor(col)
+      const tabWindow: Window = col.key === SAVED_KEY ? 'all' : prefs.window
       let filtered = col.entries
-      if (prefs.maxAgeHours != null) {
-        const cutoff = now - prefs.maxAgeHours * 60 * 60 * 1000
-        filtered = filtered.filter((e) => {
-          if (!e.fetched_at) return true
-          return new Date(e.fetched_at).getTime() >= cutoff
-        })
-      }
+      if (tabWindow !== 'all') filtered = filtered.filter((e) => inWindow(e.fetched_at, tabWindow, now))
       const sort = normalizeSort(prefs.sort, col.key)
       filtered = sortEntries(filtered, sort, col.key)
       return {
@@ -1250,7 +1281,9 @@ export function App() {
         label: col.label,
         entries: filtered,
         sourceName: col.sourceName,
-        order: `${sort}|${prefs.maxAgeHours ?? 'all'}`,
+        sort,
+        window: tabWindow,
+        order: `${sort}|${tabWindow}`,
       }
     })
   }, [baseColumns, prefsFor])
@@ -1338,16 +1371,19 @@ export function App() {
       // multi-source filter view doesn't have this problem (it's
       // already scoped to a handful of sources), so only the
       // unfiltered path uses ``perCategoryLimit`` instead of ``limit``.
+      // Every tab loads the last 2 days (PR4d, D5), at most the 25
+      // best-scoring stories per feed (D28), from the feeds that aren't
+      // paused. A wider tab fetches its own rows (``extraByTab``).
       const entriesReq = sourceArg
-        ? api.entries({ limit: 200, source: sourceArg })
-        : api.entries({ perCategoryLimit: 100 })
+        ? api.entries({ limit: 200, source: sourceArg, maxAgeHours: TAB_HOURS, perSourceCap: PER_SOURCE_CAP, activeOnly: true })
+        : api.entries({ perCategoryLimit: 100, maxAgeHours: TAB_HOURS, perSourceCap: PER_SOURCE_CAP, activeOnly: true })
       // Hot path: entries + sources + for-you. These change with
       // every ingest and the user expects them to be near-real-time
       // when the dashboard is open.
       const [rawEntries, rawSources, rawForYou] = await Promise.all([
         entriesReq,
         api.sources(),
-        api.forYou({ limit: 25 }).catch(() => {
+        api.forYou({ limit: WIDER_FORYOU_LIMIT, maxAgeHours: TAB_HOURS }).catch(() => {
           forYouOk = false
           return [] as Entry[]
         }),
@@ -1405,6 +1441,8 @@ export function App() {
       setTabsLoadedFor(filterScope(activeSources))
       setForYouLoaded(forYouOk)
       forYouOkRef.current = forYouOk
+      // The wider tabs on screen fetch their rows again (below).
+      setRefreshTick((n) => n + 1)
       setError(null)
       // C1: the refresh a long return started lands: start the tabs
       // over again, so what came in while away is sorted in. Not when the
@@ -1844,8 +1882,115 @@ export function App() {
   // again once that filter's own fetch has landed (until then it shows
   // the unfiltered stories of those feeds): its order names both, so
   // either starts it over. (PR8b removes the filter.)
-  const asFeedTab = (c: TabColumn & { order: string }): FeedTab<Entry> =>
-    c.key === FILTER_KEY ? { ...c, order: `${c.order}|${activeScope}|${tabsLoadedFor ?? ''}` } : c
+  // Wider tabs (PR4d, D5). A tab at 7 days or All fetches its own rows
+  // while it is on screen (the phone's tab; on the desktop every column,
+  // one at a time): when it comes on screen or widens, and after every
+  // poll. The rows (``extraByTab``) stay across tab switches. A tab not
+  // on screen counts its badge from the 2-day data.
+  const widerTabs = useMemo(() => {
+    const shown = isDesktop ? keyColumns : phoneCol ? [phoneCol] : []
+    return shown.filter((c) => c.key !== SAVED_KEY && isWider(c.window)).map((c) => ({ key: c.key, name: c.name, window: c.window }))
+  }, [isDesktop, keyColumns, phoneCol])
+  const widerScope = widerTabs.map((t) => `${t.key}|${t.window}`).join(',')
+  const widerTabsRef = useRef(widerTabs)
+  widerTabsRef.current = widerTabs
+  // Per tab: the latest request (an older answer is dropped), and when
+  // it came on screen at its window (``since``): its first answer
+  // starts the tab's snapshot over, so the older rows go in at their
+  // place and what was read goes under the marker, unless the list was
+  // touched meanwhile (scrolled, or a story opened), when the rows are
+  // sorted in instead (``inOrder``). Later answers are always sorted in.
+  const widerSeqRef = useRef(new Map<ColKey, number>())
+  const widerSinceRef = useRef(new Map<string, { at: number; answered: boolean }>())
+  const fetchWider = useCallback(
+    async (tab: { key: ColKey; name: string; window: Window }) => {
+      const h = windowHours(tab.window)
+      const seq = (widerSeqRef.current.get(tab.key) ?? 0) + 1
+      widerSeqRef.current.set(tab.key, seq)
+      const scope = `${tab.key}|${tab.window}`
+      try {
+        const rows =
+          tab.key === FORYOU_KEY
+            ? await api.forYou({ limit: WIDER_FORYOU_LIMIT, maxAgeHours: h })
+            : tab.key === FILTER_KEY
+              ? await api.entries({ source: Array.from(activeSources), limit: WIDER_LIMIT, maxAgeHours: h, perSourceCap: PER_SOURCE_CAP, activeOnly: true })
+              : await api.entries({ category: tab.name, limit: WIDER_LIMIT, maxAgeHours: h, perSourceCap: PER_SOURCE_CAP, activeOnly: true })
+        if (widerSeqRef.current.get(tab.key) !== seq) return
+        const since = widerSinceRef.current.get(scope)
+        const had = extraRef.current.get(tab.key) ?? NO_ENTRIES
+        const changed = had.length !== rows.length || had.some((e, i) => e.id !== rows[i].id)
+        if (changed) setExtraByTab((prev) => new Map(prev).set(tab.key, rows))
+        if (since && !since.answered) {
+          since.answered = true
+          const scroller = isDesktop ? scrollersRef.current.desktop : scrollersRef.current.phone
+          const touched = lastStoryOpenAt() >= since.at || (scroller?.scrollTop ?? 0) > 0
+          if (changed && !touched) resetSnapshot(tab.key)
+        }
+      } catch (err) {
+        // The tab keeps what it had (the 2-day data at least); the
+        // banner says why, until a poll that works clears it.
+        if (widerSeqRef.current.get(tab.key) === seq) setError(errorMessage(err))
+      }
+    },
+    [activeSources, isDesktop, resetSnapshot],
+  )
+  useEffect(() => {
+    const tabs = widerTabsRef.current
+    const scopes = new Set(tabs.map((t) => `${t.key}|${t.window}`))
+    for (const scope of widerSinceRef.current.keys()) if (!scopes.has(scope)) widerSinceRef.current.delete(scope)
+    for (const scope of scopes) if (!widerSinceRef.current.has(scope)) widerSinceRef.current.set(scope, { at: Date.now(), answered: false })
+    if (!tabs.length || !firstRefreshDone) return
+    let stop = false
+    void (async () => {
+      // One at a time (the desktop can have several).
+      for (const tab of tabs) {
+        if (stop) return
+        await fetchWider(tab)
+      }
+    })()
+    return () => {
+      stop = true
+    }
+  }, [widerScope, refreshTick, firstRefreshDone, fetchWider])
+  // Each wider tab's stories as drawn: its own rows first (the server's
+  // order for For You's Best; a story the 2-day load also holds is drawn
+  // from that copy, the latest), then the 2-day stories they don't hold
+  // (the newest arrivals), in the tab's order; hidden stories out.
+  // ``ids`` are the rows only the fetch brought, placed in order by the
+  // snapshot (``inOrder``) rather than appended like arrivals.
+  const widened = useMemo(() => {
+    const now = Date.now()
+    const out = new Map<ColKey, { entries: Entry[]; ids: Set<number> }>()
+    for (const c of columns) {
+      if (c.key === SAVED_KEY || !isWider(c.window)) continue
+      const extra = extraByTab.get(c.key)
+      if (!extra?.length) continue
+      const have = new Map(c.entries.map((e) => [e.id, e]))
+      const theirs = new Set<number>()
+      const ids = new Set<number>()
+      const rows: Entry[] = []
+      for (const e of extra) {
+        if (theirs.has(e.id) || hiddenSet.has(e.id) || !inWindow(e.fetched_at, c.window, now)) continue
+        theirs.add(e.id)
+        const held = have.get(e.id)
+        if (!held) ids.add(e.id)
+        rows.push(held ?? e)
+      }
+      if (!ids.size) continue
+      out.set(c.key, { entries: sortEntries([...rows, ...c.entries.filter((e) => !theirs.has(e.id))], c.sort, c.key), ids })
+    }
+    return out
+  }, [columns, extraByTab, hiddenSet])
+  const widenedIds = useMemo(() => {
+    const out = new Set<number>()
+    for (const w of widened.values()) for (const id of w.ids) out.add(id)
+    return out
+  }, [widened])
+  // A wider tab draws the rows it fetched too (``widened``).
+  const asFeedTab = (c: TabColumn & { order: string }): FeedTab<Entry> => {
+    const entries = widened.get(c.key)?.entries ?? c.entries
+    return c.key === FILTER_KEY ? { key: c.key, entries, order: `${c.order}|${activeScope}|${tabsLoadedFor ?? ''}` } : { key: c.key, entries, order: c.order }
+  }
   const drawnTabs: FeedTab<Entry>[] = []
   if (phoneCol && phoneCol.key !== SAVED_KEY) drawnTabs.push(asFeedTab(phoneCol))
   if (isDesktop) for (const c of keyColumns) if (c.key !== SAVED_KEY) drawnTabs.push(asFeedTab(c))
@@ -1871,7 +2016,10 @@ export function App() {
     }),
   )
   const isPending = (e: Entry) => seenBatch.has(e.id)
-  const parts = feed.partition(drawnTabs, { isSeen, isRemoved, isPending, ready: !prefs.loading && firstRefreshDone })
+  // A wider tab's own rows go in at their place in the tab's order, not
+  // at the end like an arrival (``inOrder``).
+  const inOrder = (e: Entry) => widenedIds.has(e.id)
+  const parts = feed.partition(drawnTabs, { isSeen, isRemoved, isPending, inOrder, ready: !prefs.loading && firstRefreshDone })
   // One count per tab (D4): the partition's for a tab drawn now (held
   // arrivals and stories a poll dropped included), otherwise the tab's
   // stories not seen yet. It is the badge, the marker, the md+ "N new"
@@ -1905,12 +2053,12 @@ export function App() {
   }
   // Every story App fetched: a key's oldest marks outside these go first
   // when it reaches its cap (``pruneIds``), so pruning never brings back
-  // a story still on screen as unseen: the tabs, For You, the saves and
-  // the Saved-by-id cache (``keepIdsFor``). (PR4d adds every wider tab's
-  // rows.)
+  // a story still on screen as unseen: the tabs, For You, the saves, the
+  // Saved-by-id cache and every wider tab's rows (``keepIdsFor``).
+  const extraRows = useMemo(() => [...extraByTab.values()].flat(), [extraByTab])
   const keepIds = useMemo(
-    () => keepIdsFor({ entries, forYou, starred: starredEntries, savedById }),
-    [entries, forYou, starredEntries, savedById],
+    () => keepIdsFor({ entries, forYou, starred: starredEntries, savedById, extra: extraRows }),
+    [entries, forYou, starredEntries, savedById, extraRows],
   )
   const readRefs = useRef({ categoriesBySourceId, keepIds })
   readRefs.current = { categoriesBySourceId, keepIds }
@@ -3230,11 +3378,6 @@ export function App() {
                   <h2 className="text-ios-caption uppercase tracking-wide text-label-tertiary">
                     For You
                   </h2>
-                  {visibleForYou.length > 0 && (
-                    <span className="text-ios-caption text-label-tertiary">
-                      {visibleForYou.length} {visibleForYou.length === 1 ? 'entry' : 'entries'}
-                    </span>
-                  )}
                 </header>
                 {visibleForYou.length === 0 && (
                   <div className="px-1 space-y-3">
@@ -3243,7 +3386,7 @@ export function App() {
                   </div>
                 )}
                 <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                  {visibleForYou.map((e) => {
+                  {visibleForYou.slice(0, FORYOU_ROW_TOP).map((e) => {
                     // Per-card engagement props: hide, save and
                     // vote, the same as in a category column.
                     // Opening a card uses its story up
