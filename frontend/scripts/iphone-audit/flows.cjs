@@ -627,25 +627,31 @@ async function openedIds(page, re) {
   return ids ? ids.split(',').map(Number) : []
 }
 
-// With the clock held from now on (each 1 s batch goes only on runFor),
-// on For You: story `n` is hidden, its PATCH reaches the store, and a
-// poll comes back without it (the server leaves hidden stories out,
-// PR4b). False, after a failure under `id`, when a step didn't happen.
+// With the clock held from the load (holdClockFromLoad in `before`: each
+// 1 s batch goes only on runFor, and no card has a second on screen
+// before the flow's first step), on For You: story `n` is hidden, its
+// PATCH reaches the store, and a poll comes back without it (the server
+// leaves hidden stories out, PR4b). The badge must drop by one and no
+// more: a card read for a dwell and scrolled off the top by the tap (the
+// button is brought into view) would be marked seen (PR3c) and leave For
+// You's order, which the flows read whole afresh after the restore. False,
+// after a failure under `id`, when a step didn't happen.
 async function hideAndPoll(page, context, id, n) {
   const card = page.locator(`${MOBILE_MAIN} article[data-card-id="${n}"]`)
   const hidden = () => prefMock(context).value('hidden_entries') || []
-  const now = await page.evaluate(() => Date.now())
-  await page.clock.pauseAt(now + 1000)
   const no = (detail) => {
     page._fail(id, detail)
     return false
   }
   if (!(await waitFor(async () => /^for you/i.test(await selectedTab(page)), 3000))) return no(`the phone opened on ${JSON.stringify(await selectedTab(page))}`)
   await card.first().waitFor({ state: 'visible' })
+  const before = Number(await badge(page, /^for you/i))
   await tap(page, card.locator('button[aria-label="hide"]'))
   if (!(await waitFor(async () => (await card.count()) === 0, 3000))) return no(`the hidden ${n} is still drawn`)
   await page.clock.runFor(1000)
   if (!(await waitFor(() => hidden().includes(n), 3000))) return no('the hide never reached the store')
+  const after = Number(await badge(page, /^for you/i))
+  if (after !== before - 1) return no(`after hiding ${n} the For You badge reads ${after}, expected ${before - 1}: a story read on screen was scrolled off the top by the tap and marked seen; the flow needs none`)
   const got = await pollDone(page)
   if (!got) return no('the poll after the hide never finished')
   if (pollHas(got, [n])) return no(`the poll returned the hidden ${n}; the flow needs it left out`)
@@ -928,6 +934,19 @@ const SEEN_BATCH_MS = seenConstant('SEEN_BATCH_MS')
 async function holdClock(page) {
   const now = await page.evaluate(() => Date.now())
   await page.clock.pauseAt(now + 1000)
+}
+// For a flow whose tab under test is the one the page opens on (a new
+// device opens on For You, where the hide flows hide): the clock is
+// installed and held before the page loads, so no card has a second on
+// screen before the flow's first step, and only the flow's `runFor`s give
+// the cards time. `holdClock` can't do this: it pauses a second ahead, and
+// the cards on screen since the load got their dwell in that second. The
+// page loads held (its fetches and renders wait on no timer; PR3c's
+// flow-new-arrival-appends reloads under a held clock the same way).
+// Called in `before`, in place of `installClock`.
+async function holdClockFromLoad(page) {
+  await installClock(page)
+  await page.clock.pauseAt(F.NOW + 1000)
 }
 // Resolves once every IntersectionObserver has reported the page as it
 // is now: a new observer's first report comes in the same task as every
@@ -2075,15 +2094,25 @@ module.exports = [
   // show. The clock is held: each 1 s batch goes only when the flow lets
   // it (runFor), and the toast stays up. Once two minutes have passed
   // since the Undo, a story the server still doesn't return goes again.
+  // The clock is held from the load (holdClockFromLoad): a tap on 102's
+  // hide button brings it into view and scrolls the cards above it off the
+  // top, and one of those read for a second would be marked seen (PR3c)
+  // and leave For You's order. 102 itself is read for a dwell at the top
+  // of the screen before the hide, so the Undo puts back a story that had
+  // qualified: the put-back must not move the list (the story goes back
+  // into the snapshot's place; only a new snapshot starts the list over at
+  // its top) and must not mark it (the seen batch runs and the badge is as
+  // before the hide).
   dashFlow('flow-hide-undo-after-poll', {
     before: async ({ page }) => {
-      await installClock(page)
+      await holdClockFromLoad(page)
       await keepOutOfTabs(page, [])
     },
     run: async ({ page, context, fail, settle }) => {
       const id = 'HIDE-UNDO'
       const n = 102
       const card = page.locator(`${MOBILE_MAIN} article[data-card-id="${n}"]`)
+      const list = page.locator(PHONE_LIST)
       const hidden = () => prefMock(context).value('hidden_entries') || []
       const order = F.FOR_YOU.map((e) => e.id).join(',')
       // Opens the tab `re` and tells whether it draws the story.
@@ -2093,20 +2122,55 @@ module.exports = [
       }
       // Opens For You afresh and tells whether it reads as before the hide.
       const forYouAsBefore = async () => (await opened(/^for you/i)) && (await phoneIds(page)) === order
-      const now = await page.evaluate(() => Date.now())
-      await page.clock.pauseAt(now + 1000)
       if (!(await waitFor(async () => /^for you/i.test(await selectedTab(page)), 3000))) return fail(id, `the phone opened on ${JSON.stringify(await selectedTab(page))}`)
       if (!(await waitFor(async () => (await phoneIds(page)) === order, 3000))) return fail(id, `For You opened as ${await phoneIds(page)}; the flow needs ${order}`)
+      // 102 at the top of the screen, read for a dwell. The cards above it
+      // left the top with no time on screen, so nothing is marked. A
+      // sliver of 301 (the card above) stays on screen: Chromium anchors
+      // the scroll on it, so neither the hide nor the put-back moves the
+      // cards below. Anchored on 201 instead (102 exactly at the top),
+      // the hide would scroll the list back to show 301 under the top
+      // edge for the hide's second, and the put-back push it out above
+      // the top again: a scroll past in the tracker's eyes, and a mark for
+      // 301. Chromium only; WebKit has no scroll anchoring.
+      await scrollCardToTop(page, n)
+      await scrollListBy(page, -30)
+      await dwell(page)
+      const unseenBefore = await badge(page, /^for you/i)
       await tap(page, card.locator('button[aria-label="hide"]'))
       if (!(await waitFor(async () => (await card.count()) === 0, 3000))) return fail(id, 'the hidden story is still drawn')
       await page.clock.runFor(1000)
       if (!(await waitFor(() => hidden().includes(n), 3000))) return fail(id, 'the hide never reached the store')
+      if ((await badge(page, /^for you/i)) !== String(Number(unseenBefore) - 1)) return fail(id, `after the hide the For You badge reads ${await badge(page, /^for you/i)}, expected ${Number(unseenBefore) - 1}; the flow needs no story seen on scroll`)
       // A poll while hidden: the server leaves 102 out of both lists.
       let got = await pollDone(page)
       if (!got) return fail(id, 'the poll never finished')
       if (pollHas(got, [n])) return fail(id, `the poll returned the hidden ${n}; the flow needs it left out`)
+      // The card being read now: the first one wholly below the top edge
+      // (at the top of the screen since the hide; the short 301 still
+      // shows its bottom above it).
+      const reading = await list.evaluate((el) => {
+        const top = el.getBoundingClientRect().top
+        for (const a of el.querySelectorAll('[data-group="unseen"] article[data-card-id]')) {
+          if (a.getBoundingClientRect().top >= top - 1) return Number(a.getAttribute('data-card-id'))
+        }
+        return null
+      })
       await tapUndo(page)
       if (!(await waitFor(async () => (await card.count()) === 1, 3000))) fail(id, `Undo did not bring ${n} back to For You`)
+      // The put-back redraws 102 where it was: no new snapshot, so the
+      // list isn't started over at its top (PR3c) and the card being read
+      // is still on screen (Chromium's scroll anchoring keeps it in place
+      // and 102 goes in above the top edge; without anchoring 102 shows
+      // at the top and pushes it down, still on screen). The story isn't
+      // marked seen by coming back: the seen batch runs (the Undo's own
+      // 1 s batch is still held) and the badge is as before the hide.
+      await observersSettled(page)
+      const after = await list.evaluate((el) => el.scrollTop)
+      if (after === 0) fail(id, "the Undo's put-back started For You over: the list is at its top")
+      if (!(await listCards(page)).half.includes(reading)) fail(id, `the Undo's put-back moved the list (now at ${after}): ${reading}, being read, is off the screen`)
+      await page.clock.runFor(SEEN_BATCH_MS + 50)
+      if ((await badge(page, /^for you/i)) !== unseenBefore) fail(id, `after the Undo and the seen batch the For You badge reads ${await badge(page, /^for you/i)}, expected ${unseenBefore}: the put-back ${n} counts as not seen`)
       // The Undo itself put 102 back in both lists, and in For You at its place.
       if (!(await opened(/^news/i))) fail(id, `right after the Undo, News shows ${await phoneIds(page)}, without ${n}`)
       if (!(await forYouAsBefore())) fail(id, `right after the Undo, For You opened again reads ${await phoneIds(page)}, expected ${order} (as before the hide)`)
@@ -2275,11 +2339,11 @@ module.exports = [
   // Undo does (PR4c): after a poll dropped the hidden 101, Restore all
   // puts it back in the stories the tabs are built from, so News and For
   // You, each opened afresh once Settings closes, show it before the
-  // restore's batch reaches the server. The clock is held, as in
-  // flow-hide-undo-after-poll.
+  // restore's batch reaches the server. The clock is held from the load,
+  // as in flow-hide-undo-after-poll.
   dashFlow('flow-hidden-restore-all-after-poll', {
     before: async ({ page }) => {
-      await installClock(page)
+      await holdClockFromLoad(page)
     },
     run: async ({ page, context, fail }) => {
       const id = 'RESTORE-ALL'
@@ -2308,11 +2372,11 @@ module.exports = [
   // The lay-over of a put-back story lasts until a poll returns it
   // (PR4c): once one has, a later poll that drops it again (as past its
   // category's limit) takes it out of News and For You, though two
-  // minutes haven't passed since the Undo. The clock is held, as in
-  // flow-hide-undo-after-poll.
+  // minutes haven't passed since the Undo. The clock is held from the
+  // load, as in flow-hide-undo-after-poll.
   dashFlow('flow-hide-undo-until-returned', {
     before: async ({ page }) => {
-      await installClock(page)
+      await holdClockFromLoad(page)
       await keepOutOfTabs(page, [])
     },
     run: async ({ page, context, fail }) => {
@@ -2340,11 +2404,12 @@ module.exports = [
   // is deleted in the store (another device), after the Undo reached the
   // server or between the hide and the Undo. The story is neither laid
   // over a poll that no longer has the feed nor put back by an Undo once
-  // the feed is gone, so no "Other" tab turns up for it.
+  // the feed is gone, so no "Other" tab turns up for it. The clock is held
+  // from the load, as in flow-hide-undo-after-poll.
   ...['after', 'before'].map((when) =>
     dashFlow(`flow-hide-undo-feed-gone-${when}`, {
       before: async ({ page }) => {
-        await installClock(page)
+        await holdClockFromLoad(page)
       },
       run: async ({ page, context, fail }) => {
         const id = 'UNDO-FEED-GONE'
@@ -2381,10 +2446,11 @@ module.exports = [
   // empty, as after any failed For You request
   // (flow-foryou-fails-keeps-tab), not with 101 alone. The next good
   // answer, still sent before the Undo's batch, gets 101 laid over it.
+  // The clock is held from the load, as in flow-hide-undo-after-poll.
   dashFlow('flow-hide-undo-foryou-fails', {
     expectedFailedLoads: ['/api/foryou'],
     before: async ({ page }) => {
-      await installClock(page)
+      await holdClockFromLoad(page)
       page._fyFailing = false
       await page.route(
         (u) => new URL(u).pathname === '/api/foryou',
@@ -2483,10 +2549,11 @@ module.exports = [
   // 201 after, still name its place. For You is opened afresh (another
   // tab, then back), so it is drawn from that list, not from PR3b's
   // snapshot; again after a poll sent before the Undo's batch (the
-  // lay-over). The clock is held, as in flow-hide-undo-after-poll.
+  // lay-over). The clock is held from the load, as in
+  // flow-hide-undo-after-poll.
   dashFlow('flow-hide-two-undo-the-second', {
     before: async ({ page }) => {
-      await installClock(page)
+      await holdClockFromLoad(page)
     },
     run: async ({ page, context, fail }) => {
       const id = 'HIDE-TWO-UNDO'
@@ -2496,8 +2563,6 @@ module.exports = [
         await openedIds(page, /^deals/i)
         return (await openedIds(page, /^for you/i)).join(',')
       }
-      const now = await page.evaluate(() => Date.now())
-      await page.clock.pauseAt(now + 1000)
       if (!(await waitFor(async () => /^for you/i.test(await selectedTab(page)), 3000))) return fail(id, `the phone opened on ${JSON.stringify(await selectedTab(page))}`)
       for (const n of [101, 102]) {
         const card = page.locator(`${MOBILE_MAIN} article[data-card-id="${n}"]`)
@@ -2534,8 +2599,8 @@ module.exports = [
   // it, and restores 102 first: 301's place is taken with the kept 102
   // back in it, so 301 goes back above 102, not under it. For You is
   // opened afresh once Settings closes (another tab, then back), so it is
-  // drawn from the list the restore put them back in. The clock is held,
-  // as in flow-hide-undo-after-poll.
+  // drawn from the list the restore put them back in. The clock is held
+  // from the load, as in flow-hide-undo-after-poll.
   ...[
     { how: 'all', hides: [101, 102] },
     { how: 'rows', hides: [101, 102] },
@@ -2543,7 +2608,7 @@ module.exports = [
   ].map(({ how, hides }) =>
     dashFlow(`flow-two-hides-restore-${how}`, {
       before: async ({ page }) => {
-        await installClock(page)
+        await holdClockFromLoad(page)
       },
       run: async ({ page, context, fail }) => {
         const id = 'TWO-HIDES-RESTORE'
@@ -2584,11 +2649,12 @@ module.exports = [
   // there on its own; the next good answer, still sent before the Undo's
   // batch, gets it laid over it, at its place. The story is 102, in the
   // middle of For You. (flow-hide-undo-foryou-fails has the failure after
-  // the Undo.) The clock is held, as in flow-hide-undo-after-poll.
+  // the Undo.) The clock is held from the load, as in
+  // flow-hide-undo-after-poll.
   dashFlow('flow-hide-foryou-fails-then-undo', {
     expectedFailedLoads: ['/api/foryou'],
     before: async ({ page }) => {
-      await installClock(page)
+      await holdClockFromLoad(page)
       page._fyFailing = false
       await page.route(
         (u) => new URL(u).pathname === '/api/foryou',
