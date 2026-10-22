@@ -76,6 +76,21 @@ function track(p: Promise<unknown>): void {
 // Cap matches the backend's _BATCH_MAX so a queued flush never 422s.
 const MAX_QUEUE = 50
 
+// Events held back until their Undo window closes (D25): a Hide's
+// ``never`` waits while its toast offers Undo, so a hide taken back
+// never reaches the ranking. ``holdInteraction`` adds one; its
+// ``release`` sends it and ``cancel`` drops it. The page hiding sends
+// whatever is still held (``onPageHide``), ahead of the queue: the
+// toast's timer may never fire again, and a signal is better than none.
+const held = new Set<InteractionEvent>()
+
+/** Moves every held event to the front of the queue. */
+function queueHeld(): void {
+  if (held.size === 0) return
+  queue.unshift(...held)
+  held.clear()
+}
+
 // ---- flushing ----
 
 async function flush(): Promise<void> {
@@ -123,6 +138,7 @@ function scheduleFlush(): void {
 // drain the queue before knowing the beacon succeeded — the
 // fallback path then needs the events.
 function onPageHide(): void {
+  queueHeld()
   if (queue.length === 0) return
   // Drain into a local snapshot BEFORE attempting any send, so a
   // failed sendBeacon still has the events to fall back to. We swap
@@ -207,6 +223,28 @@ export function recordImmediate(event: InteractionEvent): void {
   track(sent)
 }
 
+/** Holds ``event`` back until ``release`` sends it (the Undo toast
+ * expired) or ``cancel`` drops it (Undo). Either is a no-op once the
+ * other has run, or once the page hiding has sent it. A Hide's
+ * ``never`` goes through here (D25). */
+export function holdInteraction(event: InteractionEvent): { release: () => void; cancel: () => void } {
+  held.add(event)
+  return {
+    release: () => {
+      if (!held.delete(event)) return
+      recordImmediate(event)
+    },
+    cancel: () => {
+      held.delete(event)
+    },
+  }
+}
+
+/** For tests: number of events held back. */
+export function heldCount(): number {
+  return held.size
+}
+
 /** Records that a story opened. ``recordImmediate`` does it for every
  * ``click``; the paths that open a story without one (the alternatives
  * under a card, the context menu's "Open in new tab") call it. */
@@ -221,8 +259,10 @@ export function lastStoryOpenAt(): number {
 
 /** Drain the queue right now without waiting for rIC (tests, dev
  * tools, and the flush before a reload onto a new build). Resolves when
- * that POST and every one already on the way have settled. */
+ * that POST and every one already on the way have settled. A held
+ * event goes too: the reload takes its Undo toast with it. */
 export async function flushNow(): Promise<void> {
+  queueHeld()
   await flush()
   await Promise.allSettled(Array.from(inFlight))
 }

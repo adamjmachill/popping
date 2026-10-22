@@ -28,9 +28,8 @@ type Props = {
   // ``seen:`` key, as from a tab (PR3b). Results are never dimmed: they
   // are what you searched for.
   onOpenEntry?: (entry: Entry) => void
+  // Hide (App's ``hideStory``): the card's ⋯ row and a swipe left.
   onHide?: (entryId: number) => void
-  onHideToggle?: (entryId: number) => void
-  hiddenSet?: Set<number>
   onStar?: (entryId: number) => void
   starredSet?: Set<number>
   onVote?: (entryId: number, direction: 'up' | 'down' | null) => void
@@ -49,8 +48,6 @@ export function SearchResults({
   faviconBySourceId,
   onOpenEntry,
   onHide,
-  onHideToggle,
-  hiddenSet,
   onStar,
   starredSet,
   onVote,
@@ -93,8 +90,6 @@ export function SearchResults({
               onToggleSummary={onToggleSummary ? () => onToggleSummary(e.id) : undefined}
               onActivate={onOpenEntry ? () => onOpenEntry(e) : undefined}
               onHide={onHide ? () => onHide(e.id) : undefined}
-              onHideToggle={onHideToggle ? () => onHideToggle(e.id) : undefined}
-              hidden={hiddenSet?.has(e.id) ?? false}
               onStar={onStar ? () => onStar(e.id) : undefined}
               starred={starredSet?.has(e.id) ?? false}
               onVote={onVote ? (dir) => onVote(e.id, dir) : undefined}

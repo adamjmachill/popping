@@ -39,7 +39,7 @@ from app.brief import _HISTORICAL_SOURCE_SLUGS
 from app.config import settings
 from app.db import get_session
 from app.models import Entry, Source
-from app.routes.entries import not_hidden, window_start
+from app.routes.entries import card_preview, not_hidden, window_start
 from app.routes.preferences import hidden_entry_ids
 from app.schemas import EntryListOut
 from app.scoring import composite as composite_scorer
@@ -109,6 +109,9 @@ async def foryou(
             # _Row builder below (see comment there).
             Entry.meta.op("->>")("reddit_thread_url").label("reddit_thread_url"),
             Entry.meta.op("->>")("reddit_comment_count").label("reddit_comment_count_text"),
+            # The feed's blurb, for the card's preview (D34); the
+            # ``_Row`` builder turns it into ``preview``.
+            Entry.meta.op("->>")("summary").label("feed_summary_text"),
             # Source fields needed for category filter and potential
             # future re-weighting.  Joining here eliminates the second
             # round-trip the previous code did to hydrate Source rows.
@@ -145,7 +148,7 @@ async def foryou(
         __slots__ = (
             "id", "source_id", "title", "url", "published_at", "fetched_at",
             "composite_score", "personal_score", "raw_score",
-            "image_url", "image_path", "cached_summary",
+            "image_url", "image_path", "cached_summary", "preview",
             "reddit_thread_url", "reddit_comment_count",
         )
         def __init__(self, raw):
@@ -161,6 +164,8 @@ async def foryou(
             self.image_url = raw.image_url
             self.image_path = raw.image_path
             self.cached_summary = raw.cached_summary
+            # Same projection as ``/api/entries`` (``_card_out``).
+            self.preview = card_preview(raw.title, raw.cached_summary, getattr(raw, "feed_summary_text", None))
             self.reddit_thread_url = raw.reddit_thread_url
             # ``reddit_comment_count`` projects as text from JSONB
             # (``->>`` is always text). Coerce to int so the

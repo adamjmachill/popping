@@ -116,26 +116,17 @@ type Props = {
   // them and the cards render with summaries permanently collapsed.
   expandedSummaries?: Set<number>
   onToggleSummary?: (entryId: number) => void
-  // Per-card "hide this entry" action. When present, each card's
-  // context menu gets a "Hide this entry" item. App wires this
-  // to the hidden set; the entry disappears from every column + the
-  // For You row immediately.
+  // Hide (Card's ``onHide``: the ⋯ sheet's row and a swipe left). App's
+  // ``hideStory``: the story leaves every tab at once, with Undo.
   onHideEntry?: (entryId: number) => void
   // Per-card "star" / "unstar" action. When present, each card
-  // gets a star button, and the context menu gets a "Save for
-  // later" / "Unsave" item. App wires this to the starred set; the
+  // gets a bookmark button. App wires this to the starred set; the
   // entry surfaces in the dedicated "Saved" column.
   onStarEntry?: (entryId: number) => void
   // Per-card "is this entry currently starred" lookup. App
   // passes a Set so each card render is an O(1) check rather
   // than a linear search.
   starredSet?: Set<number>
-  // Per-card "hide" / "unhide" action for the eye button.
-  onHideToggle?: (entryId: number) => void
-  // Per-card "is this entry currently hidden" lookup. App
-  // passes the same Set the eye button uses for its
-  // open/closed state.
-  hiddenSet?: Set<number>
   // Per-card vote action + lookup — same shape as star/hide but a
   // three-state Map (no entry / 'up' / 'down') instead of a Set,
   // since a vote isn't a boolean membership test.
@@ -189,12 +180,12 @@ type EndRows = { generation: number | undefined; count: number; next: TabCount |
 // comparator ignores the callback props (``onOpenEntry``,
 // ``onMarkAll``, ``onOpenTab``, ``onHoldChange``,
 // ``onSelectionFolded``, ``onHideEntry``,
-// ``onStarEntry``, ``onHideToggle``, ``onVoteEntry``,
+// ``onStarEntry``, ``onVoteEntry``,
 // ``onToggleSummary``, ``onPrefsChange``), the per-card ``cardRefs``
 // and the stable ``seenRegistry`` — they're inherently per-render at the
 // App layer; the data-driven props (``sections``, ``unseenCount``,
 // ``nextTab``, ``generation``, ``trackSeen``, ``sourcesById``,
-// ``sourcesByName``, ``starredSet``, ``hiddenSet``, ``votedMap``,
+// ``sourcesByName``, ``starredSet``, ``votedMap``,
 // ``prefs``, ``sentinelRoot``) and the
 // phone's ``scrollerRef`` (a stable setter or undefined, so comparing
 // it costs no render) are what we actually re-render against.
@@ -240,8 +231,6 @@ export function ColumnInner({
   onHideEntry,
   onStarEntry,
   starredSet,
-  onHideToggle,
-  hiddenSet,
   onVoteEntry,
   votedMap,
   scrollerRef,
@@ -612,8 +601,6 @@ export function ColumnInner({
     expandedSummaries,
     onToggleSummary,
     onHideEntry,
-    onHideToggle,
-    hiddenSet,
     onStarEntry,
     starredSet,
     onVoteEntry,
@@ -909,8 +896,6 @@ type CardListProps = {
   expandedSummaries: Set<number> | undefined
   onToggleSummary: ((entryId: number) => void) | undefined
   onHideEntry: ((entryId: number) => void) | undefined
-  onHideToggle: ((entryId: number) => void) | undefined
-  hiddenSet: Set<number> | undefined
   onStarEntry: ((entryId: number) => void) | undefined
   starredSet: Set<number> | undefined
   onVoteEntry: ((entryId: number, direction: 'up' | 'down' | null) => void) | undefined
@@ -932,8 +917,6 @@ function CardList({
   expandedSummaries,
   onToggleSummary,
   onHideEntry,
-  onHideToggle,
-  hiddenSet,
   onStarEntry,
   starredSet,
   onVoteEntry,
@@ -969,8 +952,6 @@ function CardList({
             expanded={expandedSummaries?.has(e.id) ?? false}
             onToggleSummary={onToggleSummary ? () => onToggleSummary(e.id) : undefined}
             onHide={onHideEntry ? () => onHideEntry(e.id) : undefined}
-            onHideToggle={onHideToggle ? () => onHideToggle(e.id) : undefined}
-            hidden={hiddenSet?.has(e.id) ?? false}
             onStar={onStarEntry ? () => onStarEntry(e.id) : undefined}
             starred={starredSet?.has(e.id) ?? false}
             onVote={onVoteEntry ? (dir) => onVoteEntry(e.id, dir) : undefined}
@@ -1143,7 +1124,6 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     prev.faviconBySourceId === next.faviconBySourceId &&
     prev.expandedSummaries === next.expandedSummaries &&
     prev.starredSet === next.starredSet &&
-    prev.hiddenSet === next.hiddenSet &&
     prev.votedMap === next.votedMap &&
     // The element changes on every phone tab remount and once App has
     // the desktop wrapper; the sentinel's observer rebinds to it.

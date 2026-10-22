@@ -267,6 +267,56 @@ def _clean_summary(raw: str | None) -> str:
     return text
 
 
+# The preview text under a card's headline (D34): about 300 characters,
+# cut on a word boundary. The 800-character cap stays the full
+# summary's (the Summary arrow).
+_PREVIEW_MAX_CHARS = 300
+
+# What Reddit's feed sends for a link post, after ``_clean_summary``:
+# ``submitted by /u/name [link] [comments]``. A self post has the OP's
+# text in front of the same trailer. The trailer goes either way; a
+# link post is then empty.
+_REDDIT_TRAILER_RE = re.compile(r"\s*submitted by\s+\S+\s+\[link\]\s+\[comments\]\s*$", re.IGNORECASE)
+
+# Letters and digits only, lower-cased: a blurb that is the title again
+# with other punctuation, spacing or case is still the title.
+_WORD_CHARS_RE = re.compile(r"[^\w]+", re.UNICODE)
+
+
+def _cut_preview(text: str) -> str:
+    if len(text) <= _PREVIEW_MAX_CHARS:
+        return text
+    cut = text[:_PREVIEW_MAX_CHARS]
+    if " " in cut:
+        cut = cut.rsplit(" ", 1)[0]
+    return cut.rstrip() + "…"
+
+
+def card_preview(title: str | None, cached_summary: str | None, feed_summary: str | None) -> str | None:
+    """The blurb a card shows under its headline, or None for none.
+
+    The cached AI summary when there is one with text, else the
+    feed's own blurb (``meta.summary``), cleaned like the summary
+    endpoint cleans it (tags stripped, entities unescaped, whitespace
+    collapsed) with Reddit's link-post trailer dropped, and cut to
+    about 300 characters on a word boundary. None when nothing is
+    left, or when the text only repeats the title (case, spacing
+    and punctuation aside): a card with no preview looks as it did.
+
+    Computed in the projection, not stored: no column, no migration,
+    and old bundles ignore the field.
+    """
+    text = (cached_summary or "").strip()
+    if not text:
+        text = _REDDIT_TRAILER_RE.sub("", _clean_summary(feed_summary))
+    if not text:
+        return None
+    text = _cut_preview(text)
+    if _WORD_CHARS_RE.sub("", text).lower() == _WORD_CHARS_RE.sub("", title or "").lower():
+        return None
+    return text
+
+
 # Card projection — the columns every card-shaped response selects
 # (``EntryListOut``, and ``EntryOut`` for by-ids, which adds the feed's
 # name). No ``meta`` JSONB blob: the dashboard only ever reads
@@ -313,6 +363,10 @@ _CARD_COLUMNS = (
     # episode" when this is non-null (see
     # POST /entries/{id}/podcast_summary).
     Entry.meta.op("->>")("transcript_url").label("transcript_url"),
+    # The feed's own blurb, for the preview under the headline (D34).
+    # Only ``card_preview``'s input: ``_card_out`` turns it into
+    # ``preview`` and the blurb itself never reaches the response.
+    Entry.meta.op("->>")("summary").label("feed_summary_text"),
 )
 _CARD_COLUMN_NAMES = tuple(c.name for c in _CARD_COLUMNS)
 
@@ -348,6 +402,7 @@ def _card_out(row) -> dict:
             data["duration_seconds"] = int(raw_duration)
         except (TypeError, ValueError):
             data["duration_seconds"] = None
+    data["preview"] = card_preview(data.get("title"), data.get("cached_summary"), data.pop("feed_summary_text", None))
     return data
 
 

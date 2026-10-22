@@ -110,7 +110,6 @@ def test_column_comparator_function_exists():
     "faviconBySourceId",
     "expandedSummaries",
     "starredSet",
-    "hiddenSet",
     "votedMap",
     "sentinelRoot",
     "scrollerRef",
@@ -141,6 +140,8 @@ def test_column_comparator_checks_prop(prop):
 
 HANDLERS = [
     "markColumnRead",
+    "hideStory",
+    "starStory",
     "toggleSource",
     "onSourceRenamed",
     "toggleSourceAndMaybeClose",

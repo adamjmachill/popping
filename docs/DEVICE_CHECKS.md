@@ -71,6 +71,20 @@ This file is the running list of on-device checks for the UX overhaul (`docs/UX_
 - [ ] #47 · On For You, note the top three stories. Hide the first, wait a minute with Popping open, hide the third, and wait another minute. Open Menu → Settings → Hidden, tap Restore all, close Settings and open the first story's category tab. Pass: the story is there straight away; back on For You, the three are in the order you noted (a new story may sit between them).
 - [ ] #47 · (If you have a desktop) On the laptop, search for an older story the phone's tabs don't show and save it, then wait a minute with Popping open on the phone. Pass: it shows at the top of Saved on the phone, with its picture.
 - [ ] #47 · (If you have more than 30 saves) Open the Saved tab, force-quit Popping and reopen it. Pass: Saved fills in without the app freezing, and more stories load as you scroll to the end.
+- [ ] #<pr> · Open any tab. Pass: each card shows the feed's icon, name and a short time ("5h") on one line above the title, a line or two of preview text under the title (grey, cut after 2 lines; a card with nothing to show has none), and one row of buttons under it: ▲ ▼, a bookmark, Share, the Summary chevron and ⋯; no ✓, no eye, no "ago".
+- [ ] #<pr> · Tap the preview text under a title. Pass: the story opens in Safari; back in Popping that card is still in place and the tab's badge is one lower.
+- [ ] #<pr> · Tap the Summary chevron on a card with preview text. Pass: the full summary opens in place and the preview line is gone; tapping the chevron again closes it and the preview is back.
+- [ ] #<pr> · Tap ▲ on a card, then ▲ again; then ▼. Pass: the arrow turns orange, then grey, then ▼ turns blue; the card never moves and no toast shows.
+- [ ] #<pr> · Tap the bookmark on a card, then tap it again. Pass: it fills with no toast; the second tap empties it and shows "Removed from Saved · Undo", and Undo fills it again; the story is in Saved after that.
+- [ ] #<pr> · Tap Share on a card. Pass: the iOS share sheet opens with the story's own link (for a Reddit story, reddit.com, not old.reddit.com); cancelling it does nothing.
+- [ ] #<pr> · Tap a card's ⋯. Pass: a sheet rises from the bottom with the story's title and the rows Hide, Edit feed, Copy link, Open in browser and Cancel, all in reach; a tap on the dimmed area above closes it; Edit feed opens that feed in Settings; Copy link shows "Link copied".
+- [ ] #<pr> · ⋯ → Hide on a card, then Undo in the toast. Pass: the card leaves at once and comes back in its place; a few minutes later that story is not listed under Menu → Settings → History's hides (the ranking never heard about it).
+- [ ] #<pr> · ⋯ → Hide on a card and let the toast go. Pass: the card stays gone after a force-quit and reopen, and the story is listed under Settings → History's hides within a few minutes.
+- [ ] #<pr> · Swipe a card left, past about a third of its width. Pass: a red "Hide" shows under it as it moves, and letting go hides it with "Hidden · Undo"; a short drag left springs back and hides nothing.
+- [ ] #<pr> · Swipe a card right. Pass: it doesn't move and nothing happens.
+- [ ] #<pr> · With a card's ⋯ sheet open, wait 3 seconds with cards behind it, then close it and flick the top card off the screen. Pass: the badge doesn't drop (a story behind the sheet wasn't being read).
+- [ ] #<pr> · Tap a feed's name on a card. Pass: that feed opens in Settings (as before; a one-feed view comes later).
+- [ ] #<pr> · (If you have a desktop) On the laptop, right-click a card. Pass: a small menu with Hide, Edit feed, Copy link and Open in browser; with a card selected by the arrow keys, `a` and `z` vote and vote back, `h` hides with Undo, `b` saves silently and unsaves with "Removed from Saved · Undo", and `?` lists the four keys.
 
 ## Gate 1: seen on scroll (PR3b and PR3c, deployed together)
 
@@ -95,8 +109,8 @@ Opens when PR6c merges.
 - [ ] Pass: no doubled movement.
 - [ ] Small downward wobble, then scroll up. Pass: normal scrolling.
 - [ ] VoiceOver. Pass: it reads "Checking…" and the result.
-- [ ] Swipe a card left. Pass: it hides, and Undo brings it back.
-- [ ] Open a card's ⋯. Pass: the sheet rises from the bottom, every row is in reach, and a tap outside closes it.
+- [ ] Swipe a card left (PR5a). Pass: a red "Hide" shows under the card as it moves; letting go past about a third of the width hides it with "Hidden · Undo", and Undo puts it back in its place. A diagonal drag either scrolls or swipes, never both.
+- [ ] Open a card's ⋯ (PR5a). Pass: the sheet rises from the bottom with Hide, Edit feed, Copy link, Open in browser and Cancel, every row in reach above the home indicator, and a tap on the dimmed area closes it.
 
 ## Checked
 
