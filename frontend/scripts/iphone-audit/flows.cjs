@@ -631,9 +631,10 @@ async function openedIds(page, re) {
 // 1 s batch goes only on runFor, and no card has a second on screen
 // before the flow's first step), on For You: story `n` is hidden, its
 // PATCH reaches the store, and a poll comes back without it (the server
-// leaves hidden stories out, PR4b). The badge must drop by one and no
-// more: a card read for a dwell and scrolled off the top by the tap (the
-// button is brought into view) would be marked seen (PR3c) and leave For
+// leaves hidden stories out, PR4b). Hidden the way a finger does since
+// PR5a: ⋯, then Hide (hideViaSheetHeld). The badge must drop by one and
+// no more: a card read for a dwell and scrolled off the top by the tap
+// (the ⋯ is brought into view) would be marked seen (PR3c) and leave For
 // You's order, which the flows read whole afresh after the restore. False,
 // after a failure under `id`, when a step didn't happen.
 async function hideAndPoll(page, context, id, n) {
@@ -646,7 +647,7 @@ async function hideAndPoll(page, context, id, n) {
   if (!(await waitFor(async () => /^for you/i.test(await selectedTab(page)), 3000))) return no(`the phone opened on ${JSON.stringify(await selectedTab(page))}`)
   await card.first().waitFor({ state: 'visible' })
   const before = Number(await badge(page, /^for you/i))
-  await tap(page, card.locator('button[aria-label="hide"]'))
+  await hideViaSheetHeld(page, card)
   if (!(await waitFor(async () => (await card.count()) === 0, 3000))) return no(`the hidden ${n} is still drawn`)
   await page.clock.runFor(1000)
   if (!(await waitFor(() => hidden().includes(n), 3000))) return no('the hide never reached the store')
@@ -1028,6 +1029,24 @@ async function openSheet(page, card) {
 // Hides `card` the way a finger does: ⋯, then Hide.
 async function hideViaSheet(page, card) {
   await openSheet(page, card)
+  await tap(page, sheetRow(page, 'Hide'))
+}
+// hideViaSheet under a held clock (holdClock, holdClockFromLoad or a
+// flow's own pauseAt): the sheet starts its slide-up a frame after it
+// mounts, and the held clock holds requestAnimationFrame too, so the
+// clock is stepped a frame at a time until the sheet is up. Those
+// frames are far short of a dwell, and seen on scroll is paused while
+// the sheet is open (App's modalOpen), so they mark no card seen. The
+// sheet's focus move after the Hide waits for the flow's next runFor.
+async function hideViaSheetHeld(page, card) {
+  await tap(page, card.locator('button[aria-label="more actions"]'))
+  await page.locator(SHEET).waitFor({ state: 'visible' })
+  const up = () =>
+    page.evaluate((sel) => {
+      const d = document.querySelector(sel)
+      return !!d && d.getAnimations().every((a) => a.playState !== 'running') && Math.abs(d.getBoundingClientRect().bottom - innerHeight) < 1
+    }, SHEET)
+  for (let i = 0; i < 10 && !(await waitFor(up, i === 0 ? 50 : 1000)); i++) await page.clock.runFor(16)
   await tap(page, sheetRow(page, 'Hide'))
 }
 const neversFor = (page, id) => page._events.filter((e) => e.type === 'never' && e.entry_id === id).length
@@ -2056,6 +2075,8 @@ module.exports = [
       // The story fetched by id is a full card: its thumbnail loads.
       const thumb = page.locator(`${MOBILE_MAIN} article[data-card-id="503"] img[src="/assets/thumbs/503.jpg"]`)
       if (!(await waitFor(() => thumb.evaluate((img) => img.complete && img.naturalWidth > 0).catch(() => false), 3000))) fail('SAVED-BY-ID', 'story 503 shows no thumbnail')
+      // And its preview under the headline (PR5a, D34): by-ids carries it.
+      if (!(await page.locator(`${MOBILE_MAIN} article[data-card-id="503"] [data-preview]`).count())) fail('SAVED-BY-ID', 'story 503 shows no preview')
       if (asked() !== JSON.stringify(['999999,503'])) fail('SAVED-BY-ID', `by-ids was asked for ${asked()}, expected only the saves no tab holds, newest first`)
       await shot('saved')
 
@@ -2079,7 +2100,7 @@ module.exports = [
       const saves = () => prefMock(context).value('starred_entries') || []
       const now = await page.evaluate(() => Date.now())
       await page.clock.pauseAt(now + 1000)
-      const unsave503 = page.locator(`${MOBILE_MAIN} article[data-card-id="503"] button[aria-label="remove from saved"]`)
+      const unsave503 = page.locator(`${MOBILE_MAIN} article[data-card-id="503"] button[aria-label="unsave"]`)
       page._byIdsAnswer = 'offline'
       const undoCase = async (label, want) => {
         await tapUndo(page)
@@ -2126,10 +2147,11 @@ module.exports = [
   // show. The clock is held: each 1 s batch goes only when the flow lets
   // it (runFor), and the toast stays up. Once two minutes have passed
   // since the Undo, a story the server still doesn't return goes again.
-  // The clock is held from the load (holdClockFromLoad): a tap on 102's
-  // hide button brings it into view and scrolls the cards above it off the
-  // top, and one of those read for a second would be marked seen (PR3c)
-  // and leave For You's order. 102 itself is read for a dwell at the top
+  // The clock is held from the load (holdClockFromLoad): scrolling 102
+  // into view takes the cards above it off the top, and one of those
+  // read for a second would be marked seen (PR3c) and leave For You's
+  // order. 102 is hidden with ⋯ → Hide (PR5a, hideViaSheetHeld), and is
+  // itself read for a dwell at the top
   // of the screen before the hide, so the Undo puts back a story that had
   // qualified: the put-back must not move the list (the story goes back
   // into the snapshot's place; only a new snapshot starts the list over at
@@ -2139,6 +2161,7 @@ module.exports = [
     before: async ({ page }) => {
       await holdClockFromLoad(page)
       await keepOutOfTabs(page, [])
+      await recordInteractions(page)
     },
     run: async ({ page, context, fail, settle }) => {
       const id = 'HIDE-UNDO'
@@ -2169,7 +2192,7 @@ module.exports = [
       await scrollListBy(page, -30)
       await dwell(page)
       const unseenBefore = await badge(page, /^for you/i)
-      await tap(page, card.locator('button[aria-label="hide"]'))
+      await hideViaSheetHeld(page, card)
       if (!(await waitFor(async () => (await card.count()) === 0, 3000))) return fail(id, 'the hidden story is still drawn')
       await page.clock.runFor(1000)
       if (!(await waitFor(() => hidden().includes(n), 3000))) return fail(id, 'the hide never reached the store')
@@ -2227,6 +2250,11 @@ module.exports = [
       if (!(await pollDone(page))) return fail(id, 'the poll after two minutes never finished')
       if (!(await opened(/^for you/i, false))) fail(id, `two minutes after the Undo, For You still shows ${n}, which no poll returns`)
       if (!(await opened(/^news/i, false))) fail(id, `two minutes after the Undo, News still shows ${n}, which no poll returns`)
+      // The Undo, tapped after a poll and putting 102 back through PR4c's
+      // put-back, also took back the hide's held `never` (PR5a, D25):
+      // long past the toast's window, none has gone.
+      await requestsSettled(page)
+      if (neversFor(page, n) !== 0) fail(id, `Hide, a poll, then Undo sent ${neversFor(page, n)} never events for ${n}`)
     },
   }),
 
@@ -2255,7 +2283,7 @@ module.exports = [
       if (!(await waitFor(async () => (await phoneIds(page)) === '503,105,103', 3000))) return fail(id, `Saved shows ${await phoneIds(page)}, expected 503,105,103`)
       const now = await page.evaluate(() => Date.now())
       await page.clock.pauseAt(now + 1000)
-      await tap(page, card(105).locator('button[aria-label="hide"]'))
+      await hideViaSheetHeld(page, card(105))
       if (!(await waitFor(async () => (await phoneIds(page)) === '503,103', 1000))) fail(id, `after hiding 105 Saved shows ${await phoneIds(page)}, with the hide's batch not sent yet`)
       if (hidden().includes(105)) fail(id, "the hide reached the store before its batch went; the flow needs it held")
       await page.clock.runFor(1000)
@@ -2559,7 +2587,7 @@ module.exports = [
       const saves = () => prefMock(context).value('starred_entries') || []
       await tap(page, phoneTab(page, /^saved/i))
       if (!(await waitFor(async () => (await phoneIds(page)) === '503', 3000))) return fail(id, `Saved shows ${await phoneIds(page)}, expected 503 (fetched by id)`)
-      await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="503"] button[aria-label="remove from saved"]`))
+      await tap(page, page.locator(`${MOBILE_MAIN} article[data-card-id="503"] button[aria-label="unsave"]`))
       if (!(await waitFor(() => !saves().includes(503), 3000))) return fail(id, 'the unsave never reached the store')
       if (!(await openedIds(page, /^news/i)).includes(101)) return fail(id, `News shows ${await phoneIds(page)}, without 101`)
       await openStory(page, 101)
@@ -2599,7 +2627,7 @@ module.exports = [
       for (const n of [101, 102]) {
         const card = page.locator(`${MOBILE_MAIN} article[data-card-id="${n}"]`)
         await card.first().waitFor({ state: 'visible' })
-        await tap(page, card.locator('button[aria-label="hide"]'))
+        await hideViaSheetHeld(page, card)
         if (!(await waitFor(async () => (await card.count()) === 0, 3000))) return fail(id, `the hidden ${n} is still drawn`)
       }
       await page.clock.runFor(1000)
@@ -6478,6 +6506,7 @@ module.exports = [
   // shows "Removed from Saved · Undo", whose Undo saves it again.
   dashFlow('flow-card-save', {
     before: async ({ page }) => {
+      await installClock(page)
       await recordInteractions(page)
     },
     run: async ({ page, fail, shot }) => {
@@ -6487,6 +6516,10 @@ module.exports = [
       const id = Number(await card.getAttribute('data-card-id'))
       const save = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="save"]`)
       const unsave = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"] button[aria-label="unsave"]`)
+      // The clock is held from here (holdClock): each 1 s batch goes only
+      // on runFor, and the unsave's toast stays up until the Undo tap
+      // however slow the steps between.
+      await holdClock(page)
       await tap(page, save())
       if (!(await waitFor(async () => (await unsave().count()) === 1, 2000))) return fail('SAVE', 'the bookmark did not fill')
       if ((await unsave().getAttribute('aria-pressed')) !== 'true') fail('SAVE', 'the saved bookmark is not aria-pressed')
@@ -6495,6 +6528,7 @@ module.exports = [
       if (await page.locator('[role="status"]').count()) fail('SAVE', `saving showed a toast: ${JSON.stringify(await page.locator('[role="status"]').textContent())}`)
       // The save's PATCH goes with the next 1 s batch; unsave after it
       // (an unsave inside the batch would fold the two into nothing).
+      await page.clock.runFor(1000)
       if (!(await waitFor(() => patched(writes, 'starred_entries', 'add').includes(id), 3000))) return fail('SAVE', `the save sent no PATCH adding ${id}: ${JSON.stringify(writes)}`)
       await tap(page, unsave())
       if (!(await waitFor(async () => (await save().count()) === 1, 2000))) return fail('SAVE', 'unsaving did not empty the bookmark')
@@ -6503,6 +6537,7 @@ module.exports = [
       await shot('unsaved')
       // The unsave's PATCH goes with the next 1 s batch (an Undo inside
       // the batch would fold the two into nothing).
+      await page.clock.runFor(1000)
       if (!(await waitFor(() => patched(writes, 'starred_entries', 'remove').includes(id), 3000))) return fail('SAVE', `the unsave sent no PATCH removing ${id}: ${JSON.stringify(writes)}`)
       if (!(await waitFor(() => !(prefMock(page.context()).value('starred_entries') || []).includes(id), 3000))) fail('SAVE', 'the story is still in the store after the unsave')
       if (bookmarksFor(page, id) !== 1) fail('SAVE', `an unsave sent a bookmark (${bookmarksFor(page, id)} in all)`)
@@ -6510,6 +6545,7 @@ module.exports = [
       if (!(await waitFor(async () => (await unsave().count()) === 1, 2000))) return fail('SAVE', 'Undo did not save the story again')
       await sleep(400)
       if (bookmarksFor(page, id) !== 1) fail('SAVE', `Undo sent a bookmark (${bookmarksFor(page, id)} in all)`)
+      await page.clock.runFor(1000)
       if (!(await waitFor(() => (prefMock(page.context()).value('starred_entries') || []).includes(id), 3000))) fail('SAVE', 'the story is not in the store after Undo')
       const ops = writes.filter((w) => w.key === 'starred_entries').map((w) => ((w.body.add || []).length ? 'add' : 'remove'))
       if (JSON.stringify(ops) !== JSON.stringify(['add', 'remove', 'add'])) fail('SAVE', `starred_entries saw ${JSON.stringify(ops)}, expected add, remove, add`)
@@ -6665,12 +6701,17 @@ module.exports = [
       const before = await groupIds(page, 'unseen')
       const [first, second] = before
       const card = (id) => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"]`)
-      await hideViaSheet(page, card(first))
+      // The clock is held from here (holdClock): the toast's 5 s and each
+      // 1 s batch run only on runFor, so a slow step on a loaded machine
+      // can't let the toast go before the flow taps Undo.
+      await holdClock(page)
+      await hideViaSheetHeld(page, card(first))
       if (!(await waitFor(async () => (await card(first).count()) === 0, 2000))) return fail('HIDE-UNDO', 'Hide left the card in place')
       if (!(await waitFor(() => page.locator('[role="status"]').getByText('Hidden', { exact: true }).isVisible(), 2000))) return fail('HIDE-UNDO', 'no "Hidden" toast')
       await shot('hidden')
       // The hide's PATCH goes with the next 1 s batch; Undo after it, so
       // its own PATCH (a remove) is seen too.
+      await page.clock.runFor(1000)
       if (!(await waitFor(() => patched(writes, 'hidden_entries', 'add').includes(first), 3000))) return fail('HIDE-UNDO', `the hide sent no PATCH adding ${first}: ${JSON.stringify(writes)}`)
       await tap(page, undoButton(page))
       if (!(await waitFor(async () => (await card(first).count()) === 1, 2000))) return fail('HIDE-UNDO', 'Undo did not bring the story back')
@@ -6682,7 +6723,7 @@ module.exports = [
       if (!(await waitFor(() => patched(writes, 'hidden_entries', 'add').includes(first) && patched(writes, 'hidden_entries', 'remove').includes(first), 3000))) fail('HIDE-UNDO', `hidden_entries saw ${JSON.stringify(writes.filter((w) => w.key === 'hidden_entries'))}`)
       if ((prefMock(page.context()).value('hidden_entries') || []).includes(first)) fail('HIDE-UNDO', 'the story is still hidden in the store after Undo')
       // Hide and let the toast go: exactly one `never`.
-      await hideViaSheet(page, card(second))
+      await hideViaSheetHeld(page, card(second))
       if (!(await waitFor(async () => (await card(second).count()) === 0, 2000))) return fail('HIDE-UNDO', 'the second Hide left the card in place')
       await page.clock.runFor(2000)
       await requestsSettled(page)
@@ -6698,7 +6739,7 @@ module.exports = [
       // A hide, then the page hidden at once: the held `never` goes with
       // the hide's keepalive POST, ahead of the toast.
       const third = before[2]
-      await hideViaSheet(page, card(third))
+      await hideViaSheetHeld(page, card(third))
       if (!(await waitFor(async () => (await card(third).count()) === 0, 2000))) return fail('HIDE-UNDO', 'the third Hide left the card in place')
       await setHidden(page, true)
       const keptAlive = () => harnessLog(page).then((h) => h.fetches.some((f) => f.method === 'POST' && f.path === '/api/interactions/batch' && f.keepalive))
@@ -6809,11 +6850,18 @@ module.exports = [
 
   // Swipe left hides, with Undo (CDP touches; Chromium only).
   dashFlow('flow-swipe-left-hide', {
+    before: async ({ page }) => {
+      await installClock(page)
+    },
     run: async ({ page, fail, shot }) => {
       await tap(page, phoneTab(page, /^news/i))
       const before = await groupIds(page, 'unseen')
       const id = before[0]
       const card = () => page.locator(`${MOBILE_MAIN} article[data-card-id="${id}"]`)
+      // Held from here (holdClock), so the toast stays up until the Undo
+      // tap however slow the steps between (a swipe commits on touchend,
+      // with no timer).
+      await holdClock(page)
       if (!(await swipeCard(page, card(), -160))) return
       if (!(await waitFor(async () => (await card().count()) === 0, 2000))) return fail('SWIPE-LEFT', 'a swipe left did not hide the story')
       if (!(await waitFor(() => page.locator('[role="status"]').getByText('Hidden', { exact: true }).isVisible(), 2000))) return fail('SWIPE-LEFT', 'no "Hidden" toast')

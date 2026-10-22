@@ -368,6 +368,113 @@ PR is opened.
 Each: break the line, `npm run build`, `--only` that flow, restore from a
 saved copy compared with `cmp` (the fixes were uncommitted), rebuild.
 
+## Rebased onto main
+
+Moved from 8516098 (PR3c) onto 352c6f5 (PR4c, #47: Saved by id). The
+conflicts are resolved inside the two PR5a commits; the flow changes are
+the third commit.
+
+### Conflicts
+
+- `App.tsx`: PR4c's hide machinery is kept whole (`keepHiddenStories`,
+  `putBackHiddenStories`, `restoreHiddenEntries` / `restoreHiddenEntry`,
+  `hideEntries` / `hideEntry`, `forYouOkRef`, the `restoredRef` lay-over
+  in `refresh`). `hideStory` sits on top unchanged: `hideEntry` is
+  PR4c's `hideEntries([id])` (the story and its places are kept for the
+  Undo), and the toast's Undo is `hold.cancel()` then
+  `restoreHiddenEntry`, so it goes through `putBackHiddenStories`: a
+  story a poll dropped comes back in its place. PR4c's `toggleHideEntry`
+  (the eye) goes as in PR5a; the comments that named the eye and the
+  context menu's Hide now name `hideStory`. Hide all downvoted, Restore
+  and Restore all are PR4c's as merged.
+- `docs/DEVICE_CHECKS.md`: main's #47 lines and its Checked #39 entry
+  kept; PR5a's `#<pr>` lines follow #47; Gate 2's two card lines are
+  PR5a's.
+- `scripts/iphone-audit/README.md`: the flow table merged row by row:
+  `flow-bookmark-on-save` and `-desktop` are PR5a's (the bookmark),
+  `flow-saved-order` is PR4c's rewrite, PR4c's new rows kept.
+- `flows.cjs` and `Column.tsx` merged by git.
+
+### Where the two units meet
+
+- `hideStory`'s already-hidden guard (review fixes) also guards PR4c's
+  kept story: a second `keepHiddenStories` for a hidden story a poll has
+  dropped would drop the kept copy and leave its Undo nothing to put back.
+- PR4c's by-ids mock mirrors the server's projection, which carries
+  `preview` since PR5a: `capture.cjs`'s `BY_ID_FIELDS` gains it, and
+  `flow-saved-by-id` checks that 503 (fetched by id only) shows its
+  preview.
+- `flow-hide-undo-after-poll` now also records the interactions: the
+  Undo, tapped after a poll and putting 102 back through PR4c's put-back,
+  takes back the held `never` too (none after `runFor(120_000)`).
+
+### Flow changes (third commit)
+
+- PR4c's flows used the eye (`button[aria-label="hide"]`) and the old
+  bookmark label (`remove from saved`). `hideAndPoll`,
+  `flow-hide-undo-after-poll`, `flow-saved-drops-hidden-and-deleted` and
+  `flow-hide-two-undo-the-second` hide with ⋯ → Hide;
+  `flow-saved-by-id` and `flow-seen-prune-keeps-saved` unsave with
+  `unsave`. Their clock is held, and a held clock holds
+  `requestAnimationFrame`, which the sheet's slide-up waits for: the new
+  `hideViaSheetHeld` steps the clock 16 ms at a time (at most 10 frames)
+  until the sheet is up. The frames are far short of a dwell, and seen on
+  scroll is paused under the sheet, so `hideAndPoll`'s "the badge drops
+  by one and no more" holds as before. No assertion changed.
+- No PR4c flow read "Entry hidden." or a save or vote toast; `tapUndo`
+  (the toast's Undo by role) finds PR5a's "Hidden · Undo" and "Removed
+  from Saved · Undo".
+- Load flake in PR5a's own toast flows: `flow-hide-undo`,
+  `flow-card-save` and `flow-swipe-left-hide` tapped Undo in a toast
+  whose 5 s ran in real time, after a screenshot and a wait for a 1 s
+  batch. With three smoke runs at once on the 4-CPU machine (or the other
+  lane's smoke beside this one) the toast went first and the Undo tap
+  timed out: `flow-hide-undo` failed 5 of 9 runs on the rebased build and
+  2 of 9 on the pre-rebase build (de88b23) under the same load,
+  `flow-card-save` 3 of 6 and `flow-swipe-left-hide` 4 of 6. They now
+  hold the clock (`holdClock`) from just before the first action and
+  send each batch with `runFor(1000)`; `flow-hide-undo` hides with
+  `hideViaSheetHeld`. The assertions are as they were: 18 of 18 runs
+  passed under the same load afterwards.
+
+### Mutation checks (rebase)
+
+| Test | Broken line | Failed on |
+|---|---|---|
+| `flow-hide-undo-after-poll` | `hideStory`'s Undo calls `hold.release()` instead of `hold.cancel()` | `HIDE-UNDO: Hide, a poll, then Undo sent 1 never events for 102` |
+| `flow-hide-undo-after-poll`, `flow-hide-two-undo-the-second` | `hideStory`'s Undo calls `removeIds` instead of `restoreHiddenEntry` (PR4c's put-back skipped) | `right after the Undo, News shows …, without 102`, `For You … reads 101,301,201,… expected 101,301,102,201,…` (5 failures); `after the Undo of 102, For You opened afresh reads 301,201,…` (2) |
+| `flow-hide-undo`, `flow-hide-undo-after-poll` (held clock) | `hold.release()` right after `holdInteraction` in `hideStory` | `Hide then Undo sent 1 never events`, `the never was sent while the toast still offered Undo (1)`, the keepalive check; `Hide, a poll, then Undo sent 1 never events for 102` |
+
+Each: break the line, `npm run build`, `--only` those flows, restore from
+a saved copy (`git diff --quiet` clean), rebuild.
+
+### Verification (rebase)
+
+On 352c6f5 plus the three commits; `node_modules` linked in, database
+`popping_test_f`, `vite preview` on 127.0.0.1:4173 (pid file
+`preview-pr5a-rebase.pid`). The other lane ran on 4174 / its own database
+at the same time on the 4-CPU machine.
+
+- Backend `pytest -q -ra` (full; the backend is PR5a's as before): 1763
+  passed, 13 failed, exactly `/root/popping-env/baseline.txt` (no DNS).
+- `git diff --exit-code package.json package-lock.json`: clean.
+- `npm run lint`: 0 errors, the same 6 `react-refresh/only-export-
+  components` warnings. `npm run build`: ok. Unit tests: 238 passed
+  (PR4c's `saved.test.ts` and `feedOrder.test.ts` included).
+- Full `smoke.cjs --csp --strict` (Chromium): 0 failures, 0 warnings,
+  1437 s (slow under the other lane's load).
+- Both units' hide, save and sheet flows (28: `flow-bookmark-on-save`,
+  `-desktop`, `flow-card-save`, `flow-card-sheet`, `flow-hide-undo`,
+  `flow-hide-keys-desktop`, `flow-swipe-left-hide`, `flow-saved-*` (8),
+  `flow-hide-undo-after-poll`, `flow-hide-all-downvoted-undo`,
+  `flow-hidden-restore-all-after-poll`, `flow-hide-undo-until-returned`,
+  `flow-hide-undo-feed-gone-after` / `-before`,
+  `flow-hide-undo-foryou-fails`, `flow-hide-two-undo-the-second`,
+  `flow-two-hides-restore-all` / `-rows` / `-rows-adjacent`,
+  `flow-hide-foryou-fails-then-undo`, `flow-seen-prune-keeps-saved`)
+  looped 3 times with `--only`: 3 of 3 runs 0 failures, 0 warnings. No
+  flake left; the one found is above (Flow changes).
+
 ## Open items for later units
 
 - PR5b: `buildActions()` gains Hide stories from <feed>; `Toast.tsx` gains
@@ -394,10 +501,10 @@ saved copy compared with `cmp` (the fixes were uncommitted), rebuild.
   `a[aria-label="open in new tab"]` selector in smoke.cjs and flows.cjs
   to `a[data-headline]`; re-run the sheet and focus flows and the strict
   smoke.
-- PR4c / PR4d rebase: `hideStory` calls `hideEntry` and the toast's Undo
-  calls `restoreHiddenEntry`; PR4c's `keepHiddenStories` /
-  `putBackHiddenStories` put-back belongs in those two, not in
-  `hideStory`. `starStory` wraps `toggleStarEntry` the same way.
+- PR4d rebase: `hideStory` calls `hideEntry` and the toast's Undo calls
+  `restoreHiddenEntry`; PR4c's put-back now lives in those two (see
+  Rebased onto main), not in `hideStory`. `starStory` wraps
+  `toggleStarEntry` the same way.
 - PR8a: the feed button opens a one-feed view; Edit feed stays in ⋯ (D26).
 - PR6b: a left swipe and a pull: the card's direction lock (dead zone,
   ratio) already lets a mostly vertical drag through; the pull's reducer
