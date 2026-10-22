@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from app.brief import _HISTORICAL_SOURCE_SLUGS
 from app.routes import sources as routes
 from app.sources import list_sources
 
@@ -50,6 +51,15 @@ def test_known_built_ins_match_the_plugin_registry():
     names = _string_list(_ts("feedRules.ts"), "KNOWN_BUILT_INS")
     assert len(names) == len(set(names))
     assert set(names) == set(list_sources())
+
+
+@pytest.mark.no_db
+def test_historical_sources_match_brief():
+    """The feeds whose cards say "On this day" in place of a time (PR4d)
+    are the ones Brief and For You keep out as history."""
+    names = _string_list(_ts("feedRules.ts"), "HISTORICAL_SOURCES")
+    assert len(names) == len(set(names))
+    assert set(names) == set(_HISTORICAL_SOURCE_SLUGS)
 
 
 @pytest.mark.no_db

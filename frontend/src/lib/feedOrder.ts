@@ -33,6 +33,11 @@ export type Snapshot<E extends Item> = {
   earlier: number[]
   /** Arrivals waiting while the marker is above the screen. */
   held: number[]
+  /** The stories that went in at the end of their group since the
+   *  snapshot was taken (arrivals, and stories that came in already
+   *  seen): always each group's tail. A story placed in order
+   *  (``inOrder``) goes in among the others, before these. */
+  arrived: ReadonlySet<number>
   /** The latest copy of every story in the snapshot. */
   cache: Map<number, E>
   /** The arrays the last call returned, handed out again while equal. */
@@ -72,6 +77,12 @@ export type PartitionInput<E extends Item> = {
    *  once it lands (ids keep their group). The counts wait for the mark,
    *  so one written batch is one change of the badge. */
   isPending?: (e: E) => boolean
+  /** A story new to the snapshot that goes in at its place in
+   *  ``entries`` (the tab's order), not at the end of its group: the
+   *  rows a wider window fetched for the tab (PR4d), which are older
+   *  than what the snapshot holds, never arrivals. It still waits with
+   *  the arrivals while ``hold`` is on. */
+  inOrder?: (e: E) => boolean
 }
 
 const keepAll = () => false
@@ -94,13 +105,69 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
       cache.set(e.id, e)
       ;(placedSeen(e) ? earlier : unseen).push(e.id)
     }
-    snap = { generation: (prev?.generation ?? 0) + 1, order, unseen, earlier, held: [], cache, out: prev?.out ?? null }
+    snap = { generation: (prev?.generation ?? 0) + 1, order, unseen, earlier, held: [], arrived: new Set(), cache, out: prev?.out ?? null }
   } else {
     const cache = new Map(prev.cache)
     const known = new Set<number>([...prev.unseen, ...prev.earlier, ...prev.held])
     const unseen = [...prev.unseen]
     const earlier = [...prev.earlier]
     let held = [...prev.held]
+    // The arrivals so far, copied on the first change.
+    let arrived = prev.arrived
+    const arrive = (group: number[], id: number) => {
+      group.push(id)
+      if (arrived === prev.arrived) arrived = new Set(prev.arrived)
+      ;(arrived as Set<number>).add(id)
+    }
+    // Where a story goes into a group: at the end (an arrival), or, when
+    // ``inOrder`` says so, at its place among the group's other stories
+    // by their places in ``entries`` (the tab's order now), before the
+    // arrivals. The tab's order can have moved since the snapshot was
+    // taken (For You's Best is the server's ranking; a rescore moves a
+    // Best tab), so the snapshot's own stories needn't be in order any
+    // more: the place is the one with the fewest stories on the wrong
+    // side of it (one sorting after it above, or before it below), the
+    // lowest of those on a tie, so what is above the reader moves the
+    // least. A story the input no longer holds is stepped over.
+    const inOrder = input.inOrder ?? keepAll
+    let at: Map<number, number> | null = null
+    const place = (group: number[], e: E) => {
+      if (!inOrder(e)) {
+        arrive(group, e.id)
+        return
+      }
+      if (!at) at = new Map(entries.map((x, i) => [x.id, i]))
+      const pos = at
+      let end = group.findIndex((id) => arrived.has(id))
+      if (end < 0) end = group.length
+      const mine = pos.get(e.id)
+      if (mine == null) {
+        group.splice(end, 0, e.id)
+        return
+      }
+      // ``above``: stories above the place that sort after the story;
+      // ``below``: stories at or under it that sort before it.
+      let below = 0
+      for (let j = 0; j < end; j++) {
+        const p = pos.get(group[j])
+        if (p != null && p < mine) below++
+      }
+      let above = 0
+      let best = Infinity
+      let i = end
+      for (let j = 0; j <= end; j++) {
+        if (above + below <= best) {
+          best = above + below
+          i = j
+        }
+        if (j === end) break
+        const p = pos.get(group[j])
+        if (p == null) continue
+        if (p > mine) above++
+        else if (p < mine) below--
+      }
+      group.splice(i, 0, e.id)
+    }
     for (const e of entries) {
       // The latest copy (a poll replaces a story whose summary, score or
       // comment count changed).
@@ -109,14 +176,18 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
       known.add(e.id)
       // A story that comes in already seen (marked on another device
       // first) isn't new: it goes under the marker, at the end.
-      if (placedSeen(e)) earlier.push(e.id)
+      if (placedSeen(e)) place(earlier, e)
       else held.push(e.id)
     }
     if (!input.hold && held.length) {
-      unseen.push(...held)
+      for (const id of held) {
+        const e = cache.get(id)
+        if (e) place(unseen, e)
+        else arrive(unseen, id)
+      }
       held = []
     }
-    snap = { generation: prev.generation, order, unseen, earlier, held, cache, out: prev.out }
+    snap = { generation: prev.generation, order, unseen, earlier, held, arrived, cache, out: prev.out }
   }
 
   const draw = (ids: readonly number[]) => {
@@ -199,12 +270,14 @@ export type Held = {
    *  unsaved since they were fetched, which the unsave's Undo draws
    *  again from it; no other group holds those. */
   savedById: ReadonlyMap<number, unknown>
+  /** The rows the wider tabs fetched for themselves (PR4d's
+   *  ``extraByTab``), every tab's, shown or not. */
+  extra: readonly Item[]
 }
 
-/** App's keep set: every story it holds (``Held``). PR4d adds every
- *  wider tab's rows. */
+/** App's keep set: every story it holds (``Held``). */
 export function keepIdsFor(held: Held): Set<number> {
-  return keepSet(held.entries, held.forYou, held.starred, held.savedById.keys())
+  return keepSet(held.entries, held.forYou, held.starred, held.savedById.keys(), held.extra)
 }
 
 export type TabCount = { key: string; label: string; count: number }

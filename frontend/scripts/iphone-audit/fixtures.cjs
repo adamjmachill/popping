@@ -188,16 +188,28 @@ const ENTRIES = [
   mkEntry(504, 13, 'Prompt caching explained in 4 minutes', { score: 38, ago: 2500 }),
   mkEntry(505, 14, 'I Spent $10,000 On A Single Photo', { image: true, score: 57, ago: 4000 }),
   mkEntry(506, 13, 'Model context protocol (MCP) deep dive with the team that built it, part two of the three part series', { score: 49, ago: 5000 }),
-  // --- nhl (nhl_news=16): exactly 3 entries ---
-  // NHL's three cards have no preview (PR5a): the tab, with its end row,
-  // fits on one 390×844 screen, which the read-model flows lean on.
+  // --- nhl (nhl_news=16): exactly 3 entries in the last 2 days (the tab
+  // every tab loads, PR4d), one 3 days old (604: in the 7-day window)
+  // and one 10 days old (605: only in All). Their scores put them among
+  // the 2-day ones under Best (601, 605, 602, 604, 603), so a wider row
+  // appended at the end instead of at its place shows. NHL's cards have
+  // no preview (PR5a): the 2-day tab, with its end row, fits on one
+  // 390x844 screen, which the read-model flows lean on ---
   mkEntry(601, 16, 'Canucks sign Pettersson to an eight-year extension', { image: true, score: 72, ago: 22, summary: SHORT_SUMMARY, preview: null }),
   mkEntry(602, 16, 'Oilers beat Flames 4-3 in overtime', { score: 46, ago: 140, summary: SHORT_SUMMARY, preview: null }),
   mkEntry(603, 16, 'Trade deadline primer: every team\'s cap space, needs and likely sellers', { score: 39, ago: 400, preview: null }),
+  // (604's title doesn't name Pettersson: a search for him finds 601
+  // alone, which flow-card-sheet's "Hide on the only result" leans on.)
+  mkEntry(604, 16, 'Three days on: what the long-term deal means for the cap', { score: 45, ago: 3 * 24 * 60, summary: SHORT_SUMMARY, preview: null }),
+  mkEntry(605, 16, 'Preseason power rankings, ten days out', { score: 50, ago: 10 * 24 * 60, summary: SHORT_SUMMARY, preview: null }),
 ]
 
-const FOR_YOU_IDS = [101, 301, 102, 201, 401, 104, 303, 502]
-const FOR_YOU = FOR_YOU_IDS.map((id) => ENTRIES.find((e) => e.id === id))
+// The ranking's order. 304 is from the paused krebs_on_security (10): the
+// server leaves it out since PR4b (and so does the mock, which serves
+// FOR_YOU_RANKED); FOR_YOU is what For You shows.
+const FOR_YOU_IDS = [101, 301, 102, 201, 401, 304, 104, 303, 502]
+const FOR_YOU_RANKED = FOR_YOU_IDS.map((id) => ENTRIES.find((e) => e.id === id))
+const FOR_YOU = FOR_YOU_RANKED.filter((e) => SOURCES.find((s) => s.id === e.source_id).active)
 
 const sourceName = (id) => (SOURCES.find((s) => s.id === id) || {}).name || 'unknown'
 
@@ -226,7 +238,9 @@ module.exports = {
   NOW,
   SOURCES,
   ENTRIES,
+  mkEntry,
   FOR_YOU,
+  FOR_YOU_RANKED,
   SETTINGS,
   LLM_TAGS,
   sourceName,

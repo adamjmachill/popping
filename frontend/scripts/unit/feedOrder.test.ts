@@ -23,12 +23,13 @@ const none = seenOf()
 // One tab over several polls: `step` partitions with the snapshot kept.
 function tab(order = 'newest') {
   let last: Partition<Story> | null = null
-  return (entries: Story[], opts: { isSeen?: (e: Item) => boolean; isRemoved?: (e: Story) => boolean; isPending?: (e: Item) => boolean; hold?: boolean; reset?: boolean; order?: string } = {}) => {
+  return (entries: Story[], opts: { isSeen?: (e: Item) => boolean; isRemoved?: (e: Story) => boolean; isPending?: (e: Item) => boolean; inOrder?: (e: Item) => boolean; hold?: boolean; reset?: boolean; order?: string } = {}) => {
     last = partitionTab({
       entries,
       isSeen: opts.isSeen ?? none,
       isRemoved: opts.isRemoved,
       isPending: opts.isPending,
+      inOrder: opts.inOrder,
       order: opts.order ?? order,
       snapshot: last?.snapshot,
       hold: opts.hold,
@@ -90,6 +91,71 @@ test('arrivals wait while the marker is above the screen, and still count', () =
   // The marker comes back on screen: both go in, in arrival order.
   const let_go = step([story(10), story(9), story(3), story(2)])
   assert.deepEqual(ids(let_go.unseen), [3, 2, 9, 10])
+})
+
+test('PR4d: a wider tab\'s rows go in at their place in the tab order, arrivals still at the end', () => {
+  // A tab at 7 days: the snapshot holds the 2-day stories; the rows the
+  // wider fetch brings (older, so after them under Newest) are placed
+  // where the tab's order puts them, not appended like an arrival. Here
+  // 4 and 8 are the fetched rows, 1 an arrival that comes in with them.
+  const step = tab()
+  step([story(3), story(5), story(7)])
+  const fetched = new Set([4, 8])
+  const p = step([story(1), story(3), story(4), story(5), story(7), story(8)], { inOrder: (e) => fetched.has(e.id) })
+  assert.deepEqual(ids(p.unseen), [3, 4, 5, 7, 8, 1])
+  assert.equal(p.unseenCount, 6)
+  // A fetched row already seen goes under the marker at its place too.
+  const seen = seenOf(2, 6, 9)
+  const q = tab()
+  q([story(3), story(6), story(7)], { isSeen: seen })
+  const r = q([story(2), story(3), story(6), story(7), story(9)], { isSeen: seen, inOrder: (e) => fetched.has(e.id) || e.id === 2 || e.id === 9 })
+  assert.deepEqual(ids(r.unseen), [3, 7])
+  assert.deepEqual(ids(r.earlier), [2, 6, 9])
+})
+
+test('PR4d: a wider tab\'s rows wait with the arrivals while the marker is above the screen, then go in at their place', () => {
+  const step = tab()
+  step([story(3), story(5)])
+  const fetched = new Set([4])
+  const held = step([story(1), story(3), story(4), story(5)], { inOrder: (e) => fetched.has(e.id), hold: true })
+  assert.deepEqual(ids(held.unseen), [3, 5])
+  assert.deepEqual(held.snapshot.held, [1, 4])
+  assert.equal(held.unseenCount, 4)
+  const let_go = step([story(1), story(3), story(4), story(5)], { inOrder: (e) => fetched.has(e.id), hold: false })
+  assert.deepEqual(ids(let_go.unseen), [3, 4, 5, 1])
+})
+
+test('PR4d: a wider tab\'s row goes in at its place when the tab\'s order has moved since the snapshot', () => {
+  // For You's Best is the server's ranking, and a rescore moves a Best
+  // tab: between the snapshot and the next answer the top two swap, and
+  // the answer brings 99 at rank 9. It goes between 8 and 9, not above
+  // the first story that moved.
+  const step = tab('best')
+  const top = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((id) => story(id))
+  step(top)
+  const s = (...list: number[]) => list.map((id) => story(id))
+  const p = step(s(2, 1, 3, 4, 5, 6, 7, 8, 99, 9, 10), { inOrder: (e) => e.id === 99 })
+  assert.deepEqual(ids(p.unseen), [1, 2, 3, 4, 5, 6, 7, 8, 99, 9, 10])
+  // A story that dropped from the top to the bottom doesn't pull a row
+  // placed in the middle up with it, and one that rose from the bottom
+  // doesn't push it down to the end.
+  const dropped = tab('best')
+  dropped(top)
+  const d = dropped(s(2, 3, 4, 5, 99, 6, 7, 8, 9, 10, 1), { inOrder: (e) => e.id === 99 })
+  assert.deepEqual(ids(d.unseen), [1, 2, 3, 4, 5, 99, 6, 7, 8, 9, 10])
+  const rose = tab('best')
+  rose(top)
+  const r = rose(s(1, 2, 10, 3, 4, 99, 5, 6, 7, 8, 9), { inOrder: (e) => e.id === 99 })
+  assert.deepEqual(ids(r.unseen), [1, 2, 3, 4, 99, 5, 6, 7, 8, 9, 10])
+  // Arrivals stay the tail: a row the order puts last goes in before
+  // them, and a later row goes in among the snapshot's stories again.
+  const arrivals = tab('best')
+  arrivals(s(1, 2, 3))
+  arrivals(s(50, 1, 2, 3))
+  const a = arrivals(s(50, 2, 1, 3, 98), { inOrder: (e) => e.id === 98 })
+  assert.deepEqual(ids(a.unseen), [1, 2, 3, 98, 50])
+  const b = arrivals(s(50, 2, 1, 97, 3, 98), { inOrder: (e) => e.id === 98 || e.id === 97 })
+  assert.deepEqual(ids(b.unseen), [1, 2, 97, 3, 98, 50])
 })
 
 test('a story a poll drops stays, drawn from the kept copy, until the next snapshot', () => {
@@ -293,19 +359,20 @@ test('keepSet: every id App holds, from stories and bare ids, each once', () => 
   assert.equal(keepSet().size, 0)
 })
 
-test('keepIdsFor (PR4c): the keep set is the tabs, For You, the saves and the Saved-by-id cache', () => {
+test('keepIdsFor (PR4c, PR4d): the keep set is the tabs, For You, the saves, the Saved-by-id cache and the wider tabs\' rows', () => {
   // App's call passes what it holds; flow-seen-prune-keeps-saved checks
   // what App passes (a save and a cached story keep their marks).
   // Each group holds one id no other does: 10 only a tab, 12 only For
   // You, 30 only the saves (its by-id fetch is still out), 3 only the
-  // cache (unsaved since it was fetched).
+  // cache (unsaved since it was fetched), 40 only a wider tab's rows.
   const held = {
     entries: [story(10), story(11)],
     forYou: [story(11), story(12)],
     starred: [20, 30],
     savedById: new Map([[3, story(3)], [20, story(20)]]),
+    extra: [story(40), story(10)],
   }
-  assert.deepEqual([...keepIdsFor(held)].sort((a, b) => a - b), [3, 10, 11, 12, 20, 30])
+  assert.deepEqual([...keepIdsFor(held)].sort((a, b) => a - b), [3, 10, 11, 12, 20, 30, 40])
 })
 
 test('keepIdsFor (PR4c): a story unsaved but still in the Saved-by-id cache keeps its seen mark when the key is pruned', () => {
@@ -318,11 +385,11 @@ test('keepIdsFor (PR4c): a story unsaved but still in the Saved-by-id cache keep
   const marks = [3, 5, 7, 900, 901]
   // seen:news over its cap (4 here) by one: the smallest mark outside the
   // keep set goes, and 3 stays.
-  const kept = pruneIds(marks, keepIdsFor({ entries, forYou: [], starred, savedById }), 4)
+  const kept = pruneIds(marks, keepIdsFor({ entries, forYou: [], starred, savedById, extra: [] }), 4)
   assert.deepEqual(kept.dropped, [5])
   assert.deepEqual(kept.ids, [3, 7, 900, 901])
   // Without the cache, 3 (the smallest) would go first, and the story its
   // Undo brings back would count as unseen again; 7 stays either way.
-  const noCache = pruneIds(marks, keepIdsFor({ entries, forYou: [], starred, savedById: new Map() }), 4)
+  const noCache = pruneIds(marks, keepIdsFor({ entries, forYou: [], starred, savedById: new Map(), extra: [] }), 4)
   assert.deepEqual(noCache.dropped, [3])
 })

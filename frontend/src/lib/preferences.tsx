@@ -107,12 +107,17 @@ export type LastViewedValue = string
  * One column's sort/filter preferences. Matches ``TabPrefs`` in
  * ``lib/sorting.ts`` (Column's ``ColumnPrefs``), which reads it:
  * ``top`` and ``oldest`` are older builds' values, and ``minScore`` is
- * kept in the shape but no longer filters.
+ * kept in the shape but no longer filters. ``window`` is the tab's
+ * window (``lib/window``, PR4d); rows older builds wrote hold a numeric
+ * ``maxAgeHours`` instead, which is read (``windowOf``). New writes
+ * keep ``maxAgeHours`` null next to ``window``, so an older build still
+ * open somewhere keeps ``window`` when it writes the row.
  */
 export type ColumnPrefsValue = {
   sort: 'top' | 'newest' | 'oldest' | 'best'
   minScore: number
-  maxAgeHours: number | null
+  window?: '1d' | '2d' | '7d' | 'all'
+  maxAgeHours?: number | null
 }
 
 /** One column's Fresh/History section collapse state. */

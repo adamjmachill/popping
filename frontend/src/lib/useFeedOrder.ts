@@ -32,6 +32,8 @@ export type PartitionOptions<E extends Item> = {
   isRemoved: (e: E) => boolean
   /** Seen, its mark not written yet (``partitionTab``'s ``isPending``). */
   isPending?: (e: E) => boolean
+  /** Goes in at its place, not at the end (``partitionTab``'s ``inOrder``). */
+  inOrder?: (e: E) => boolean
   ready: boolean
 }
 
@@ -64,6 +66,7 @@ export function useFeedOrder<E extends Item>(): FeedOrder<E> {
         isSeen: opts.isSeen,
         isRemoved: opts.isRemoved,
         isPending: opts.isPending,
+        inOrder: opts.inOrder,
         order: tab.order,
         snapshot: opts.ready ? snaps.current.get(tab.key) : null,
         hold: holds.current.get(tab.key) ?? false,

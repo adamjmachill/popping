@@ -352,6 +352,15 @@ export const api = {
       // high-volume category can't crowd a slower one out of the
       // response entirely.
       perCategoryLimit?: number
+      // The window (PR4b, D5): only stories fetched in the last
+      // ``maxAgeHours`` (1..8760). With it, a category's cut is by
+      // arrival, not by score.
+      maxAgeHours?: number
+      // At most this many stories per feed in the window, its
+      // best-scoring (D28). Needs ``maxAgeHours`` (422 alone).
+      perSourceCap?: number
+      // Only feeds that aren't paused.
+      activeOnly?: boolean
     },
   ) => {
     const params = new URLSearchParams()
@@ -369,6 +378,9 @@ export const api = {
     if (opts?.perCategoryLimit) {
       params.set('per_category_limit', String(opts.perCategoryLimit))
     }
+    if (opts?.maxAgeHours) params.set('max_age_hours', String(opts.maxAgeHours))
+    if (opts?.perSourceCap) params.set('per_source_cap', String(opts.perSourceCap))
+    if (opts?.activeOnly) params.set('active_only', 'true')
     const q = params.toString()
     return jsonFetch<Entry[]>(`/api/entries${q ? `?${q}` : ''}`)
   },
@@ -532,10 +544,12 @@ export const api = {
 
   /** Personal top-N feed. Requires auth when OIDC is enabled; local
    * bypass users always pass through. */
-  forYou: (opts?: { limit?: number; category?: string }) => {
+  forYou: (opts?: { limit?: number; category?: string; maxAgeHours?: number }) => {
     const params = new URLSearchParams()
     if (opts?.limit) params.set('limit', String(opts.limit))
     if (opts?.category) params.set('category', opts.category)
+    // The window (PR4b): only stories fetched in the last ``maxAgeHours``.
+    if (opts?.maxAgeHours) params.set('max_age_hours', String(opts.maxAgeHours))
     const q = params.toString()
     return jsonFetch<Entry[]>(`/api/foryou${q ? `?${q}` : ''}`)
   },
