@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { BASELINE_MS, countUnseen, nextTab, partitionTab, seenKey, seenTest } from '../../src/lib/feedOrder.ts'
+import { BASELINE_MS, countUnseen, keepIdsFor, keepSet, nextTab, partitionTab, seenKey, seenTest } from '../../src/lib/feedOrder.ts'
+import { pruneIds } from '../../src/lib/prefSync.ts'
 import type { Item, Partition } from '../../src/lib/feedOrder.ts'
 
 const T0 = Date.parse('2026-10-20T12:00:00Z')
@@ -283,4 +284,45 @@ test('nextTab (C8): the next shown tab with new stories, wrapping, never the cur
   // A current tab that isn't in the list (hidden) starts from the first.
   assert.equal(nextTab(tabs, 'cat:gone')?.key, 'cat:deals')
   assert.equal(nextTab([], 'cat:news'), null)
+})
+
+test('keepSet: every id App holds, from stories and bare ids, each once', () => {
+  const cache = new Map([[3, story(3)]])
+  const keep = keepSet([story(10), story(11)], [story(11), story(12)], [12, 20], cache.keys())
+  assert.deepEqual([...keep].sort((a, b) => a - b), [3, 10, 11, 12, 20])
+  assert.equal(keepSet().size, 0)
+})
+
+test('keepIdsFor (PR4c): the keep set is the tabs, For You, the saves and the Saved-by-id cache', () => {
+  // App's call passes what it holds; flow-seen-prune-keeps-saved checks
+  // what App passes (a save and a cached story keep their marks).
+  // Each group holds one id no other does: 10 only a tab, 12 only For
+  // You, 30 only the saves (its by-id fetch is still out), 3 only the
+  // cache (unsaved since it was fetched).
+  const held = {
+    entries: [story(10), story(11)],
+    forYou: [story(11), story(12)],
+    starred: [20, 30],
+    savedById: new Map([[3, story(3)], [20, story(20)]]),
+  }
+  assert.deepEqual([...keepIdsFor(held)].sort((a, b) => a - b), [3, 10, 11, 12, 20, 30])
+})
+
+test('keepIdsFor (PR4c): a story unsaved but still in the Saved-by-id cache keeps its seen mark when the key is pruned', () => {
+  // 3 was fetched by id for Saved (no tab holds it), then unsaved: it is
+  // no save now, but the unsave's Undo would draw it again from the cache.
+  // 7 is still saved, so the saves keep it whatever the cache holds.
+  const entries = [story(900), story(901)]
+  const starred = [7]
+  const savedById = new Map([[3, story(3)], [7, story(7)]])
+  const marks = [3, 5, 7, 900, 901]
+  // seen:news over its cap (4 here) by one: the smallest mark outside the
+  // keep set goes, and 3 stays.
+  const kept = pruneIds(marks, keepIdsFor({ entries, forYou: [], starred, savedById }), 4)
+  assert.deepEqual(kept.dropped, [5])
+  assert.deepEqual(kept.ids, [3, 7, 900, 901])
+  // Without the cache, 3 (the smallest) would go first, and the story its
+  // Undo brings back would count as unseen again; 7 stays either way.
+  const noCache = pruneIds(marks, keepIdsFor({ entries, forYou: [], starred, savedById: new Map() }), 4)
+  assert.deepEqual(noCache.dropped, [3])
 })

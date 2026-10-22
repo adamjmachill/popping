@@ -28,7 +28,7 @@ import { api, type Brief, type CurrentUser, type Entry, type Health, type Source
 import { BriefCard } from './components/BriefCard'
 import { Card } from './components/Card'
 import { Column, type ColumnPrefs } from './components/Column'
-import { byNewest, normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
+import { normalizeSort, prefsFor as tabPrefsFor, sortEntries } from './lib/sorting'
 import { Drawer } from './components/Drawer'
 import { FramingWatch } from './components/FramingWatch'
 import { FirstFeedButton } from './components/FirstFeedButton'
@@ -49,7 +49,9 @@ import { isBuiltIn } from './lib/feedRules'
 import { TabsEditor } from './components/TabsEditor'
 import { configureSourceSaves, dropSource, setPageHiding } from './lib/sourceSaves'
 import { useUpdateCheck, type Return } from './lib/useUpdateCheck'
-import { countUnseen, nextTab as findNextTab, seenKey, seenTest, type TabCount } from './lib/feedOrder'
+import { countUnseen, keepIdsFor, nextTab as findNextTab, seenKey, seenTest, type TabCount } from './lib/feedOrder'
+import { MAX_STARRED } from './lib/prefSync'
+import { placeOf, putBack, savedStories, savedToFetch, type Place } from './lib/saved'
 import { useFeedOrder, type FeedTab } from './lib/useFeedOrder'
 import { createSeenBatch } from './lib/seen'
 import { useSeenObserver } from './lib/useSeenObserver'
@@ -206,6 +208,33 @@ function loadFirstRunAt(): number {
 // No stories: Saved's (empty) Earlier, and a tab with no partition.
 const NO_ENTRIES: Entry[] = []
 const NO_SECTIONS = { unseen: NO_ENTRIES, earlier: NO_ENTRIES }
+
+// A hidden story, kept for its Undo (``keepHiddenStories``): the story
+// and its place in ``entries`` and in ``forYou`` (``lib/saved``'s
+// ``Place``: its neighbours and index; null: not there). The latest
+// ``KEPT_HIDDEN`` hidden stories are kept (more for a bulk hide).
+type KeptStory = { entry: Entry; inEntries: Place | null; inForYou: Place | null }
+const KEPT_HIDDEN = 100
+type KeptSide = 'inEntries' | 'inForYou'
+// What ``putBack`` takes for one list: the stories kept there with their
+// places, and the places of the hidden stories still kept, which lend
+// their neighbours when the list no longer holds a story's own.
+function putBackItems(stories: Iterable<KeptStory>, side: KeptSide) {
+  const out: { item: Entry; place: Place }[] = []
+  for (const k of stories) {
+    const place = k[side]
+    if (place) out.push({ item: k.entry, place })
+  }
+  return out
+}
+function keptPlaces(kept: ReadonlyMap<number, KeptStory>, side: KeptSide): (id: number) => Place | undefined {
+  const places = new Map<number, Place>()
+  for (const [id, k] of kept) {
+    const place = k[side]
+    if (place) places.set(id, place)
+  }
+  return (id) => places.get(id)
+}
 
 // One tab's column: ``key`` names it, ``label`` is what it shows,
 // ``name`` is the id its stored rows are kept under (see
@@ -999,16 +1028,95 @@ export function App() {
         .map(([id]) => Number(id)),
     [votedEntries, hiddenSet],
   )
-  // "Saved" column entries: the stories the user has starred, newest
-  // first by ``byNewest`` (published, else fetched; dated before
-  // undated; then the higher id), so an undated page saved today sits
-  // by its fetch time. Hidden ones are left out (a star + a hide is
-  // "I saved this but don't want to see it now" — hide wins). This is
-  // Saved's only order: ``sortEntries`` hands Saved back as it came.
-  const visibleStarred = useMemo(
-    () => entries.filter((e) => starredSet.has(e.id) && !hiddenSet.has(e.id)).sort(byNewest),
-    [entries, starredSet, hiddenSet],
-  )
+  // Saved (PR4c, D5): every save, newest save first (``lib/saved``),
+  // whatever the tabs loaded. A save the tabs don't hold (an old story,
+  // or one saved on another device, which arrives with the preferences'
+  // resync) is fetched by id into ``savedById``, and only those: a story
+  // the tabs or the cache hold counts as held. Ids the server no longer
+  // returns (a deleted feed's stories go with it) are noted in
+  // ``savedGoneRef``, so the next poll doesn't ask for them again; an
+  // unsave drops its id from there. An unsave keeps the story in the
+  // cache: Saved draws only saved ids, and the unsave's Undo ("Removed
+  // from Saved · Undo") then draws it again at once, with no request
+  // and offline too. The cache is bounded lazily: once it holds more
+  // than ``MAX_STARRED`` stories (the saves' own cap), the unsaved ones
+  // leave it. Nothing is fetched until the preferences have answered
+  // and the first refresh is done, so a save the tabs bring isn't
+  // fetched twice.
+  const [savedById, setSavedById] = useState<ReadonlyMap<number, Entry>>(() => new Map())
+  const savedGoneRef = useRef(new Set<number>())
+  const savedFetchingRef = useRef(new Set<number>())
+  const savedReady = !prefs.loading && firstRefreshDone
+  useEffect(() => {
+    if (!savedReady) return
+    const starred = new Set(starredEntries)
+    for (const id of savedGoneRef.current) if (!starred.has(id)) savedGoneRef.current.delete(id)
+    if (savedById.size > MAX_STARRED && [...savedById.keys()].some((id) => !starred.has(id))) {
+      // Over the cap: the unsaved stories leave the cache (this effect
+      // runs again).
+      setSavedById((prev) => new Map([...prev].filter(([id]) => starred.has(id))))
+      return
+    }
+    const held = new Set<number>()
+    for (const e of entries) held.add(e.id)
+    for (const e of forYou) held.add(e.id)
+    const want = savedToFetch(
+      starredEntries,
+      (id) =>
+        held.has(id) ||
+        savedById.has(id) ||
+        hiddenSet.has(id) ||
+        savedGoneRef.current.has(id) ||
+        savedFetchingRef.current.has(id),
+    )
+    if (want.length === 0) return
+    for (const id of want) savedFetchingRef.current.add(id)
+    api
+      .entriesByIds(want)
+      .then((rows) => {
+        const got = new Set(rows.map((r) => r.id))
+        for (const id of want) if (!got.has(id)) savedGoneRef.current.add(id)
+        // A story unsaved while the request was out is kept too, as an
+        // unsave keeps it (its Undo draws it); Saved doesn't draw it.
+        if (rows.length === 0) return
+        setSavedById((prev) => {
+          const next = new Map(prev)
+          for (const r of rows) next.set(r.id, r)
+          return next
+        })
+      })
+      .catch(() => {
+        // Saved shows what it holds; the next poll asks again.
+      })
+      .finally(() => {
+        for (const id of want) savedFetchingRef.current.delete(id)
+      })
+  }, [savedReady, starredEntries, entries, forYou, savedById, hiddenSet])
+  // Saved's stories. Each save is drawn from the tabs' copy (the newest),
+  // else the by-id cache, else the copy drawn last time: a save a poll
+  // just dropped stays while its fetch is out. Hidden ones are left out
+  // (a star + a hide is "I saved this but don't want to see it now":
+  // hide wins), and so are stories of a deleted feed. This is Saved's
+  // only order: ``sortEntries`` hands Saved back as it came. While the
+  // same stories are drawn, the same array comes back, so a poll that
+  // changed nothing in Saved doesn't redraw it (Column's memo compares
+  // by reference).
+  const savedLastRef = useRef<Entry[]>(NO_ENTRIES)
+  const visibleStarred = useMemo(() => {
+    const held = new Map<number, Entry>()
+    for (const e of forYou) held.set(e.id, e)
+    for (const e of entries) held.set(e.id, e)
+    const prev = savedLastRef.current
+    const last = new Map(prev.map((e) => [e.id, e]))
+    const gone = savedGoneRef.current
+    const out = savedStories(
+      starredEntries,
+      (id) => held.get(id) ?? savedById.get(id) ?? (gone.has(id) ? undefined : last.get(id)),
+      (e) => hiddenSet.has(e.id) || (sourcesLoaded && !sourcesById.has(e.source_id)),
+    )
+    return out.length === prev.length && out.every((e, i) => e === prev[i]) ? prev : out
+  }, [entries, forYou, starredEntries, savedById, hiddenSet, sourcesLoaded, sourcesById])
+  savedLastRef.current = visibleStarred
 
   // Apollo-style 3-surface model:
   //   1. For You     — top row on the dashboard, the personal front page.
@@ -1179,9 +1287,25 @@ export function App() {
   const isSeen = useMemo(() => seenTest(seenIds, firstRunAt), [seenIds, firstRunAt])
 
   // The stories held now, for a manual refresh's "N new" (the ids held
-  // before its request).
-  const storiesRef = useRef({ entries, forYou })
-  storiesRef.current = { entries, forYou }
+  // before its request), and for a hide to keep the story its Undo puts
+  // back (``keepHiddenStories``).
+  const storiesRef = useRef({ entries, forYou, savedById })
+  storiesRef.current = { entries, forYou, savedById }
+  // A hide's Undo puts the story back (PR4c). From PR4b the server leaves
+  // hidden stories out of every list, so a poll between the hide and the
+  // Undo drops the story from ``entries`` and ``forYou``; only the tab's
+  // snapshot would still draw it, and only until the next one. A hide
+  // keeps the story and its places (``hiddenStoriesRef``, the latest
+  // ``KEPT_HIDDEN``); the Undo puts it back there (``restoredRef``), and
+  // for two minutes a poll that doesn't return it yet (the server
+  // answered before the Undo's change reached it) lays it back over its
+  // result, as ``sourceChangesRef`` does for feeds.
+  const hiddenStoriesRef = useRef(new Map<number, KeptStory>())
+  const restoredRef = useRef(new Map<number, KeptStory & { at: number }>())
+  // The last applied refresh got For You (``forYouLoaded``, for the
+  // handlers): while it didn't, For You is [] until it answers, and an
+  // Undo leaves the story to be laid over that answer.
+  const forYouOkRef = useRef(false)
 
   // ``silent`` skips the toasts (errors still set the banner): Settings
   // refreshes after adding a feed, and its own "Added …" toast should
@@ -1235,16 +1359,37 @@ export function App() {
         for (const [id, at] of m) if (now - at > SOURCE_CHANGE_TTL_MS) m.delete(id)
       }
       const isDeleted = (id: number) => changes.deleted.has(id)
-      const e = rawEntries.filter((x) => !isDeleted(x.source_id))
-      const fy = rawForYou.filter((x) => !isDeleted(x.source_id))
+      const liveSources = rawSources.filter((row) => !isDeleted(row.id))
+      let e = rawEntries.filter((x) => !isDeleted(x.source_id))
+      let fy = rawForYou.filter((x) => !isDeleted(x.source_id))
+      // Stories a hide's Undo put back, until the server returns them
+      // (a failed For You is [], so only lists that answered count). Not
+      // a story whose feed is gone, here or on another device: it would
+      // fall into an "Other" tab. Not over a failed For You either: that
+      // isn't an answer, and the story waits for the next one.
+      // Each goes back at its place, as the Undo put it (``putBack``).
+      const hiddenNow = new Set(latestPrefs().hiddenEntries)
+      const feedIds = new Set(liveSources.map((row) => row.id))
+      const gotIds = new Set([...e, ...fy].map((x) => x.id))
+      const lay: KeptStory[] = []
+      for (const [id, r] of restoredRef.current) {
+        if (gotIds.has(id) || now - r.at > SOURCE_CHANGE_TTL_MS || hiddenNow.has(id) || !feedIds.has(r.entry.source_id)) {
+          restoredRef.current.delete(id)
+          continue
+        }
+        lay.push(r)
+      }
+      if (lay.length > 0) {
+        const kept = hiddenStoriesRef.current
+        e = putBack(e, putBackItems(lay, 'inEntries'), keptPlaces(kept, 'inEntries'))
+        if (forYouOk) fy = putBack(fy, putBackItems(lay, 'inForYou'), keptPlaces(kept, 'inForYou'))
+      }
       setEntries((prev) => reconcileById(prev, e))
       setSources((prev) => {
         const local = new Map(prev.map((row) => [row.id, row]))
         const since = (m: Map<number, number>, id: number) => (m.get(id) ?? 0) >= startedAt
         // Saved here after this poll started: the local row is newer.
-        let next = rawSources
-          .filter((row) => !isDeleted(row.id))
-          .map((row) => (since(changes.written, row.id) && local.has(row.id) ? local.get(row.id)! : row))
+        let next = liveSources.map((row) => (since(changes.written, row.id) && local.has(row.id) ? local.get(row.id)! : row))
         // Added here after this poll started and missing from it.
         const got = new Set(next.map((row) => row.id))
         for (const row of prev) {
@@ -1257,6 +1402,7 @@ export function App() {
       setFirstRefreshDone(true)
       setTabsLoadedFor(filterScope(activeSources))
       setForYouLoaded(forYouOk)
+      forYouOkRef.current = forYouOk
       setError(null)
       // C1: the refresh a long return started lands: start the tabs
       // over again, so what came in while away is sorted in. Not when the
@@ -1287,7 +1433,7 @@ export function App() {
     } finally {
       setRefreshing(false)
     }
-  }, [activeSources, resyncPrefs, resetSnapshot, disarmReturnReset])
+  }, [activeSources, resyncPrefs, resetSnapshot, disarmReturnReset, latestPrefs])
   // The latest ``refresh`` for callers that must stay stable: Column's
   // memo ignores callbacks, so it would keep calling an old one with
   // an old filter.
@@ -1757,11 +1903,12 @@ export function App() {
   }
   // Every story App fetched: a key's oldest marks outside these go first
   // when it reaches its cap (``pruneIds``), so pruning never brings back
-  // a story still on screen as unseen. (PR4c adds the Saved-by-id cache,
-  // PR4d every wider tab's rows.)
+  // a story still on screen as unseen: the tabs, For You, the saves and
+  // the Saved-by-id cache (``keepIdsFor``). (PR4d adds every wider tab's
+  // rows.)
   const keepIds = useMemo(
-    () => new Set([...entries.map((e) => e.id), ...forYou.map((e) => e.id), ...starredEntries]),
-    [entries, forYou, starredEntries],
+    () => keepIdsFor({ entries, forYou, starred: starredEntries, savedById }),
+    [entries, forYou, starredEntries, savedById],
   )
   const readRefs = useRef({ categoriesBySourceId, keepIds })
   readRefs.current = { categoriesBySourceId, keepIds }
@@ -1998,24 +2145,104 @@ export function App() {
     [removeIds, resetSnapshot],
   )
 
-  // Reverse of ``hideEntry`` / ``toggleHideEntry`` (hide branch):
-  // remove the id from ``hiddenEntries`` so the entry surfaces in the
-  // dashboard again, in its place (its tab's snapshot kept it). Used by
-  // the hide Undo action on both the per-card eye button and the
-  // context-menu "Hide this entry" item.
-  const restoreHiddenEntry = useCallback((entryId: number) => {
-    removeIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
-  }, [removeIds])
+  // A hide keeps each story and its places in ``entries`` and ``forYou``
+  // for its Undo (see ``hiddenStoriesRef``): its neighbours and index
+  // (``placeOf``), taken with the stories already kept back in their
+  // places, so one hidden earlier that a poll has dropped still counts as
+  // a neighbour and the two can come back in either order. A story only
+  // Saved holds needs nothing kept: the by-id cache still has it. The
+  // latest ``KEPT_HIDDEN`` are kept, and never fewer than this hide's
+  // own, so a bulk hide ("Hide all downvoted") keeps all of its stories
+  // and pushes out none of the ``KEPT_HIDDEN`` before it. Called before
+  // the hide's ``addIds``, so ``latestPrefs`` holds the earlier hides.
+  const keepHiddenStories = useCallback((ids: readonly number[]) => {
+    const { entries: es, forYou: fy } = storiesRef.current
+    const hiddenBefore = new Set(latestPrefs().hiddenEntries)
+    const isHidden = (id: number) => hiddenBefore.has(id)
+    const kept = hiddenStoriesRef.current
+    for (const id of ids) {
+      kept.delete(id)
+      restoredRef.current.delete(id)
+    }
+    const withKept = (list: Entry[], side: KeptSide) => putBack(list, putBackItems(kept.values(), side), keptPlaces(kept, side))
+    const allEntries = withKept(es, 'inEntries')
+    const allForYou = withKept(fy, 'inForYou')
+    const entriesAt = new Map(allEntries.map((e, i) => [e.id, i]))
+    const forYouAt = new Map(allForYou.map((e, i) => [e.id, i]))
+    const copies = new Map([...fy, ...es].map((e) => [e.id, e]))
+    let added = 0
+    for (const id of ids) {
+      const entry = copies.get(id)
+      if (!entry) continue
+      const ei = entriesAt.get(id)
+      const fi = forYouAt.get(id)
+      kept.set(id, {
+        entry,
+        inEntries: ei === undefined ? null : placeOf(allEntries, ei, isHidden),
+        inForYou: fi === undefined ? null : placeOf(allForYou, fi, isHidden),
+      })
+      added++
+    }
+    for (const id of kept.keys()) {
+      if (kept.size <= KEPT_HIDDEN + added) break
+      kept.delete(id)
+    }
+  }, [latestPrefs])
+  // An unhide puts the kept stories back in their places, unless a poll
+  // already brought them back (``putBack``). A story whose feed is gone
+  // since the hide (deleted here or on another device) stays out: it
+  // would fall into an "Other" tab. While For You's last request failed,
+  // For You is [] until it answers: the story isn't put in there alone,
+  // but laid over that answer (``restoredRef``).
+  const putBackHiddenStories = useCallback((ids: readonly number[]) => {
+    const back: KeptStory[] = []
+    const at = Date.now()
+    const feedIds = new Set(sourcesRef.current.map((s) => s.id))
+    for (const id of ids) {
+      const kept = hiddenStoriesRef.current.get(id)
+      if (!kept) continue
+      hiddenStoriesRef.current.delete(id)
+      if (!feedIds.has(kept.entry.source_id)) continue
+      restoredRef.current.set(id, { ...kept, at })
+      back.push(kept)
+    }
+    if (back.length === 0) return
+    const kept = hiddenStoriesRef.current
+    const inEntries = putBackItems(back, 'inEntries')
+    const entriesKept = keptPlaces(kept, 'inEntries')
+    if (inEntries.length) setEntries((prev) => putBack(prev, inEntries, entriesKept))
+    const inForYou = putBackItems(back, 'inForYou')
+    const forYouKept = keptPlaces(kept, 'inForYou')
+    if (inForYou.length && forYouOkRef.current) setForYou((prev) => putBack(prev, inForYou, forYouKept))
+  }, [])
 
-  // Hide an entry from every column + the For You row. The
-  // entry stays in the DB; it just gets filtered out of the
+  // Reverse of ``hideEntries``: remove the ids from ``hiddenEntries`` so
+  // the stories surface in the dashboard again, in their places (a tab's
+  // snapshot kept its place; ``putBackHiddenStories`` the stories
+  // themselves, which a poll may have dropped meanwhile). Used by every
+  // unhide: the Undo of the per-card eye button, of the context-menu
+  // "Hide this entry" item and of "Hide all downvoted", the eye's
+  // unhide, and Settings' Hidden list (Restore and Restore all).
+  const restoreHiddenEntries = useCallback((ids: readonly number[]) => {
+    removeIds(PREFERENCE_KEYS.hiddenEntries, [...ids])
+    putBackHiddenStories(ids)
+  }, [removeIds, putBackHiddenStories])
+  const restoreHiddenEntry = useCallback(
+    (entryId: number) => restoreHiddenEntries([entryId]),
+    [restoreHiddenEntries],
+  )
+
+  // Hide entries from every column + the For You row. The
+  // entries stay in the DB; they just get filtered out of the
   // dashboard until the user clears the hidden set (a future
   // "show hidden" affordance in Settings). The caller records a
   // ``never`` engagement event so the ranker can also learn the
   // user's dismissal signal.
-  const hideEntry = useCallback((entryId: number) => {
-    addIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
-  }, [addIds])
+  const hideEntries = useCallback((ids: readonly number[]) => {
+    keepHiddenStories(ids)
+    addIds(PREFERENCE_KEYS.hiddenEntries, [...ids])
+  }, [addIds, keepHiddenStories])
+  const hideEntry = useCallback((entryId: number) => hideEntries([entryId]), [hideEntries])
 
   // Toggle the eye-button hidden state. A hide doesn't mark the story
   // seen (PR3b: only opening it or Mark all uses a story up); the story
@@ -2026,17 +2253,17 @@ export function App() {
       // render-time hidden set can be out of date.
       const isHidden = latestPrefs().hiddenEntries.includes(entryId)
       if (isHidden) {
-        removeIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
+        restoreHiddenEntry(entryId)
         toast('Entry unhidden.', 'info')  // no Undo: the act of un-hiding IS the undo
       } else {
-        addIds(PREFERENCE_KEYS.hiddenEntries, [entryId])
+        hideEntry(entryId)
         toast('Hidden.', {
           kind: 'info',
           action: { label: 'Undo', onClick: () => restoreHiddenEntry(entryId) },
         })
       }
     },
-    [latestPrefs, addIds, removeIds, restoreHiddenEntry],
+    [latestPrefs, hideEntry, restoreHiddenEntry],
   )
 
   // Star / unstar an entry. Stars are a long-term save-for-later
@@ -3366,10 +3593,11 @@ export function App() {
         onRestoreHidden={(entryId) => restoreHiddenEntry(entryId)}
         onRestoreAllHidden={() => {
           // The ids hidden now; one hidden on another device since
-          // this page last read them stays hidden.
+          // this page last read them stays hidden. Restored as any
+          // hide's Undo is, so the ones a poll dropped come back at once.
           const ids = latestPrefs().hiddenEntries
           if (ids.length === 0) return
-          removeIds(PREFERENCE_KEYS.hiddenEntries, ids)
+          restoreHiddenEntries(ids)
           toast('All hidden entries restored.', 'info')
         }}
         starredEntries={starredEntries}
@@ -3402,14 +3630,15 @@ export function App() {
           const before = latestPrefs().hiddenEntries
           // Only the ones this hid; Undo leaves the rest as they are now.
           const added = ids.filter((id) => !before.includes(id))
-          addIds(PREFERENCE_KEYS.hiddenEntries, added)
+          // Kept for the Undo, which puts them back as a single hide's does.
+          hideEntries(added)
           toast(
             `Hid ${ids.length} downvoted ${ids.length === 1 ? 'entry' : 'entries'}.`,
             {
               kind: 'info',
               action: {
                 label: 'Undo',
-                onClick: () => removeIds(PREFERENCE_KEYS.hiddenEntries, added),
+                onClick: () => restoreHiddenEntries(added),
               },
             },
           )

@@ -81,6 +81,22 @@ function patchBodyError(body) {
   }
   return null
 }
+// One GET /api/entries/by-ids row (schemas.EntryOut): the card fields of
+// routes/entries.py's _CARD_COLUMNS (the meta keys a card renders are
+// top-level fields there, as in the fixtures) and the feed's name. Never
+// the meta blob, so code that read it would come up empty here as it
+// would against the server.
+const BY_ID_FIELDS = [
+  'id', 'source_id', 'title', 'url', 'published_at', 'fetched_at', 'composite_score', 'personal_score', 'raw_score',
+  'cached_summary', 'image_url', 'image_path', 'story_cluster_id', 'reddit_thread_url', 'reddit_comment_count',
+  'audio_url', 'duration_seconds', 'transcript_url',
+]
+function byIdRow(e, sourceName) {
+  const row = {}
+  for (const k of BY_ID_FIELDS) row[k] = e[k] ?? null
+  row.source_name = sourceName
+  return row
+}
 // mockApi's preference store per context, for flows:
 //   prefMock(context).seed({ key: value })  rows as if the server had
 //       them (before the page loads, or before a reload)
@@ -153,6 +169,12 @@ function mockApi(context, opts = {}) {
   const sourceById = (id) => db.sources.find((s) => s.id === id)
   const sourceName = (id) => (sourceById(id) || {}).name || 'unknown'
   const entryById = (id) => db.entries.find((e) => e.id === id)
+  // The store's hidden_entries, which /api/entries (without q) and
+  // /api/foryou leave out, as routes/entries.py and routes/foryou.py do.
+  const hiddenIds = () => {
+    const v = db.preferences.has('hidden_entries') ? db.preferences.get('hidden_entries').value : null
+    return new Set(Array.isArray(v) ? v.filter(isEntryId) : [])
+  }
   let interactionId = 1000
   return context.route((u) => /^\/(api|auth|assets)\//.test(new URL(u).pathname), async (route) => {
     const req = route.request()
@@ -208,12 +230,19 @@ function mockApi(context, opts = {}) {
       return json(route, db.sources[i])
     }
     if (p === '/api/entries/by-ids') {
-      const ids = (u.searchParams.get('ids') || '').split(',').map(Number)
-      return json(route, ids.map(entryById).filter(Boolean).map((e) => ({ ...e, source_name: sourceName(e.source_id) })))
+      // As routes/entries.py's entries_by_ids: at most 200 ids, in the
+      // order asked, ids with no row (or whose feed is gone: the JOIN)
+      // dropped, and each row the card projection (``_CARD_COLUMNS``,
+      // no ``meta``) plus the feed's name.
+      const ids = (u.searchParams.get('ids') || '').split(',').map(Number).filter(isEntryId).slice(0, 200)
+      return json(route, ids.map(entryById).filter((e) => e && sourceById(e.source_id)).map((e) => byIdRow(e, sourceName(e.source_id))))
     }
     if (p === '/api/entries' && m === 'GET') {
       let rows = db.entries.filter((e) => sourceById(e.source_id))
       const q = (u.searchParams.get('q') || '').toLowerCase()
+      // As the server since PR4b: without q, the stories the store has
+      // hidden are left out.
+      if (!q) rows = rows.filter((e) => !hiddenIds().has(e.id))
       const cat = u.searchParams.get('category')
       const srcs = u.searchParams.getAll('source')
       if (q) rows = rows.filter((e) => e.title.toLowerCase().includes(q) || String(e.meta?.summary || '').toLowerCase().includes(q))
@@ -241,7 +270,7 @@ function mockApi(context, opts = {}) {
         })
       }
     }
-    if (p === '/api/foryou') return json(route, forYouIds.map(entryById).filter((e) => e && sourceById(e.source_id)))
+    if (p === '/api/foryou') return json(route, forYouIds.map(entryById).filter((e) => e && sourceById(e.source_id) && !hiddenIds().has(e.id)))
     if (p === '/api/framing-clusters') return json(route, [])
     if (p === '/api/feed-recommendations' && m === 'GET') {
       return json(route, [

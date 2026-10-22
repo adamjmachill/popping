@@ -178,6 +178,35 @@ export function seenKey(category: string): `seen:${string}` {
   return `seen:${category}`
 }
 
+/** The keep set a ``seen:`` key is pruned against (``pruneIds`` drops the
+ *  marks outside it first): the id of every story App holds, so pruning
+ *  never brings a story on screen back as unseen. Each group is stories
+ *  or bare ids (``keepIdsFor`` names App's groups). */
+export function keepSet(...groups: Iterable<Item | number>[]): Set<number> {
+  const out = new Set<number>()
+  for (const group of groups) for (const x of group) out.add(typeof x === 'number' ? x : x.id)
+  return out
+}
+
+/** What App holds, for its keep set (``keepIdsFor``). */
+export type Held = {
+  /** The tabs' stories. */
+  entries: readonly Item[]
+  forYou: readonly Item[]
+  /** The saves (``starred_entries``). */
+  starred: readonly number[]
+  /** Saved's by-id cache (PR4c). Past the saves, it also holds stories
+   *  unsaved since they were fetched, which the unsave's Undo draws
+   *  again from it; no other group holds those. */
+  savedById: ReadonlyMap<number, unknown>
+}
+
+/** App's keep set: every story it holds (``Held``). PR4d adds every
+ *  wider tab's rows. */
+export function keepIdsFor(held: Held): Set<number> {
+  return keepSet(held.entries, held.forYou, held.starred, held.savedById.keys())
+}
+
 export type TabCount = { key: string; label: string; count: number }
 
 /** C8: the first tab after ``current`` in strip order (wrapping round)
