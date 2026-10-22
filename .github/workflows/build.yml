@@ -23,8 +23,11 @@ permissions:
   contents: read
   packages: write   # only needed on push-to-main; safe to declare unconditionally
 
+# The event is part of the group: a PR's run that GitHub creates only
+# after the PR was merged runs with the base branch's ref, and with the
+# ref alone it cancelled the push-to-main run that publishes the images.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
