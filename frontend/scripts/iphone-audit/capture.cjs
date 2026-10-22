@@ -109,6 +109,15 @@ function byIdRow(e, sourceName) {
 //   .faultsLeft()                            queued faults not yet used
 const PREF_MOCKS = new WeakMap()
 const prefMock = (context) => PREF_MOCKS.get(context)
+// mockApi's feeds and stories per context, for flows that need rows the
+// server's own cuts apply to (the window, the per-feed cap, the
+// per-category limit), which a story added on the page's side
+// (withStories) skips:
+//   dbMock(context).addSources(rows)   feeds as GET /api/sources lists them
+//   .addEntries(rows)                  stories as the server holds them
+// Call it in a flow's `before`, before the page loads.
+const DB_MOCKS = new WeakMap()
+const dbMock = (context) => DB_MOCKS.get(context)
 // Mock the backend for one browser context.
 //   mockApi(context, { onUnmocked })
 // The route is anchored on the pathname, so a page path such as
@@ -151,6 +160,10 @@ function mockApi(context, opts = {}) {
   // Faults a flow queues: the next `times` requests of `method` (to `key`,
   // or any key) are answered with `status` and change nothing.
   const faults = []
+  DB_MOCKS.set(context, {
+    addSources: (rows) => db.sources.push(...structuredClone(rows)),
+    addEntries: (rows) => db.entries.push(...structuredClone(rows)),
+  })
   PREF_MOCKS.set(context, {
     seed: (rows) => {
       for (const [key, value] of Object.entries(rows)) prefRow(key, value)
@@ -194,6 +207,16 @@ function mockApi(context, opts = {}) {
     }
     return rows.filter((e) => keep.has(e.id))
   }
+  // The server's orders (routes/entries.py): ``_arrival_order`` (newest
+  // arrival first, then published_at, then id) once a window is set, so
+  // a cut keeps the newest arrivals; ``_score_order`` (composite_score,
+  // then published_at) without one; a search by published_at. A missing
+  // time sorts last (``nullslast``).
+  const ms = (iso) => (iso ? Date.parse(iso) : -Infinity)
+  const desc = (x, y) => (x === y ? 0 : y > x ? 1 : -1)
+  const byArrival = (a, b) => desc(ms(a.fetched_at), ms(b.fetched_at)) || desc(ms(a.published_at), ms(b.published_at)) || b.id - a.id
+  const byScore = (a, b) => b.composite_score - a.composite_score || desc(ms(a.published_at), ms(b.published_at))
+  const byPublished = (a, b) => desc(ms(a.published_at), ms(b.published_at))
   let interactionId = 1000
   return context.route((u) => /^\/(api|auth|assets)\//.test(new URL(u).pathname), async (route) => {
     const req = route.request()
@@ -278,9 +301,25 @@ function mockApi(context, opts = {}) {
       if (u.searchParams.get('active_only') === 'true') rows = rows.filter((e) => sourceById(e.source_id).active)
       if (hours) rows = rows.filter((e) => inWindow(e, hours))
       if (cap) rows = capPerSource(rows, cap)
-      const limit = Number(u.searchParams.get('limit') || 0)
-      if (limit) rows = rows.slice(0, limit)
-      return json(route, rows)
+      // The dashboard load (``per_category_limit`` with no category,
+      // source or q): each category's first ``per_category_limit``, by
+      // arrival with a window (the per-feed cap above is the part that
+      // ranks by score, D28), by score without one; ``limit`` is unused.
+      // Otherwise the flat cut: ``limit`` (50 when unset, at most 50 for
+      // a search) of the rows in the server's order.
+      const perCategory = Number(u.searchParams.get('per_category_limit') || 0)
+      if (perCategory && !cat && !srcs.length && !q) {
+        const taken = new Map()
+        rows = [...rows].sort(hours ? byArrival : byScore).filter((e) => {
+          const c = sourceById(e.source_id).category
+          taken.set(c, (taken.get(c) || 0) + 1)
+          return taken.get(c) <= perCategory
+        })
+        return json(route, rows)
+      }
+      rows = [...rows].sort(hours ? byArrival : q ? byPublished : byScore)
+      const limit = Number(u.searchParams.get('limit') || 0) || 50
+      return json(route, rows.slice(0, q ? Math.min(limit, 50) : limit))
     }
     mm = p.match(/^\/api\/entries\/(\d+)\/(summary|podcast_summary|reddit_comment_summary|related)$/)
     if (mm) {
@@ -799,7 +838,7 @@ async function main() {
   await browser.close()
 }
 
-module.exports = { mockApi, prefMock, scanDom, IOS_UA, DEVICES, BASE, SET_KEY_RE }
+module.exports = { mockApi, prefMock, dbMock, scanDom, IOS_UA, DEVICES, BASE, SET_KEY_RE }
 
 if (require.main === module) {
   main().catch((e) => {

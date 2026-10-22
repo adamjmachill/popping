@@ -8,7 +8,8 @@ list from `category_layout`. PR5a (the Reddit card) is being verified in
 parallel and rewrites Card.tsx, so the Card change here is one branch of
 the time label and nothing else, and the App.tsx changes stay local to
 the window, `extraByTab`, the calls, the counts, the categories and the
-keep set.
+keep set. Since rebased onto main a31b738, which has PR5a (#48): see
+"Rebased onto main" at the end.
 
 A first pass of this unit stopped partway (its work was committed as a
 WIP commit and folded into this one). This pass reviewed it against the
@@ -417,8 +418,6 @@ flows run, then restored from a copy and rebuilt):
 
 ## Open items for later units
 
-- **PR5a** rewrites Card.tsx: keep the `isHistorical(sourceName)` branch
-  ("On this day" in place of the time).
 - **PR5b** (muted feeds): leave muted feeds out of `categories` (the
   active-sources union) and of `extraByTab`'s drawn rows (`widened`
   filters hidden ids; `isRemoved` covers the snapshot). `extraByTab` is
@@ -436,3 +435,127 @@ flows run, then restored from a copy and rebuilt):
   activeOnly})`).
 - **PR8b** removes the filter column and with it the `FILTER_KEY` branch
   of `fetchWider`.
+
+## Rebased onto main
+
+The two commits were rebased onto main a31b738 (PR5a, #48: the Reddit
+card, the ⋯ action sheet, Hide with its held `never`, preview text),
+with the conflicts resolved inside them; what went beyond resolving is
+a third commit, "PR4d: rebased onto PR5a".
+
+### Conflicts and how they were resolved
+
+- `frontend/src/components/Card.tsx` (first commit): PR5a's card is
+  kept whole. PR4d's one change is made again in PR5a's header line: a
+  historical feed (`isHistorical(sourceName)`, `HISTORICAL_SOURCES` in
+  `lib/feedRules.ts`) shows "On this day" (a `<span>`) where the `<time>`
+  with "5h" would be, and the "·" before it shows with either.
+- `docs/DEVICE_CHECKS.md` (first commit): main's fourteen PR5a lines
+  under Pending (still `#<pr>` on main) read `#48`; PR4d's lines follow
+  as `#<pr>`.
+- `docs/ux-notes/PROGRESS.md` (first commit): PR4d in review, PR5a
+  merged (#48). PR3c (#46) and PR4c (#47), merged but still "in review"
+  on main, read merged too.
+- `frontend/scripts/iphone-audit/fixtures.cjs` (first commit): PR5a's
+  `preview: null` on 601 to 603 kept, PR4d's 604 (3 days) and 605 (10
+  days) added with `preview: null` as well, so the Nhl tab stays as
+  compact at 7 days and All.
+- `frontend/scripts/iphone-audit/flows.cjs` (both commits): both sides'
+  helpers (PR5a's sheet helpers, `hideViaSheetHeld`, `swipeCard`;
+  PR4d's `oldDevice`) and both sides' flows kept. `flow-sort-best`:
+  PR4d's "Saved has no ⋯" with PR5a's bookmark label (`save`, not "save
+  for later").
+- `frontend/scripts/iphone-audit/README.md` (both commits): both sides'
+  rows; PR5a's wording of `flow-saved-by-id`, `flow-hide-undo-after-poll`,
+  `flow-saved-drops-hidden-and-deleted` and `hideAndPoll` (hidden via ⋯ →
+  Hide), PR4d's new rows and `oldDevice`.
+- Merged without conflict and read through: `App.tsx` (PR5a's
+  `hideStory`, `starStory`, `actionSheetOpen` in `modalOpen`, `onKey`'s
+  early return and `a` / `z`; PR4d's window, `extraByTab`,
+  `widerStatus`, the calls, counts, categories and keep set), `Column.tsx`
+  (PR5a's props without `onHideToggle` / `hiddenSet`; PR4d's Show
+  stories from, the `!isSaved` gate on ⋯, `windowAnswered` in the props
+  and the memo, the empty-tab line), `api.ts`, `capture.cjs`, `smoke.cjs`.
+
+### The owner's bug and the mock
+
+The bug this unit exists for: the dashboard load asked
+`entries({perCategoryLimit: 100})`, cut by all-time score, so a quiet
+feed (BNN Bloomberg) in News never reached the tab while older,
+higher-scoring News stories took all 100 places. `refresh` now asks
+`{perCategoryLimit: 100, maxAgeHours: 48, perSourceCap: 25, activeOnly:
+true}`, and `list_entries` (`backend/app/routes/entries.py`) cuts each
+feed to its 25 best in the 48 h (`_rank_in_source`, in
+`_best_in_source_order`: score, `fetched_at`, id) and then each category
+to its newest 100 (`_arrival_order` when windowed).
+
+The mock (`capture.cjs`) honoured the window, the per-feed cap (in that
+order) and `active_only`, but ignored `per_category_limit` and answered
+in fixture order, so no flow could show the crowding or its fix. It now
+cuts as `list_entries` does: the dashboard load (`per_category_limit`
+with no category, source or q) keeps each category's first
+`per_category_limit`, by arrival (`fetched_at`, `published_at`, id,
+newest first) with a window, by score (`composite_score`,
+`published_at`) without one, and ignores `limit`; any other request is
+the flat cut, `limit` rows (50 when unset, at most 50 for a search) by
+arrival with a window, `published_at` for a search, score otherwise.
+Rows a flow adds on the page's side (`withStories`) skip these cuts, so
+`dbMock(context)` (`addSources`, `addEntries`) puts rows in the mock's
+store, and `fixtures.cjs` exports `mkEntry`.
+
+`flow-busy-feed-no-crowding` (new; the clock held): the store gets 30
+hn_top (News) stories in the last 2 days scoring 99 to 90.3 (7001 to
+7030), 90 older ones, 3 to 20 days, scoring 89.9 to 81 (7101 to 7190),
+and a new News feed, bnn_bloomberg, with 3 stories in the last half hour
+scoring 8 to 12 (7201 to 7203). News, read to its end, must show bnn's
+three, every other News feed's 2-day stories, exactly hn_top's 25 best
+of the 2 days (7001 to 7025; the per-feed cap also cuts the fixtures'
+102, 107 and 108), and nothing else.
+
+Mutation check: `refresh`'s unfiltered call back to
+`api.entries({perCategoryLimit: 100})`, `vite build`, the preview
+restarted: the flow fails three ways, "News lacks bnn_bloomberg's
+[7201,7202,7203]" (News showed 101 and 7001 to 7030), "News shows 30 of
+hn_top's stories, more than the 25 the per-feed cap keeps" and "News
+lacks the other feeds' 2-day stories [103,104,105,106,109,110,111,112]",
+which is the owner's bug as seen on the phone; `flow-window-default`
+fails too (WINDOW x2). Restored and rebuilt, both pass.
+
+### Flows changed after the rebase
+
+- `flow-card-sheet` (PR5a) failed on the combined code every time,
+  alone too: "Hide on the only search result" searches "Pettersson",
+  and PR4d's 604 ("Three days on: what the Pettersson deal means for the
+  cap") matched as well (a search has no window), so the focus went to
+  604's headline instead of the search field. 604's title no longer
+  names him ("what the long-term deal means"); the flow is unchanged.
+- No other flow needed a change: PR4c's hide flows already hide through
+  the ⋯ sheet (`hideViaSheetHeld`) on main, and no PR4d flow hides or
+  saves.
+- `docs/DEVICE_CHECKS.md`: the Saved line said "Open Saved's ⋯", which
+  the review fixes removed; it now checks Saved has no ⋯ and lists every
+  save. A line for the owner's bug: BNN Bloomberg's stories from today
+  are in News.
+
+### Verification
+
+Local loop on this container (database `popping_test_f2`, preview on
+127.0.0.1:4174), on the three commits:
+
+- `npm run lint`: 0 errors (6 react-refresh warnings, all on main:
+  PR5a adds ActionSheet's and Card's). `npm run build`: ok. `git diff
+  --exit-code package.json package-lock.json`: clean.
+- Unit tests: 249 pass, 0 fail.
+- Backend pytest (full, `PYTHONPATH` the worktree's backend): 1765
+  passed, 13 failed, exactly the DNS-only baseline; the tests that read
+  frontend source with `test_entries_by_ids_projection.py` and
+  `test_entry_preview.py`: 230 passed.
+- Strict smoke (`--csp --strict`, every state and flow): the first run
+  had one failure, `flow-card-sheet`'s search step (above), the same
+  alone 3 runs out of 3; with 604 renamed, `flow-card-sheet` and
+  `flow-open-marks-seen` passed 3 runs out of 3 and the second full run
+  had 227 ok, 0 failures, 0 warnings.
+- The PR4d flows, `flow-busy-feed-no-crowding`, `column-popover`, and
+  the card, hide and save flows (PR5a's and PR4c's, 43 in all, 44 runs
+  with `column-popover` at 390 and 320): 3 runs with `--only`, 0
+  failures each.

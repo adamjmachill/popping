@@ -43,7 +43,7 @@
 'use strict'
 
 const F = require('./fixtures.cjs')
-const { mockApi, prefMock } = require('./capture.cjs')
+const { mockApi, prefMock, dbMock } = require('./capture.cjs')
 
 const SETTINGS = '[role="dialog"][aria-label="settings"]'
 const FEED_TABS = `${SETTINGS} [role="tablist"][aria-label="feed manager tabs"]`
@@ -7061,6 +7061,58 @@ module.exports = [
       await tap(page, phoneTab(page, /^saved/i))
       if (!(await waitFor(async () => /^saved/i.test(await selectedTab(page)), 3000))) return fail('WINDOW', 'Saved did not open')
       if (await page.locator(`${MOBILE_MAIN} [data-column-action="prefs"]`).count()) fail('WINDOW', 'Saved has a ⋯ (column preferences) button')
+    },
+  }),
+
+  // The owner's bug, which the window fixes (D5, D28): the dashboard load
+  // used to ask per_category_limit=100 alone, cut by all-time score, so a
+  // quiet feed in a busy category (BNN Bloomberg in News) never reached
+  // its tab: the busy feeds' older, higher-scoring stories took all 100
+  // places. Seeded in the mock's store (``dbMock``, so the server's cuts
+  // apply, as they don't to ``withStories``): hn_top (News) gets 30
+  // stories in the last 2 days scoring 99 to 90.3 (7001 to 7030) and 90
+  // older ones, 3 to 20 days, scoring 89.9 to 81 (7101 to 7190); a new
+  // News feed, bnn_bloomberg (30), brings 3 in the last half hour scoring
+  // 8 to 12 (7201 to 7203). The load cuts hn_top to its 25 best of the 2
+  // days (7001 to 7025; the fixtures' 102, 107 and 108 go too), then News
+  // to its newest 100, which hold everything left: News shows bnn's 3
+  // and every other News feed's 2-day stories, and 25 of hn_top's. Cut
+  // by score alone, hn_top's 120 (and 101) take the 100 places, bnn is
+  // out, and the device's 2-day cut shows 30 of hn_top's. The clock is
+  // held: no card is used up and no poll lands while the list is read to
+  // its end.
+  dashFlow('flow-busy-feed-no-crowding', {
+    before: async ({ page, context }) => {
+      const db = dbMock(context)
+      db.addSources([{ ...F.SOURCES.find((s) => s.id === 1), id: 30, name: 'bnn_bloomberg', url: 'https://www.bnnbloomberg.ca/arc/outboundfeeds/rss/', favicon_path: null, favicon_url: null, net_vote_score: 0 }])
+      db.addEntries([
+        ...Array.from({ length: 30 }, (_, i) => F.mkEntry(7001 + i, 2, `Busy feed, today, story ${i + 1}`, { score: 99 - i * 0.3, ago: 60 + i * 80, preview: null })),
+        ...Array.from({ length: 90 }, (_, i) => F.mkEntry(7101 + i, 2, `Busy feed, ${3 + Math.floor(i / 5)} days ago, story ${i + 1}`, { score: 89.9 - i * 0.1, ago: 3 * 24 * 60 + i * 270, preview: null })),
+        ...[0, 1, 2].map((i) => F.mkEntry(7201 + i, 30, `Markets close mixed, update ${i + 1}`, { score: 8 + i * 2, ago: 5 + i * 10, preview: null })),
+      ])
+      await installClock(page)
+    },
+    run: async ({ page, fail, shot }) => {
+      await holdClock(page)
+      const first = await openedIds(page, /^news/i)
+      if (!first.length) return fail('CROWDING', 'News drew no card')
+      if (!(await phoneListToEnd(page))) return fail('CROWDING', 'the News list never loaded its last batch')
+      const ids = (await phoneIds(page)).split(',').map(Number)
+      await shot('news')
+      const quiet = [7201, 7202, 7203]
+      const missing = quiet.filter((id) => !ids.includes(id))
+      if (missing.length) fail('CROWDING', `News lacks bnn_bloomberg's ${JSON.stringify(missing)} (it shows ${ids.length} stories: ${JSON.stringify(ids)})`)
+      const hnIds = new Set([...F.ENTRIES.filter((e) => e.source_id === 2).map((e) => e.id), ...Array.from({ length: 30 }, (_, i) => 7001 + i), ...Array.from({ length: 90 }, (_, i) => 7101 + i)])
+      const busy = sortedIds(ids.filter((id) => hnIds.has(id)))
+      const want = Array.from({ length: 25 }, (_, i) => 7001 + i)
+      if (busy.length > 25) fail('CROWDING', `News shows ${busy.length} of hn_top's stories, more than the 25 the per-feed cap keeps`)
+      else if (JSON.stringify(busy) !== JSON.stringify(want)) fail('CROWDING', `News shows hn_top's ${JSON.stringify(busy)}, expected its 25 best of the 2 days, 7001 to 7025`)
+      // Every other News feed's 2-day stories are there too.
+      const others = F.ENTRIES.filter((e) => e.source_id !== 2 && F.SOURCES.find((s) => s.id === e.source_id).category === 'news' && Date.parse(e.fetched_at) >= F.NOW - 48 * 3600000).map((e) => e.id)
+      const lost = others.filter((id) => !ids.includes(id))
+      if (lost.length) fail('CROWDING', `News lacks the other feeds' 2-day stories ${JSON.stringify(lost)}`)
+      const stray = ids.filter((id) => !quiet.includes(id) && !hnIds.has(id) && !others.includes(id))
+      if (stray.length) fail('CROWDING', `News shows ${JSON.stringify(stray)}, which are no 2-day News stories`)
     },
   }),
 

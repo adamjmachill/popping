@@ -198,7 +198,9 @@ const ENTRIES = [
   mkEntry(601, 16, 'Canucks sign Pettersson to an eight-year extension', { image: true, score: 72, ago: 22, summary: SHORT_SUMMARY, preview: null }),
   mkEntry(602, 16, 'Oilers beat Flames 4-3 in overtime', { score: 46, ago: 140, summary: SHORT_SUMMARY, preview: null }),
   mkEntry(603, 16, 'Trade deadline primer: every team\'s cap space, needs and likely sellers', { score: 39, ago: 400, preview: null }),
-  mkEntry(604, 16, 'Three days on: what the Pettersson deal means for the cap', { score: 45, ago: 3 * 24 * 60, summary: SHORT_SUMMARY, preview: null }),
+  // (604's title doesn't name Pettersson: a search for him finds 601
+  // alone, which flow-card-sheet's "Hide on the only result" leans on.)
+  mkEntry(604, 16, 'Three days on: what the long-term deal means for the cap', { score: 45, ago: 3 * 24 * 60, summary: SHORT_SUMMARY, preview: null }),
   mkEntry(605, 16, 'Preseason power rankings, ten days out', { score: 50, ago: 10 * 24 * 60, summary: SHORT_SUMMARY, preview: null }),
 ]
 
@@ -236,6 +238,7 @@ module.exports = {
   NOW,
   SOURCES,
   ENTRIES,
+  mkEntry,
   FOR_YOU,
   FOR_YOU_RANKED,
   SETTINGS,
