@@ -71,7 +71,10 @@ until the toast closes without Undo (D25). Saving is silent; unsaving says
   area bottom padding. Focus starts on Cancel. On close, focus returns to
   `from` (the ⋯ button, handed over by the Card because iOS gives a tapped
   button no focus) when it is still in the page; otherwise to the next
-  card's headline, the previous one's, or the selected tab. The cards of
+  card's headline, the previous one's, the search field (`#app-search`,
+  there only while search results stand in for the list: Hide on the
+  only result would otherwise leave the focus on body) or the selected
+  tab. The cards of
   the opener's list are noted at open time, so "next" is the first still in
   the page after the opener's place. When a row opened another sheet
   (Edit feed → Settings, which takes no focus itself and doesn't inert
@@ -120,10 +123,15 @@ until the toast closes without Undo (D25). Saving is silent; unsaving says
 - `frontend/src/App.tsx`:
   - `actionSheetOpen` (from `ActionSheetHost`'s `onOpenChange`) joins
     `modalOpen`;
-  - `hideStory(id)` (`useCallback`, slice 21): `hideEntry(id)`, then
-    `holdInteraction({type: 'never'})` and the "Hidden · Undo" toast whose
-    Undo cancels the hold and calls `restoreHiddenEntry`, and whose
-    `onExpire` releases it;
+  - `hideStory(id)` (`useCallback`, slice 21): nothing when the story is
+    already in `latestPrefs().hiddenEntries` (a second hide would take a
+    second hold whose toast replaces the first, sending its `never` at
+    once with no Undo left), else `hideEntry(id)`, `dropSelection(id)`
+    (the keyboard selection never stays on a card that isn't drawn, so
+    `h`, `b`, `a` and `z` after a hide act on nothing; Undo doesn't
+    select the story again), then `holdInteraction({type: 'never'})` and
+    the "Hidden · Undo" toast whose Undo cancels the hold and calls
+    `restoreHiddenEntry`, and whose `onExpire` releases it;
   - `starStory(id)` (`useCallback`): `toggleStarEntry`, and on an unsave
     the "Removed from Saved · Undo" toast (Undo: `setStarred(id, true)`, an
     add);
@@ -134,7 +142,9 @@ until the toast closes without Undo (D25). Saving is silent; unsaving says
   - `onKey` returns early while `modalOpen`; `b` → `starStory` (the
     `bookmark` recorded on a save, from `latestPrefs()`), `h` →
     `hideStory`, `a` / `z` vote on the selected card through
-    `voteInteractionEvents` + `voteEntry`, all ignoring meta / ctrl / alt;
+    `voteInteractionEvents` + `voteEntry`, all ignoring meta / ctrl / alt
+    and a held key's repeats (`e.repeat`: each of the four toggles or
+    takes something away, so a repeat would undo the first);
   - `<ActionSheetHost onOpenChange={setActionSheetOpen}/>` next to
     `ToastHost`.
 - `frontend/src/components/Column.tsx` and `SearchResults.tsx`: `onHideToggle`
@@ -199,11 +209,16 @@ until the toast closes without Undo (D25). Saving is silent; unsaving says
   `/api/entries/by-ids` in input order, `/api/foryou`; no `feed_summary_text`
   or `meta` in the response).
 - Flows (`flows.cjs`): `flow-card-votes`, `flow-card-save`,
-  `flow-card-share`, `flow-card-sheet`, `flow-hide-undo`,
+  `flow-card-share` (with a share whose promise rejects with AbortError:
+  no `share`, nothing copied, no toast), `flow-card-sheet`,
+  `flow-hide-undo`, `flow-hide-keys-desktop` (1280: `h` drops the
+  selection, so `h`, `b` and `a` after it act on nothing, one toast and
+  one `never` per hide, none after Undo; a held `b` or `a` fires once),
   `flow-swipe-left-hide`, `flow-swipe-right-dead`, `flow-card-preview`
-  (each described in the audit README; `flow-card-sheet` has a step the
-  spec doesn't list: Edit feed opens that feed in Settings and the focus
-  doesn't go back to the ⋯ under it). Changed: `flow-prefs-resync`
+  (each described in the audit README; `flow-card-sheet` has two steps
+  the spec doesn't list: Edit feed opens that feed in Settings and the
+  focus doesn't go back to the ⋯ under it, and Hide on the only search
+  result puts the focus on the search field). Changed: `flow-prefs-resync`
   (hides through the sheet), `flow-bookmark-on-save-desktop` (the
   bookmark, not the menu's Save), `flow-h1-desktop` ("Open in browser"),
   `flow-fv-card-source-tap` (the feed button above the headline's top
@@ -284,6 +299,75 @@ the WIP commit, from a saved copy, compared with `cmp`).
 | `card-no-preview` | a stand-in preview when the server sent `null` | `PREVIEW: story 103 shows a preview although the server sent none` at every width |
 | `flow-fv-card-source-tap` | the header line pulled 32px down over the headline (`-mb-8`) | `FV: the feed button is not above the headline` and the top-edge check |
 
+## Review fixes (second commit)
+
+The `/code-review xhigh` pass and its verifiers confirmed six findings;
+four changed code, one is docs only, one is a follow-up unit.
+
+1. **`h` after a hide acted on an undrawn card** (major). `hideStory`
+   removed the card but `selectedCardId` stayed on it, so a second `h`
+   showed a second toast and sent a second `never` for one hide, and `b`
+   / `a` / `z` saved or voted a hidden story. Fix: `hideStory` calls
+   `dropSelection(id)` after `hideEntry(id)` (a stable `useCallback`,
+   added to the deps), and the selection stays off after Undo. Covers the
+   sheet and swipe hides of a keyboard-selected card too.
+2. **`hideStory` wasn't idempotent** (major): a repeat of `h` (a held key
+   fires keydown again; `onKey` had no `e.repeat` guard) called it again
+   for the same id, the second toast replaced the first and ran its
+   `onExpire`, so the `never` went at once and Undo cancelled only the
+   second hold (D25 broken, with no way to tell). Fix: `hideStory` returns
+   first when `latestPrefs().hiddenEntries` already holds the id
+   (`latestPrefs` added to the deps; the slice21 shape holds), and the
+   `b` / `h` / `a` / `z` branches of `onKey` skip `e.repeat`.
+3. **Focus fell to body after Hide took the only search result** (minor):
+   the fallback chain was next card, previous card, selected tab, and
+   the tab strip is away while search results stand in for the list.
+   Fix: `document.getElementById('app-search')` before the tab.
+4. **`flow-card-share` didn't pin "share recorded on resolve, nothing on
+   AbortError"** (minor): the harness's `navigator.share` stub always
+   resolves. Fix: a step that redefines `navigator.share` as a rejection
+   with `AbortError`, taps Share and asserts one `share` still, nothing
+   copied and no toast, before the existing no-`navigator.share` step.
+5. **No toast group `hide` yet** (minor, tracking only): PR5b's bullet
+   under Open items now says the groups must also cover a cross-group
+   replacement, and the Known limit for Gate 2 is noted there.
+6. **The headline link's `aria-label` hides the title and preview from
+   VoiceOver** (minor, pre-existing on main): a follow-up unit, written up
+   under Open items; every flow and the smoke select on the label, so it
+   is a rename across the harness rather than a PR5a line.
+
+Checks run again on the final sources: `npm run lint` (0 errors, the
+same 6 warnings), `npm run build`, the unit tests (222 passed),
+`test_slice21_column_memo.py` and `test_slice30_safe_external_url.py`
+(51 passed; the backend didn't change). The touched flows
+(`flow-card-share`, `flow-card-sheet`, `flow-hide-undo`,
+`flow-hide-keys-desktop`, `flow-bookmark-on-save-desktop`) under
+`--csp --strict`: 0 failures. The four timing / keyboard ones
+(`flow-hide-keys-desktop`, `flow-card-sheet`, `flow-card-share`,
+`flow-hide-undo`) looped: 3 of 3 completed runs 0 failures, 0 warnings
+(32-33 s each) when this commit was made, the loop still going. The full
+`smoke.cjs --csp --strict` on this build had not completed when the
+commit was made (the session was closed before its ~9 min run): the
+changes are to the keyboard branches of `onKey`, `hideStory` and the
+sheet's focus fallback, which the five flows above cover, and the first
+commit's two full runs cover the rest. It should be run again before the
+PR is opened.
+
+### Mutation checks (review fixes)
+
+| Test | Broken line | Failed on |
+|---|---|---|
+| `flow-hide-keys-desktop` | `dropSelection(entryId)` removed from `hideStory` | `HIDE-KEYS: b after a hide sent 1 bookmark events`, `a after a hide sent 1 thumb_up events`, the `starred_entries` / `voted_entries` writes, `after Undo the selection is on card 202` |
+| `flow-hide-keys-desktop` | the `hiddenEntries.includes` guard removed, `dropSelection` kept | **no failure**: with the selection gone no path reaches `hideStory` twice for one id; the guard is defence in depth for a keydown repeat that lands before React re-registers `onKey` |
+| `flow-hide-keys-desktop` | the guard and `dropSelection` both removed | the four above and `after the toast, 2 never events for 201, expected 1`, `a second never went later (2)`, `h twice then Undo sent 1 never events` |
+| `flow-hide-keys-desktop` | `e.repeat` dropped from the `b` branch | `HIDE-KEYS: a held b did not save the card (or its repeat unsaved it): ["save"]` |
+| `flow-hide-keys-desktop` | `e.repeat` dropped from the `a` / `z` branch | `HIDE-KEYS: a held a did not vote the card up (or its repeat took it back): ["upvote","upvote"]` |
+| `flow-card-sheet` | the `#app-search` fallback removed from ActionSheet's `close()` | `SHEET: after hiding the only search result the focus is on BODY, expected the search field` |
+| `flow-card-share` | `recordImmediate({type: 'share'})` moved before `navigator.share` | `SHARE: a dismissed share sent a share event (2 in all)` (and the copy step's count) |
+
+Each: break the line, `npm run build`, `--only` that flow, restore from a
+saved copy compared with `cmp` (the fixes were uncommitted), rebuild.
+
 ## Open items for later units
 
 - PR5b: `buildActions()` gains Hide stories from <feed>; `Toast.tsx` gains
@@ -291,6 +375,25 @@ the WIP commit, from a saved copy, compared with `cmp`).
   released when the merged toast expires, Undo cancels them all: the
   `holdInteraction` handles are what to keep per merged event);
   `hideStory`'s toast joins group `hide`, `starStory`'s group `save`.
+  The groups must also cover a hide toast replaced by a toast of another
+  group (an unsave's "Removed from Saved · Undo", an error toast): today
+  the replaced toast's `onExpire` runs at once (Toast.tsx), so the held
+  `never` goes and the hide's Undo is gone. A held `never` should only be
+  released when its own Undo window closes: keep the hide's hold alive
+  across a cross-group replacement (release it on the hide's own 5 s, or
+  when the hide is next shown and expires), or stack the hide behind the
+  new toast.
+- Follow-up unit (an a11y fix from the PR5a review, pre-existing on main,
+  not done here because every flow and the smoke select on it): the
+  headline link's `aria-label="open in new tab"` replaces its content as
+  the accessible name, so VoiceOver never hears the title or the D34
+  preview. Remove the label so the name comes from content, keep
+  `title="opens in a new tab"` and the aria-hidden ↗ (or a visually
+  hidden "(opens in a new tab)" span inside the link), give the anchor a
+  `data-headline` hook, and change `HEADLINE` in ActionSheet.tsx and every
+  `a[aria-label="open in new tab"]` selector in smoke.cjs and flows.cjs
+  to `a[data-headline]`; re-run the sheet and focus flows and the strict
+  smoke.
 - PR4c / PR4d rebase: `hideStory` calls `hideEntry` and the toast's Undo
   calls `restoreHiddenEntry`; PR4c's `keepHiddenStories` /
   `putBackHiddenStories` put-back belongs in those two, not in
@@ -303,6 +406,10 @@ the WIP commit, from a saved copy, compared with `cmp`).
   once, so a hide taken back after a return from another app has already
   reached the ranking. Restore from Activity removing the signal stays
   deferred (D19).
+- Known limit until PR5b's toast groups (for the Gate 2 testers): any
+  second toast within the 5 s window (a second hide, an unsave, an error)
+  replaces the hide toast, which drops the first hide's Undo and sends its
+  `never` then. Not a regression: old builds recorded `never` at once.
 - `ARCHITECTURE.md`: no change. The held slot is browser memory; the
   preview is computed per request, nothing stored.
 

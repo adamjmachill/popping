@@ -102,8 +102,12 @@ export function ActionSheetHost({ onOpenChange }: { onOpenChange?: (open: boolea
       }
       const still = (c: HTMLElement) => c.isConnected && c.getClientRects().length > 0
       const next = cards.slice(at + 1).find(still) ?? cards.slice(0, Math.max(at, 0)).reverse().find(still)
+      // No card left (Hide took the only search result): the search
+      // field, which is there while the results stand in for the list
+      // and the tab strip isn't; else the selected tab.
       const target =
         next?.querySelector<HTMLElement>(HEADLINE) ??
+        document.getElementById('app-search') ??
         document.querySelector<HTMLElement>('[role="tablist"][aria-label="dashboard sections"] [role="tab"][aria-selected="true"]')
       target?.focus({ preventScroll: true })
     })
