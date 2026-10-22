@@ -73,7 +73,7 @@ const MUTATING_RULES = ['C2b', 'C6']
 // C7 scopes: controls inside these are measured (the phone's cards from PR7).
 const C7_SCOPES = ['[role="dialog"]', 'aside[aria-label="menu"]', 'header', '[role="tablist"]', 'main.md\\:hidden article']
 // C12 scopes: the phone's content surfaces.
-const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]', 'aside[aria-label="menu"]', '[role="dialog"][aria-label="edit tabs"]']
+const C12_ROOTS = ['main.md\\:hidden', '[role="dialog"][aria-label="settings"]', 'aside[aria-label="menu"]', '[role="dialog"][aria-label="edit tabs"]', '[role="dialog"][aria-label="story actions"]']
 
 // ---------------------------------------------------------------------------
 // States. Each PR adds its own. Fields:
@@ -266,6 +266,60 @@ const STATES = [
         const d = document.querySelector(sel)
         return !!d && d.getAnimations().every((a) => a.playState !== 'running') && Math.abs(d.getBoundingClientRect().bottom - innerHeight) < 1
       }, editor, { timeout: 5000 })
+    },
+  },
+  {
+    // PR5a: a card's ⋯ sheet (Hide, Edit feed, Copy link, Open in
+    // browser, Cancel) after its slide-up.
+    name: 'card-action-sheet',
+    widths: [390, 320],
+    setup: async ({ page }) => {
+      await page.locator(`${PHONE_CARD} button[aria-label="more actions"]`).first().click()
+      const sheet = '[role="dialog"][aria-label="story actions"]'
+      await page.locator(sheet).waitFor({ state: 'visible' })
+      await page.waitForFunction((sel) => {
+        const d = document.querySelector(sel)
+        return !!d && d.getAnimations().every((a) => a.playState !== 'running') && Math.abs(d.getBoundingClientRect().bottom - innerHeight) < 1
+      }, sheet, { timeout: 5000 })
+    },
+    run: async ({ page, fail }) => {
+      const rows = await page.$$eval('[role="dialog"][aria-label="story actions"] button', (els) => els.map((b) => ({ text: b.textContent.trim(), h: b.getBoundingClientRect().height })))
+      const want = ['Hide', 'Edit feed', 'Copy link', 'Open in browser', 'Cancel']
+      if (JSON.stringify(rows.map((r) => r.text)) !== JSON.stringify(want)) fail('SHEET', `the rows are ${JSON.stringify(rows.map((r) => r.text))}, expected ${JSON.stringify(want)}`)
+      for (const r of rows) if (r.h < 43.5) fail('SHEET', `"${r.text}" is ${r.h}px tall`)
+    },
+  },
+  {
+    // PR5a, D34: For You's first card (101) with its 300-character
+    // preview, clamped to 2 lines on a phone, at the widths C11 and C14
+    // run at.
+    name: 'card-preview-long',
+    widths: [390, 320, 312],
+    run: async ({ page, fail }) => {
+      const p = await page.evaluate((sel) => {
+        const el = document.querySelector(`${sel} article[data-card-id="101"] [data-preview]`)
+        if (!el) return null
+        const cs = getComputedStyle(el)
+        return { clamp: cs.webkitLineClamp, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight, lineHeight: parseFloat(cs.lineHeight) }
+      }, MOBILE_MAIN)
+      if (!p) return fail('PREVIEW', 'story 101 shows no preview')
+      if (p.clamp !== '2') fail('PREVIEW', `the line clamp is ${JSON.stringify(p.clamp)}, expected 2`)
+      if (p.clientHeight > p.lineHeight * 2 + 1) fail('PREVIEW', `the preview is ${p.clientHeight}px tall, more than 2 lines`)
+      if (p.scrollHeight <= p.clientHeight) fail('PREVIEW', 'the long blurb was not clamped')
+    },
+  },
+  {
+    // PR5a: the News tab, whose story 103 has no preview: the card looks
+    // as it did (title row, then the action bar).
+    name: 'card-no-preview',
+    widths: [390, 320, 312],
+    setup: async ({ page }) => {
+      await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]').filter({ hasText: /^News/ }).first().click()
+      await page.locator(`${MOBILE_MAIN} article[data-card-id="103"]`).waitFor({ state: 'visible' })
+    },
+    run: async ({ page, fail }) => {
+      if (await page.locator(`${MOBILE_MAIN} article[data-card-id="103"] [data-preview]`).count()) fail('PREVIEW', 'story 103 shows a preview although the server sent none')
+      if (!(await page.locator(`${MOBILE_MAIN} article[data-card-id="101"] [data-preview]`).count())) fail('PREVIEW', 'story 101 shows no preview on News')
     },
   },
   {

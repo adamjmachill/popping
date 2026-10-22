@@ -83,13 +83,14 @@ function patchBodyError(body) {
 }
 // One GET /api/entries/by-ids row (schemas.EntryOut): the card fields of
 // routes/entries.py's _CARD_COLUMNS (the meta keys a card renders are
-// top-level fields there, as in the fixtures) and the feed's name. Never
-// the meta blob, so code that read it would come up empty here as it
-// would against the server.
+// top-level fields there, as in the fixtures), the preview the projection
+// computes from them (PR5a, D34; the fixtures' ``preview``) and the feed's
+// name. Never the meta blob, so code that read it would come up empty
+// here as it would against the server.
 const BY_ID_FIELDS = [
   'id', 'source_id', 'title', 'url', 'published_at', 'fetched_at', 'composite_score', 'personal_score', 'raw_score',
   'cached_summary', 'image_url', 'image_path', 'story_cluster_id', 'reddit_thread_url', 'reddit_comment_count',
-  'audio_url', 'duration_seconds', 'transcript_url',
+  'audio_url', 'duration_seconds', 'transcript_url', 'preview',
 ]
 function byIdRow(e, sourceName) {
   const row = {}
@@ -233,7 +234,7 @@ function mockApi(context, opts = {}) {
       // As routes/entries.py's entries_by_ids: at most 200 ids, in the
       // order asked, ids with no row (or whose feed is gone: the JOIN)
       // dropped, and each row the card projection (``_CARD_COLUMNS``,
-      // no ``meta``) plus the feed's name.
+      // no ``meta``, with ``preview``) plus the feed's name.
       const ids = (u.searchParams.get('ids') || '').split(',').map(Number).filter(isEntryId).slice(0, 200)
       return json(route, ids.map(entryById).filter((e) => e && sourceById(e.source_id)).map((e) => byIdRow(e, sourceName(e.source_id))))
     }

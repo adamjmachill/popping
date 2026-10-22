@@ -41,6 +41,10 @@ const NAVIGATION_BINDINGS: Binding[] = [
 
 const CARD_BINDINGS: Binding[] = [
   { key: 's', label: 'toggle inline summary on selected card' },
+  { key: 'b', label: 'save or unsave the selected card' },
+  { key: 'h', label: 'hide the selected card (Undo in the toast)' },
+  { key: 'a', label: 'upvote the selected card (again to take it back)' },
+  { key: 'z', label: 'downvote the selected card (again to take it back)' },
 ]
 
 export function ShortcutsSheet({ open, onClose }: Props) {

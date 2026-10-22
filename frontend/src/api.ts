@@ -76,6 +76,12 @@ export interface Entry {
   personal_score: number
   raw_score: number
   meta: Record<string, unknown> | null
+  // The blurb under the headline (D34, PR5a): the cached AI summary
+  // when there is one, else the feed's own description cleaned and
+  // cut to about 300 characters, computed by the server for every
+  // list row. Null (or absent, from an older server) means none, and
+  // the card looks as it did without one.
+  preview?: string | null
   // Thumbnail (if the source ships one). Path is relative to /assets.
   image_url: string | null
   image_path: string | null
