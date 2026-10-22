@@ -20,7 +20,7 @@ Status of every unit in `docs/UX_OVERHAUL_PLAN.md`. Each unit PR updates this fi
 | PR4a Ingest rules, brief guard, On this day | B | merged | #30 |
 | PR4b Window parameters and by-ids projection | B | merged | #31 |
 | PR4c Saved by id | F | merged | #47 |
-| PR4d Window UI | F | in review | #49 |
+| PR4d Window UI | F | merged | #49 |
 | PR5a Reddit card, action sheet, Hide hold | F | merged | #48 |
 | PR5b Muted feeds | F | not started | |
 | PR6a queue_check and the check-now route | B | merged | #33 |
