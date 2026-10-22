@@ -137,7 +137,7 @@ jobs:
         run: |
           npm install --no-save --no-audit --no-fund --ignore-scripts playwright@1.56.1
           git diff --exit-code package.json package-lock.json
-          npx playwright install --with-deps chromium webkit
+          npx playwright install --with-deps chromium
       - name: Start preview
         run: |
           nohup ./node_modules/.bin/vite preview --host 127.0.0.1 --port 4173 --strictPort > /tmp/preview.log 2>&1 &
@@ -148,9 +148,20 @@ jobs:
       # (frontend/scripts/iphone-audit/README.md).
       - name: iPhone layout smoke test
         run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --csp --strict
+      # WebKit's system packages (GStreamer, ffmpeg) are the bulk of the
+      # apt download; on a slow Ubuntu mirror they ran the job past its
+      # timeout and no frontend image was published. The Safari run only
+      # reports, so its install is time-boxed and may fail without
+      # holding up the image.
+      - name: Install WebKit (report only)
+        id: webkit
+        continue-on-error: true
+        timeout-minutes: 8
+        run: npx playwright install --with-deps webkit
       # States only: the behaviour flows drive Chromium (CDP touch) and
       # would roughly double the job's time here for a report nobody gates on.
       - name: iPhone layout smoke test (Safari engine, report only)
+        if: steps.webkit.outcome == 'success'
         continue-on-error: true
         run: node scripts/iphone-audit/smoke.cjs http://127.0.0.1:4173 --browser webkit --states-only
 
