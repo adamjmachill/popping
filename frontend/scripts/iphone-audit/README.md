@@ -28,8 +28,8 @@ browser it can launch. Nothing is added to `package.json`.
   `/opt/pw-browsers`, so set `PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers`. Never
   run `playwright install` there (the CDN is blocked). WebKit is not available.
 - CI: `npm install --no-save ... playwright@1.56.1` and
-  `npx playwright install --with-deps chromium`; WebKit is installed in its
-  own time-boxed step that may fail without failing the job (see below).
+  `npx playwright install --with-deps chromium`; the Safari-engine report
+  installs WebKit in its own job, which never holds up the image (see below).
 - Elsewhere: install `playwright` outside the repo (or `--no-save`) and
   `npx playwright install chromium`.
 
