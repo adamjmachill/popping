@@ -6538,6 +6538,14 @@ module.exports = [
       if (s.url !== url || !s.title) fail('SHARE', `navigator.share got ${JSON.stringify(s)}, expected the story's title and ${url}`)
       if (!(await waitFor(() => eventsFor(page, 103, 'share') === 1, 3000))) fail('SHARE', `a share sent ${eventsFor(page, 103, 'share')} share events, expected 1`)
       if ((await harnessLog(page)).copied.length) fail('SHARE', 'a share also copied the address')
+      // The sheet dismissed (the promise rejects with AbortError): no
+      // `share`, nothing copied, no toast.
+      await page.evaluate(() => Object.defineProperty(navigator, 'share', { configurable: true, value: () => Promise.reject(new DOMException('dismissed', 'AbortError')) }))
+      await tap(page, share())
+      await sleep(400)
+      if (eventsFor(page, 103, 'share') !== 1) fail('SHARE', `a dismissed share sent a share event (${eventsFor(page, 103, 'share')} in all)`)
+      if ((await harnessLog(page)).copied.length) fail('SHARE', 'a dismissed share copied the address')
+      if (await page.locator('[role="status"]').count()) fail('SHARE', `a dismissed share showed a toast: ${JSON.stringify(await page.locator('[role="status"]').textContent())}`)
       // No system sheet: the address is copied instead.
       await page.evaluate(() => Object.defineProperty(navigator, 'share', { configurable: true, value: undefined }))
       await tap(page, share())
@@ -6621,6 +6629,11 @@ module.exports = [
       await sleep(300)
       if ((await page.locator('#app-search').inputValue()) !== 'Pettersson') fail('SHEET', `Esc on the sheet cleared the search: ${JSON.stringify(await page.locator('#app-search').inputValue())}`)
       if (!(await result.isVisible())) fail('SHEET', 'Esc on the sheet took the search results away')
+      // Hide on the only result: no card is left to take the focus and
+      // the tab strip is away, so it lands on the search field.
+      await hideViaSheet(page, result)
+      if (!(await waitFor(async () => (await result.count()) === 0, 2000))) return fail('SHEET', 'Hide left the search result in place')
+      if (!(await waitFor(() => page.evaluate(() => document.activeElement?.id === 'app-search'), 2000))) fail('SHEET', `after hiding the only search result the focus is on ${await focusedNow(page)}, expected the search field`)
       await tap(page, page.locator('button[aria-label="clear search"]'))
       await page.locator(`${MOBILE_MAIN} article[data-card-id]`).first().waitFor({ state: 'visible' })
       // Hide from the sheet: the card goes and the focus lands on the
@@ -6695,6 +6708,102 @@ module.exports = [
       await page.clock.runFor(6000)
       await requestsSettled(page)
       if (neversFor(page, third) !== 1) fail('HIDE-UNDO', `the toast expiring sent the never again (${neversFor(page, third)})`)
+    },
+  }),
+
+  // Keyboard `h` on the desktop: the selection goes with the hidden
+  // card, so `h` again (or a held key's repeat), `b` and `a` act on
+  // nothing; one "Hidden" toast and one `never` per hide, none after
+  // Undo. A held `b` or `a` fires once.
+  dashFlow('flow-hide-keys-desktop', {
+    widths: [1280],
+    wait: 'main.grid article[data-card-id]',
+    before: async ({ page }) => {
+      await installClock(page)
+      await recordInteractions(page)
+    },
+    run: async ({ page, fail, shot }) => {
+      const writes = await prefWrites(page)
+      const sel = 'article[data-card-id][tabindex="0"]'
+      const selected = async () => ((await page.locator(sel).count()) ? Number(await page.locator(sel).first().getAttribute('data-card-id')) : null)
+      const toasts = () => page.locator('[role="status"]').count()
+      // The first column is Saved, empty: step to the next, then down.
+      await page.keyboard.press('ArrowRight')
+      await page.keyboard.press('ArrowDown')
+      if (!(await waitFor(async () => (await selected()) !== null, 3000))) return fail('HIDE-KEYS', 'ArrowDown selected no card')
+      const id = await selected()
+      const card = () => page.locator(`main.grid article[data-card-id="${id}"]`)
+      await page.keyboard.press('h')
+      if (!(await waitFor(async () => (await card().count()) === 0, 2000))) return fail('HIDE-KEYS', 'h did not hide the selected card')
+      if (!(await waitFor(() => page.locator('[role="status"]').getByText('Hidden', { exact: true }).isVisible(), 2000))) return fail('HIDE-KEYS', 'no "Hidden" toast')
+      await shot('hidden')
+      if ((await selected()) !== null) fail('HIDE-KEYS', `after h the selection is still on card ${await selected()}`)
+      // h again, then b and a: nothing is drawn to act on.
+      await page.keyboard.press('h')
+      await page.keyboard.press('b')
+      await page.keyboard.press('a')
+      await sleep(800)
+      if ((await toasts()) !== 1) fail('HIDE-KEYS', `a second h left ${await toasts()} toasts up, expected the one`)
+      if (!(await page.locator('[role="status"]').getByText('Hidden', { exact: true }).isVisible())) fail('HIDE-KEYS', 'the toast after a second h is not the first "Hidden"')
+      if (eventsFor(page, id, 'bookmark') !== 0) fail('HIDE-KEYS', `b after a hide sent ${eventsFor(page, id, 'bookmark')} bookmark events`)
+      if (eventsFor(page, id, 'thumb_up') !== 0) fail('HIDE-KEYS', `a after a hide sent ${eventsFor(page, id, 'thumb_up')} thumb_up events`)
+      // The hide's PATCH goes with the 1 s batch; one add, nothing else.
+      await page.clock.runFor(1500)
+      await requestsSettled(page)
+      if (writes.some((w) => w.key === 'starred_entries' || w.key === 'voted_entries')) fail('HIDE-KEYS', `b / a after a hide wrote ${JSON.stringify(writes.filter((w) => w.key !== 'hidden_entries'))}`)
+      const adds = patched(writes, 'hidden_entries', 'add').filter((x) => x === id)
+      if (adds.length !== 1) fail('HIDE-KEYS', `hidden_entries saw ${adds.length} adds of ${id}, expected 1`)
+      // Past the toast's window: exactly one `never`, not two.
+      await page.clock.runFor(6000)
+      if (!(await waitFor(async () => (await toasts()) === 0, 2000))) fail('HIDE-KEYS', 'the toast is still up after 5 s')
+      await requestsSettled(page)
+      if (!(await waitFor(() => neversFor(page, id) === 1, 3000))) fail('HIDE-KEYS', `after the toast, ${neversFor(page, id)} never events for ${id}, expected 1`)
+      await page.clock.runFor(3000)
+      await requestsSettled(page)
+      if (neversFor(page, id) !== 1) fail('HIDE-KEYS', `a second never went later (${neversFor(page, id)})`)
+      // Select the next card, h twice, then Undo: the story is back, the
+      // selection stays off it, and no `never` goes.
+      await page.keyboard.press('ArrowDown')
+      if (!(await waitFor(async () => (await selected()) !== null, 3000))) return fail('HIDE-KEYS', 'ArrowDown after the hide selected no card')
+      const second = await selected()
+      const card2 = () => page.locator(`main.grid article[data-card-id="${second}"]`)
+      await page.keyboard.press('h')
+      if (!(await waitFor(async () => (await card2().count()) === 0, 2000))) return fail('HIDE-KEYS', 'h did not hide the second card')
+      await page.keyboard.press('h')
+      await sleep(300)
+      if ((await toasts()) !== 1) fail('HIDE-KEYS', `h twice left ${await toasts()} toasts up`)
+      await undoButton(page).click()
+      if (!(await waitFor(async () => (await card2().count()) === 1, 2000))) return fail('HIDE-KEYS', 'Undo did not bring the second story back')
+      if ((await selected()) !== null) fail('HIDE-KEYS', `after Undo the selection is on card ${await selected()}`)
+      await page.clock.runFor(6000)
+      await requestsSettled(page)
+      if (neversFor(page, second) !== 0) fail('HIDE-KEYS', `h twice then Undo sent ${neversFor(page, second)} never events`)
+      if ((prefMock(page.context()).value('hidden_entries') || []).includes(second)) fail('HIDE-KEYS', 'the second story is still hidden in the store after Undo')
+      // A held b (keydown, then its repeat) saves once; a held a votes
+      // once. A saved card is drawn in Saved too, so every copy is read.
+      await page.keyboard.press('ArrowDown')
+      if (!(await waitFor(async () => (await selected()) !== null, 3000))) return fail('HIDE-KEYS', 'ArrowDown after Undo selected no card')
+      const third = await selected()
+      const labels = (sel2) => page.locator(`main.grid article[data-card-id="${third}"] ${sel2}`).evaluateAll((els) => els.map((e) => e.getAttribute('aria-label')))
+      const allAre = async (sel2, label) => {
+        const got = await labels(sel2)
+        return got.length > 0 && got.every((l) => l === label)
+      }
+      await page.keyboard.down('b')
+      await page.keyboard.down('b')
+      await page.keyboard.up('b')
+      if (!(await waitFor(() => allAre('button[data-star]', 'unsave'), 2000))) return fail('HIDE-KEYS', `a held b did not save the card (or its repeat unsaved it): ${JSON.stringify(await labels('button[data-star]'))}`)
+      await sleep(400)
+      if (!(await allAre('button[data-star]', 'unsave'))) fail('HIDE-KEYS', `the repeat of a held b unsaved the card: ${JSON.stringify(await labels('button[data-star]'))}`)
+      if (eventsFor(page, third, 'bookmark') !== 1) fail('HIDE-KEYS', `a held b sent ${eventsFor(page, third, 'bookmark')} bookmark events, expected 1`)
+      const UP = 'button[aria-label="upvote"], button[aria-label="remove upvote"]'
+      await page.keyboard.down('a')
+      await page.keyboard.down('a')
+      await page.keyboard.up('a')
+      if (!(await waitFor(() => allAre(UP, 'remove upvote'), 2000))) return fail('HIDE-KEYS', `a held a did not vote the card up (or its repeat took it back): ${JSON.stringify(await labels(UP))}`)
+      await sleep(400)
+      if (!(await allAre(UP, 'remove upvote'))) fail('HIDE-KEYS', `the repeat of a held a took the vote back: ${JSON.stringify(await labels(UP))}`)
+      if (eventsFor(page, third, 'thumb_up') !== 1 || eventsFor(page, third, 'thumb_down') !== 0) fail('HIDE-KEYS', `a held a sent ${eventsFor(page, third, 'thumb_up')} thumb_up and ${eventsFor(page, third, 'thumb_down')} thumb_down events, expected 1 and 0`)
     },
   }),
 

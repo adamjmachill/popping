@@ -2252,11 +2252,21 @@ export function App() {
   // cancels it, and the page hiding sends whatever is still held.
   // (PR5b merges quick hides into one toast, "2 hidden · Undo".)
   //
+  // A story already hidden is left alone: a second hide would take a
+  // second hold whose toast replaces the first (sending its ``never``
+  // at once, with no Undo left to take it back) and add the id again.
+  // The keyboard selection goes with the card: the shortcuts never act
+  // on a card that isn't drawn, so ``h``, ``b``, ``a`` and ``z`` after a
+  // hide do nothing until another card is selected (Undo doesn't select
+  // it again).
+  //
   // Slice 21: a ``useCallback`` over stable callbacks, so Column's and
   // Card's memos can keep it.
   const hideStory = useCallback(
     (entryId: number) => {
+      if (latestPrefs().hiddenEntries.includes(entryId)) return
       hideEntry(entryId)
+      dropSelection(entryId)
       const hold = holdInteraction({ entry_id: entryId, type: 'never' })
       toast('Hidden', {
         kind: 'info',
@@ -2270,7 +2280,7 @@ export function App() {
         onExpire: hold.release,
       })
     },
-    [hideEntry, restoreHiddenEntry],
+    [latestPrefs, hideEntry, dropSelection, restoreHiddenEntry],
   )
 
   // Star / unstar an entry. Stars are a long-term save-for-later
@@ -2493,8 +2503,10 @@ export function App() {
         // browser defaults (Cmd+B is bold-text in form fields but
         // does nothing on the dashboard surface). Same modifier
         // guards as ``s`` so Cmd+B still works when the dashboard
-        // has focus and a form field is active.
-        if (e.metaKey || e.ctrlKey || e.altKey) return
+        // has focus and a form field is active. A held key fires
+        // once (``repeat``): ``b``, ``h``, ``a`` and ``z`` each toggle
+        // or take something away, so a repeat would undo the first.
+        if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
         e.preventDefault()
         // Mirrors the bookmark's onClick (Card.tsx) — the ranker
         // needs this event regardless of input path, or the
@@ -2511,14 +2523,14 @@ export function App() {
         // "find previous" in some browsers). Same modifier guards as
         // the other single-key shortcuts so Cmd+H (Hide App on
         // macOS) still works when the dashboard has focus.
-        if (e.metaKey || e.ctrlKey || e.altKey) return
+        if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
         e.preventDefault()
         hideStory(selectedCardId)
       } else if ((e.key === 'a' || e.key === 'z') && selectedCardId != null) {
         // ▲ / ▼ on the selected card (C6), as its buttons do: the
         // same key again takes the vote back. Modifier guards so
         // Cmd+A (select all) and Cmd+Z (undo) still work.
-        if (e.metaKey || e.ctrlKey || e.altKey) return
+        if (e.metaKey || e.ctrlKey || e.altKey || e.repeat) return
         e.preventDefault()
         const dir = e.key === 'a' ? 'up' : 'down'
         const prev = votedMap.get(selectedCardId) ?? null
