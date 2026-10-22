@@ -113,6 +113,11 @@ type Props = {
   // state's "Show 7 days" writes through the same setter.
   prefs?: ColumnPrefs
   onPrefsChange?: (next: ColumnPrefs) => void
+  // Whether the tab's stories at its window are known (App's
+  // ``windowAnswered``): false while a 7-day or All fetch hasn't
+  // answered yet, or has only failed. Until then an empty tab says
+  // nothing of the window. Unset: known.
+  windowAnswered?: boolean
   // Optional map sourceId → category. Passed through to each Card so
   // it can render the colored left stripe. Without it the cards just
   // skip the stripe.
@@ -236,6 +241,7 @@ export function ColumnInner({
   onSelectionFolded,
   prefs,
   onPrefsChange,
+  windowAnswered,
   categoriesBySourceId,
   faviconBySourceId,
   expandedSummaries,
@@ -645,9 +651,11 @@ export function ColumnInner({
           )}
         </div>
 
-        {/* Sort/filter popover trigger. Every tab has one: For You
-            sorts too (its Best is the server's order). */}
-        {onPrefsChange && (
+        {/* Sort/filter popover trigger. Every tab but Saved has one:
+            For You sorts too (its Best is the server's order). Saved
+            has no row to show (no read state, no sort, no window), so
+            a ⋯ there would open an empty popover. */}
+        {onPrefsChange && !isSaved && (
           <button
             ref={prefsButtonRef}
             data-column-action="prefs"
@@ -660,7 +668,7 @@ export function ColumnInner({
           </button>
         )}
 
-        {popoverOpen && prefs && onPrefsChange && (
+        {popoverOpen && prefs && onPrefsChange && !isSaved && (
           <div
             ref={popoverRef}
             data-column-popover
@@ -673,8 +681,9 @@ export function ColumnInner({
             className="absolute right-0 top-full mt-2 z-20 min-w-[240px] rounded-ios-lg bg-bg-elevated shadow-2xl p-3 text-ios-body space-y-3"
           >
             {/* Mark all as read: the tab's stories not seen yet, with
-                Undo (App). Disabled at 0; Saved has no read state. */}
-            {!isSaved && onMarkAll && (
+                Undo (App). Disabled at 0. (Saved, with no read state,
+                has no ⋯.) */}
+            {onMarkAll && (
               <button
                 type="button"
                 data-mark-all
@@ -694,84 +703,80 @@ export function ColumnInner({
                 Mark all as read
               </button>
             )}
-            {/* Newest | Best. Not on Saved, which keeps its own order
-                (lib/sorting), so a control there would do nothing. */}
-            {columnKey !== SAVED_KEY && (
-              <div>
-                <div
-                  id={sortLabelId}
-                  className="text-ios-caption uppercase tracking-wide text-label-tertiary mb-1"
-                >
-                  Sort
-                </div>
-                <div
-                  role="group"
-                  aria-labelledby={sortLabelId}
-                  className="grid grid-cols-2 rounded-ios overflow-hidden border border-hairline"
-                >
-                  {SORTS.map((o) => {
-                    const active = normalizeSort(prefs.sort, columnKey) === o.value
-                    return (
-                      <button
-                        key={o.value}
-                        type="button"
-                        data-sort={o.value}
-                        aria-pressed={active}
-                        onClick={() => {
-                          if (!active) onPrefsChange({ ...prefs, sort: o.value })
-                        }}
-                        className={`min-h-[44px] text-ios-body transition ${
-                          active
-                            ? 'bg-bg-elevated text-accent'
-                            : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
-                        }`}
-                      >
-                        {o.label}
-                      </button>
-                    )
-                  })}
-                </div>
+            {/* Newest | Best. (Saved, which keeps its own order,
+                lib/sorting, has no ⋯.) */}
+            <div>
+              <div
+                id={sortLabelId}
+                className="text-ios-caption uppercase tracking-wide text-label-tertiary mb-1"
+              >
+                Sort
               </div>
-            )}
-            {/* Show stories from: the tab's window (D5). Not on Saved,
-                which lists every save. */}
-            {columnKey !== SAVED_KEY && (
-              <div>
-                <div
-                  id={windowLabelId}
-                  className="text-ios-caption uppercase tracking-wide text-label-tertiary mb-1"
-                >
-                  Show stories from
-                </div>
-                <div
-                  role="group"
-                  aria-labelledby={windowLabelId}
-                  className="grid grid-cols-4 rounded-ios overflow-hidden border border-hairline"
-                >
-                  {WINDOWS.map((o) => {
-                    const active = prefs.window === o.value
-                    return (
-                      <button
-                        key={o.value}
-                        type="button"
-                        data-window={o.value}
-                        aria-pressed={active}
-                        onClick={() => {
-                          if (!active) onPrefsChange({ ...prefs, window: o.value })
-                        }}
-                        className={`min-h-[44px] px-1 text-ios-body whitespace-nowrap transition ${
-                          active
-                            ? 'bg-bg-elevated text-accent'
-                            : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
-                        }`}
-                      >
-                        {o.label}
-                      </button>
-                    )
-                  })}
-                </div>
+              <div
+                role="group"
+                aria-labelledby={sortLabelId}
+                className="grid grid-cols-2 rounded-ios overflow-hidden border border-hairline"
+              >
+                {SORTS.map((o) => {
+                  const active = normalizeSort(prefs.sort, columnKey) === o.value
+                  return (
+                    <button
+                      key={o.value}
+                      type="button"
+                      data-sort={o.value}
+                      aria-pressed={active}
+                      onClick={() => {
+                        if (!active) onPrefsChange({ ...prefs, sort: o.value })
+                      }}
+                      className={`min-h-[44px] text-ios-body transition ${
+                        active
+                          ? 'bg-bg-elevated text-accent'
+                          : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  )
+                })}
               </div>
-            )}
+            </div>
+            {/* Show stories from: the tab's window (D5). (Saved,
+                which lists every save, has no ⋯.) */}
+            <div>
+              <div
+                id={windowLabelId}
+                className="text-ios-caption uppercase tracking-wide text-label-tertiary mb-1"
+              >
+                Show stories from
+              </div>
+              <div
+                role="group"
+                aria-labelledby={windowLabelId}
+                className="grid grid-cols-4 rounded-ios overflow-hidden border border-hairline"
+              >
+                {WINDOWS.map((o) => {
+                  const active = prefs.window === o.value
+                  return (
+                    <button
+                      key={o.value}
+                      type="button"
+                      data-window={o.value}
+                      aria-pressed={active}
+                      onClick={() => {
+                        if (!active) onPrefsChange({ ...prefs, window: o.value })
+                      }}
+                      className={`min-h-[44px] px-1 text-ios-body whitespace-nowrap transition ${
+                        active
+                          ? 'bg-bg-elevated text-accent'
+                          : 'bg-bg-surface text-label-primary active:bg-bg-elevated'
+                      }`}
+                    >
+                      {o.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
           </div>
         )}
       </header>
@@ -800,6 +805,7 @@ export function ColumnInner({
             sourcesByName={sourcesByName}
             onAddFeed={noOwnFeeds && (columnKey === SAVED_KEY || columnKey === FORYOU_KEY) ? onAddFeed : undefined}
             window={columnKey.startsWith('cat:') ? prefs?.window : undefined}
+            windowAnswered={windowAnswered !== false}
             onShowWider={prefs && onPrefsChange ? (next) => onPrefsChange({ ...prefs, window: next }) : undefined}
           />
         ) : (
@@ -1054,6 +1060,7 @@ function EmptyColumnMessage({
   sourcesByName,
   onAddFeed,
   window: tabWindow,
+  windowAnswered,
   onShowWider,
 }: {
   sourceName?: string
@@ -1064,6 +1071,13 @@ function EmptyColumnMessage({
   // tab says "Nothing in 2 days · Show 7 days", and the offer widens
   // it (``onShowWider``). Unset on Saved, For You and a filter.
   window?: Window
+  // Whether the tab's stories at that window are known (Column's
+  // ``windowAnswered``). While a 7-day fetch is on its way, or after it
+  // failed, an empty tab claims nothing and offers nothing: the line
+  // would say "Nothing in 7 days" of stories it hasn't seen, and its
+  // "Show all" would widen a tab that has some. The error banner says
+  // why a fetch failed.
+  windowAnswered?: boolean
   onShowWider?: (next: Window) => void
 }) {
   // The column's feed: the one feed a filter shows, or the feed named
@@ -1074,6 +1088,8 @@ function EmptyColumnMessage({
   // "no entries match": the window is the filter.
   const quiet = tabWindow != null && EMPTY_WINDOW_LINES[tabWindow] != null && widerWindow(tabWindow)
   const quietLine = () => {
+    // Not known yet (or the fetch failed): nothing, not a claim.
+    if (!windowAnswered) return <div data-window-pending className="min-h-[44px]" />
     const [said, offer] = EMPTY_WINDOW_LINES[tabWindow!]!.split(' · ')
     const next = widerWindow(tabWindow!)!
     return (
@@ -1081,7 +1097,9 @@ function EmptyColumnMessage({
         <span>{said}</span>
         <span aria-hidden="true">·</span>
         {onShowWider ? (
-          <button type="button" data-show-wider onClick={() => onShowWider(next)} className="min-h-[44px] px-1 text-accent active:opacity-70">
+          // Keyed by the window: a new offer is a new button, so a press
+          // (VoiceOver's focus) can't carry over from the last one.
+          <button key={tabWindow} type="button" data-show-wider onClick={() => onShowWider(next)} className="min-h-[44px] px-1 text-accent active:opacity-70">
             {offer}
           </button>
         ) : (
@@ -1184,6 +1202,7 @@ function _columnPropsEqual(prev: Props, next: Props): boolean {
     // reference is what makes this work — shallow-equal would
     // always differ because every render allocates a new object.
     prev.prefs === next.prefs &&
+    prev.windowAnswered === next.windowAnswered &&
     prev.categoriesBySourceId === next.categoriesBySourceId &&
     prev.faviconBySourceId === next.faviconBySourceId &&
     prev.expandedSummaries === next.expandedSummaries &&

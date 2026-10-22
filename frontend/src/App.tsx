@@ -1902,6 +1902,13 @@ export function App() {
   // sorted in instead (``inOrder``). Later answers are always sorted in.
   const widerSeqRef = useRef(new Map<ColKey, number>())
   const widerSinceRef = useRef(new Map<string, { at: number; answered: boolean }>())
+  // Per tab and window (``key|window``): whether a wider fetch for it has
+  // answered, or only failed so far. Until one answers, the tab's rows
+  // for that window aren't known, so an empty tab claims nothing
+  // ("Nothing in 7 days") and offers nothing (``windowAnswered``). Kept
+  // across tab switches with ``extraByTab``'s rows; a failure after an
+  // answer leaves it answered (the rows held are that answer's).
+  const [widerStatus, setWiderStatus] = useState<ReadonlyMap<string, 'answered' | 'failed'>>(() => new Map())
   const fetchWider = useCallback(
     async (tab: { key: ColKey; name: string; window: Window }) => {
       const h = windowHours(tab.window)
@@ -1920,6 +1927,7 @@ export function App() {
         const had = extraRef.current.get(tab.key) ?? NO_ENTRIES
         const changed = had.length !== rows.length || had.some((e, i) => e.id !== rows[i].id)
         if (changed) setExtraByTab((prev) => new Map(prev).set(tab.key, rows))
+        setWiderStatus((prev) => (prev.get(scope) === 'answered' ? prev : new Map(prev).set(scope, 'answered')))
         if (since && !since.answered) {
           since.answered = true
           const scroller = isDesktop ? scrollersRef.current.desktop : scrollersRef.current.phone
@@ -1929,7 +1937,10 @@ export function App() {
       } catch (err) {
         // The tab keeps what it had (the 2-day data at least); the
         // banner says why, until a poll that works clears it.
-        if (widerSeqRef.current.get(tab.key) === seq) setError(errorMessage(err))
+        if (widerSeqRef.current.get(tab.key) === seq) {
+          setError(errorMessage(err))
+          setWiderStatus((prev) => (prev.has(scope) ? prev : new Map(prev).set(scope, 'failed')))
+        }
       }
     },
     [activeSources, isDesktop, resetSnapshot],
@@ -1986,6 +1997,11 @@ export function App() {
     for (const w of widened.values()) for (const id of w.ids) out.add(id)
     return out
   }, [widened])
+  // Whether a tab's stories at its window are known: 1 and 2 days come
+  // with every refresh; 7 days and All once their own fetch has answered
+  // (``widerStatus``). Column's empty state claims "Nothing in 7 days"
+  // only then.
+  const windowAnsweredFor = (c: { key: ColKey; window: Window }) => !isWider(c.window) || widerStatus.get(`${c.key}|${c.window}`) === 'answered'
   // A wider tab draws the rows it fetched too (``widened``).
   const asFeedTab = (c: TabColumn & { order: string }): FeedTab<Entry> => {
     const entries = widened.get(c.key)?.entries ?? c.entries
@@ -3453,6 +3469,7 @@ export function App() {
                       onVoteEntry={voteEntry}
                       votedMap={votedMap}
                       prefs={prefsFor(col)}
+                      windowAnswered={windowAnsweredFor(col)}
                       onPrefsChange={(next) => setPrefsFor(col.name, next)}
                       categoriesBySourceId={categoriesBySourceId}
                       faviconBySourceId={faviconBySourceId}
@@ -3616,6 +3633,7 @@ export function App() {
                     onVoteEntry={voteEntry}
                     votedMap={votedMap}
                     prefs={prefsFor(phoneCol)}
+                    windowAnswered={windowAnsweredFor(phoneCol)}
                     onPrefsChange={(next) => setPrefsFor(phoneCol.name, next)}
                     categoriesBySourceId={categoriesBySourceId}
                     faviconBySourceId={faviconBySourceId}

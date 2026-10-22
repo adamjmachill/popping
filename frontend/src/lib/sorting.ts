@@ -20,19 +20,25 @@ export type Sort = 'newest' | 'best'
  *  ``top`` and ``oldest`` come from older builds; ``minScore`` is kept
  *  so the stored shape doesn't change, but nothing filters on it any
  *  more. ``window`` is the tab's window (lib/window, PR4d); a row an
- *  older build wrote has ``maxAgeHours`` instead, which ``prefsFor``
- *  reads through ``windowOf`` and never writes back. */
+ *  older build wrote has a numeric ``maxAgeHours`` instead, which
+ *  ``prefsFor`` reads through ``windowOf``. ``maxAgeHours`` is always
+ *  written as null next to ``window``: an older build (a desktop tab
+ *  left open) keeps a row as it is only when its ``maxAgeHours`` is
+ *  null, so its writes then spread the row, ``window`` included; a row
+ *  without the field would be rebuilt there without ``window``, and
+ *  its next change of sort would put the tab back to 2 days. */
 export type TabPrefs = {
   sort: 'top' | 'newest' | 'oldest' | 'best'
   minScore: number
   window: Window
+  maxAgeHours: null
 }
 
 // Module constants, not fresh objects: Column's memo compares prefs by
 // reference, so a tab with no stored row must get the same object on
 // every render.
-export const NEWEST_PREFS: TabPrefs = { sort: 'newest', minScore: 0, window: DEFAULT_WINDOW }
-export const BEST_PREFS: TabPrefs = { sort: 'best', minScore: 0, window: DEFAULT_WINDOW }
+export const NEWEST_PREFS: TabPrefs = { sort: 'newest', minScore: 0, window: DEFAULT_WINDOW, maxAgeHours: null }
+export const BEST_PREFS: TabPrefs = { sort: 'best', minScore: 0, window: DEFAULT_WINDOW, maxAgeHours: null }
 
 /** The fields a story is ordered by. */
 export type Sortable = {
@@ -105,7 +111,8 @@ const merged = new WeakMap<object, Partial<Record<Sort, TabPrefs>>>()
  *  read by ``normalizeSort`` and the window by ``windowOf``. A spread of
  *  the result is what Column writes back, so a write can never store
  *  ``top`` or ``oldest``, and a row that still holds an older build's
- *  ``maxAgeHours`` is written back with ``window`` and without it. */
+ *  numeric ``maxAgeHours`` is written back with ``window`` and
+ *  ``maxAgeHours: null`` (``TabPrefs``). */
 export function prefsFor(
   columnPrefs: Readonly<Record<string, unknown>>,
   tab: { key: ColKey; name: string },
@@ -118,10 +125,10 @@ export function prefsFor(
   const sort = normalizeSort(r.sort, tab.key)
   const minScore = typeof r.minScore === 'number' && Number.isFinite(r.minScore) ? r.minScore : 0
   const window = windowOf(row)
-  if (r.sort === sort && r.minScore === minScore && r.window === window && !('maxAgeHours' in r)) return row as TabPrefs
+  if (r.sort === sort && r.minScore === minScore && r.window === window && r.maxAgeHours === null) return row as TabPrefs
   const cached = merged.get(row)?.[fallback]
   if (cached) return cached
-  const out: TabPrefs = { sort, minScore, window }
+  const out: TabPrefs = { sort, minScore, window, maxAgeHours: null }
   merged.set(row, { ...merged.get(row), [fallback]: out })
   return out
 }

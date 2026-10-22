@@ -33,6 +33,11 @@ export type Snapshot<E extends Item> = {
   earlier: number[]
   /** Arrivals waiting while the marker is above the screen. */
   held: number[]
+  /** The stories that went in at the end of their group since the
+   *  snapshot was taken (arrivals, and stories that came in already
+   *  seen): always each group's tail. A story placed in order
+   *  (``inOrder``) goes in among the others, before these. */
+  arrived: ReadonlySet<number>
   /** The latest copy of every story in the snapshot. */
   cache: Map<number, E>
   /** The arrays the last call returned, handed out again while equal. */
@@ -100,41 +105,66 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
       cache.set(e.id, e)
       ;(placedSeen(e) ? earlier : unseen).push(e.id)
     }
-    snap = { generation: (prev?.generation ?? 0) + 1, order, unseen, earlier, held: [], cache, out: prev?.out ?? null }
+    snap = { generation: (prev?.generation ?? 0) + 1, order, unseen, earlier, held: [], arrived: new Set(), cache, out: prev?.out ?? null }
   } else {
     const cache = new Map(prev.cache)
     const known = new Set<number>([...prev.unseen, ...prev.earlier, ...prev.held])
     const unseen = [...prev.unseen]
     const earlier = [...prev.earlier]
     let held = [...prev.held]
-    // Where a story goes into a group: at the end, or at its place in
-    // ``entries`` when ``inOrder`` says so: after every story before it
-    // there, and before the first story after it, or before the
-    // arrivals appended out of order (the first break in the group's
-    // order). A story the input no longer holds is stepped over.
+    // The arrivals so far, copied on the first change.
+    let arrived = prev.arrived
+    const arrive = (group: number[], id: number) => {
+      group.push(id)
+      if (arrived === prev.arrived) arrived = new Set(prev.arrived)
+      ;(arrived as Set<number>).add(id)
+    }
+    // Where a story goes into a group: at the end (an arrival), or, when
+    // ``inOrder`` says so, at its place among the group's other stories
+    // by their places in ``entries`` (the tab's order now), before the
+    // arrivals. The tab's order can have moved since the snapshot was
+    // taken (For You's Best is the server's ranking; a rescore moves a
+    // Best tab), so the snapshot's own stories needn't be in order any
+    // more: the place is the one with the fewest stories on the wrong
+    // side of it (one sorting after it above, or before it below), the
+    // lowest of those on a tie, so what is above the reader moves the
+    // least. A story the input no longer holds is stepped over.
     const inOrder = input.inOrder ?? keepAll
     let at: Map<number, number> | null = null
     const place = (group: number[], e: E) => {
       if (!inOrder(e)) {
-        group.push(e.id)
+        arrive(group, e.id)
         return
       }
       if (!at) at = new Map(entries.map((x, i) => [x.id, i]))
-      const mine = at.get(e.id)
+      const pos = at
+      let end = group.findIndex((id) => arrived.has(id))
+      if (end < 0) end = group.length
+      const mine = pos.get(e.id)
       if (mine == null) {
-        group.push(e.id)
+        group.splice(end, 0, e.id)
         return
       }
-      let prev = -1
-      let i = group.length
-      for (let j = 0; j < group.length; j++) {
-        const pos = at.get(group[j])
-        if (pos == null) continue
-        if (pos > mine || pos < prev) {
+      // ``above``: stories above the place that sort after the story;
+      // ``below``: stories at or under it that sort before it.
+      let below = 0
+      for (let j = 0; j < end; j++) {
+        const p = pos.get(group[j])
+        if (p != null && p < mine) below++
+      }
+      let above = 0
+      let best = Infinity
+      let i = end
+      for (let j = 0; j <= end; j++) {
+        if (above + below <= best) {
+          best = above + below
           i = j
-          break
         }
-        prev = pos
+        if (j === end) break
+        const p = pos.get(group[j])
+        if (p == null) continue
+        if (p > mine) above++
+        else if (p < mine) below--
       }
       group.splice(i, 0, e.id)
     }
@@ -153,11 +183,11 @@ export function partitionTab<E extends Item>(input: PartitionInput<E>): Partitio
       for (const id of held) {
         const e = cache.get(id)
         if (e) place(unseen, e)
-        else unseen.push(id)
+        else arrive(unseen, id)
       }
       held = []
     }
-    snap = { generation: prev.generation, order, unseen, earlier, held, cache, out: prev.out }
+    snap = { generation: prev.generation, order, unseen, earlier, held, arrived, cache, out: prev.out }
   }
 
   const draw = (ids: readonly number[]) => {

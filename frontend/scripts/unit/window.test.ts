@@ -45,21 +45,45 @@ test('windowOf: a row that arrives through a saved view (filter_presets) reads t
   assert.equal(prefsFor(preset.columnPrefs, { key: colKey('deals'), name: 'deals' }).window, 'all')
 })
 
-test('prefsFor: a write sets window and drops maxAgeHours', () => {
+test('prefsFor: a write sets window, with maxAgeHours null', () => {
   // What Column writes back: a spread of the prefs it was given.
   const legacy = { sort: 'newest', minScore: 0, maxAgeHours: 24 }
   const read = prefsFor({ news: legacy }, NEWS)
-  assert.deepEqual(read, { sort: 'newest', minScore: 0, window: '1d' })
-  assert.equal('maxAgeHours' in { ...read, window: '7d' }, false)
+  assert.deepEqual(read, { sort: 'newest', minScore: 0, window: '1d', maxAgeHours: null })
+  assert.deepEqual({ ...read, window: '7d' }, { sort: 'newest', minScore: 0, window: '7d', maxAgeHours: null })
   // A row already in the new shape is used as it is.
-  const row = { sort: 'newest', minScore: 0, window: '7d' }
+  const row = { sort: 'newest', minScore: 0, window: '7d', maxAgeHours: null }
   assert.equal(prefsFor({ news: row }, NEWS), row)
-  // One that still carries maxAgeHours next to its window is rebuilt
-  // without it (the same object each time).
-  const both = { sort: 'newest', minScore: 0, window: '7d', maxAgeHours: 24 }
-  const rebuilt = prefsFor({ news: both }, NEWS)
-  assert.deepEqual(rebuilt, { sort: 'newest', minScore: 0, window: '7d' })
-  assert.equal(prefsFor({ news: both }, NEWS), rebuilt)
+  // One with no maxAgeHours, or a stale bundle's number next to its
+  // window, is rebuilt with null (the same object each time).
+  for (const other of [{ sort: 'newest', minScore: 0, window: '7d' }, { sort: 'newest', minScore: 0, window: '7d', maxAgeHours: 24 }]) {
+    const rebuilt = prefsFor({ news: other }, NEWS)
+    assert.deepEqual(rebuilt, { sort: 'newest', minScore: 0, window: '7d', maxAgeHours: null })
+    assert.equal(prefsFor({ news: other }, NEWS), rebuilt)
+  }
+})
+
+test('a stale bundle that changes a tab\'s sort keeps the tab\'s window (Risks)', () => {
+  // The rule an older build's prefsFor reads a row by (main before
+  // PR4d): the row as it is when its fields already have their read
+  // values (maxAgeHours: a positive number, else null), otherwise a
+  // rebuilt {sort, minScore, maxAgeHours}. Its Column writes a spread of
+  // what that gives.
+  const oldPrefsFor = (r: Record<string, unknown>) => {
+    const sort = r.sort === 'newest' || r.sort === 'best' ? r.sort : 'newest'
+    const minScore = typeof r.minScore === 'number' ? r.minScore : 0
+    const maxAgeHours = typeof r.maxAgeHours === 'number' && r.maxAgeHours > 0 ? r.maxAgeHours : null
+    if (r.sort === sort && r.minScore === minScore && r.maxAgeHours === maxAgeHours) return r
+    return { sort, minScore, maxAgeHours }
+  }
+  // The phone picks 7 days; the desktop tab, still on the old build,
+  // then picks Best, then its "Hide if older than" 1 hour.
+  const phone = { ...prefsFor({}, NEWS), window: '7d' as const }
+  const desk = { ...oldPrefsFor(phone), sort: 'best' }
+  assert.equal(prefsFor({ news: desk }, NEWS).window, '7d')
+  assert.equal(prefsFor({ news: desk }, NEWS).sort, 'best')
+  const shorter = { ...oldPrefsFor(desk), maxAgeHours: 1 }
+  assert.equal(prefsFor({ news: shorter }, NEWS).window, '7d')
 })
 
 test('windowHours, isWider and widerWindow', () => {

@@ -121,23 +121,23 @@ test('prefsFor: a write from a tab with no row stores its sort, never top', () =
   assert.equal(sortWrite.sort, 'newest')
   assert.equal({ ...prefsFor({}, NEWS_TAB), window: '1d' }.sort, 'newest')
   // An older build's top is read as the default, so it is never written
-  // back; its maxAgeHours is read as a window (lib/window) and dropped.
+  // back; its maxAgeHours is read as a window (lib/window) and written as null.
   const legacy = { 'For You': { sort: 'top', minScore: 0, maxAgeHours: 4 }, news: { sort: 'oldest', minScore: 20, maxAgeHours: null } }
-  assert.deepEqual(prefsFor(legacy, FY), { sort: 'best', minScore: 0, window: '1d' })
-  assert.deepEqual(prefsFor(legacy, NEWS_TAB), { sort: 'newest', minScore: 20, window: '2d' })
+  assert.deepEqual(prefsFor(legacy, FY), { sort: 'best', minScore: 0, window: '1d', maxAgeHours: null })
+  assert.deepEqual(prefsFor(legacy, NEWS_TAB), { sort: 'newest', minScore: 20, window: '2d', maxAgeHours: null })
   assert.equal({ ...prefsFor(legacy, FY), window: 'all' }.sort, 'best')
 })
 
 test('prefsFor: the same row gives the same object, so the Column memo holds', () => {
-  const full = { sort: 'best', minScore: 0, window: '1d' }
+  const full = { sort: 'best', minScore: 0, window: '1d', maxAgeHours: null }
   assert.equal(prefsFor({ news: full }, NEWS_TAB), full, 'a complete row is used as it is')
   const partial = { sort: 'top' }
   const map = { news: partial, 'For You': partial }
   const first = prefsFor(map, NEWS_TAB)
   assert.equal(prefsFor(map, NEWS_TAB), first)
-  assert.deepEqual(first, { sort: 'newest', minScore: 0, window: '2d' })
+  assert.deepEqual(first, { sort: 'newest', minScore: 0, window: '2d', maxAgeHours: null })
   // The same row object read for another tab gets that tab's default.
-  assert.deepEqual(prefsFor(map, FY), { sort: 'best', minScore: 0, window: '2d' })
+  assert.deepEqual(prefsFor(map, FY), { sort: 'best', minScore: 0, window: '2d', maxAgeHours: null })
   assert.equal(prefsFor(map, NEWS_TAB), first)
   // Malformed values fall back field by field.
   assert.deepEqual(prefsFor({ news: { sort: 'newest', minScore: 'x', window: -3 } }, NEWS_TAB), NEWEST_PREFS)

@@ -125,6 +125,39 @@ test('PR4d: a wider tab\'s rows wait with the arrivals while the marker is above
   assert.deepEqual(ids(let_go.unseen), [3, 4, 5, 1])
 })
 
+test('PR4d: a wider tab\'s row goes in at its place when the tab\'s order has moved since the snapshot', () => {
+  // For You's Best is the server's ranking, and a rescore moves a Best
+  // tab: between the snapshot and the next answer the top two swap, and
+  // the answer brings 99 at rank 9. It goes between 8 and 9, not above
+  // the first story that moved.
+  const step = tab('best')
+  const top = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((id) => story(id))
+  step(top)
+  const s = (...list: number[]) => list.map((id) => story(id))
+  const p = step(s(2, 1, 3, 4, 5, 6, 7, 8, 99, 9, 10), { inOrder: (e) => e.id === 99 })
+  assert.deepEqual(ids(p.unseen), [1, 2, 3, 4, 5, 6, 7, 8, 99, 9, 10])
+  // A story that dropped from the top to the bottom doesn't pull a row
+  // placed in the middle up with it, and one that rose from the bottom
+  // doesn't push it down to the end.
+  const dropped = tab('best')
+  dropped(top)
+  const d = dropped(s(2, 3, 4, 5, 99, 6, 7, 8, 9, 10, 1), { inOrder: (e) => e.id === 99 })
+  assert.deepEqual(ids(d.unseen), [1, 2, 3, 4, 5, 99, 6, 7, 8, 9, 10])
+  const rose = tab('best')
+  rose(top)
+  const r = rose(s(1, 2, 10, 3, 4, 99, 5, 6, 7, 8, 9), { inOrder: (e) => e.id === 99 })
+  assert.deepEqual(ids(r.unseen), [1, 2, 3, 4, 99, 5, 6, 7, 8, 9, 10])
+  // Arrivals stay the tail: a row the order puts last goes in before
+  // them, and a later row goes in among the snapshot's stories again.
+  const arrivals = tab('best')
+  arrivals(s(1, 2, 3))
+  arrivals(s(50, 1, 2, 3))
+  const a = arrivals(s(50, 2, 1, 3, 98), { inOrder: (e) => e.id === 98 })
+  assert.deepEqual(ids(a.unseen), [1, 2, 3, 98, 50])
+  const b = arrivals(s(50, 2, 1, 97, 3, 98), { inOrder: (e) => e.id === 98 || e.id === 97 })
+  assert.deepEqual(ids(b.unseen), [1, 2, 97, 3, 98, 50])
+})
+
 test('a story a poll drops stays, drawn from the kept copy, until the next snapshot', () => {
   const step = tab()
   step([story(3), story(2), story(1)])

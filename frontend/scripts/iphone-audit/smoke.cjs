@@ -518,6 +518,14 @@ const STATES = [
       await more.click()
       await page.waitForTimeout(150)
       if (await page.locator(POPOVER).count()) fail('POPOVER', 'tapping ⋯ while open did not close the popover')
+      // Saved has no ⋯: nothing in it would apply (no read state, sort
+      // or window), and an empty popover is a control that does nothing.
+      const strip = page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"]')
+      await strip.filter({ hasText: /^Saved/ }).first().click()
+      await page.locator('[role="tablist"][aria-label="dashboard sections"] [role="tab"][aria-selected="true"]').filter({ hasText: /^Saved/ }).first().waitFor({ state: 'visible' })
+      await page.waitForTimeout(150)
+      if (await page.locator(`${MOBILE_MAIN} [data-column-action="prefs"]`).count()) fail('POPOVER', 'Saved has a ⋯ (column preferences) button')
+      await strip.filter({ hasText: /^News/ }).first().click()
     },
   },
   {

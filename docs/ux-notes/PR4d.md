@@ -37,12 +37,14 @@ days". Saved lists every save. On this day reads "On this day".
   kept, as the old age filter kept it) and `widerWindow` (the empty
   state's offer: 7 days from 1 or 2 days, All from 7, nothing from All).
 - `frontend/src/lib/sorting.ts`: `TabPrefs` is `{sort, minScore,
-  window}`. `prefsFor` reads the window with `windowOf` and returns the
-  stored row as it is only when it already has that shape with no
-  `maxAgeHours`; otherwise one merged object per row (the WeakMap cache,
-  as before), so Column's memo holds. A write is a spread of what
-  `prefsFor` gave, so every write sets `window` and drops `maxAgeHours`.
-  `NEWEST_PREFS` and `BEST_PREFS` carry `window: '2d'`.
+  window, maxAgeHours: null}`. `prefsFor` reads the window with
+  `windowOf` and returns the stored row as it is only when it already
+  has that shape (`maxAgeHours` null); otherwise one merged object per
+  row (the WeakMap cache, as before), so Column's memo holds. A write is
+  a spread of what `prefsFor` gave, so every write sets `window` and
+  writes `maxAgeHours` as null (review fix 3, under Deviations).
+  `NEWEST_PREFS` and `BEST_PREFS` carry `window: '2d'` and
+  `maxAgeHours: null`.
   `lib/preferences.tsx`'s `ColumnPrefsValue` has `window?` and
   `maxAgeHours?` (rows older builds wrote keep the latter until their
   next write).
@@ -97,20 +99,29 @@ days". Saved lists every save. On this day reads "On this day".
     (`FORYOU_ROW_TOP`); its "N entries" count line is gone.
 - `frontend/src/lib/feedOrder.ts`: `partitionTab` takes `inOrder(e)`: a
   story new to the snapshot that goes in at its place in `entries` (the
-  tab's order), not at the end of its group: after every story before it
-  there, before the first story after it, or before the arrivals
-  appended out of order (the first break in the group's order); a story
-  the input no longer holds is stepped over. It still waits with the
-  arrivals while `hold` is on. `Held` gains `extra`.
+  tab's order), not at the end of its group: among the group's stories
+  that aren't arrivals (`Snapshot.arrived`, the ids that went in at a
+  group's end, always its tail), at the place with the fewest of them on
+  the wrong side by their places in `entries` now (the lowest such place
+  on a tie), so a tab whose order moved since the snapshot (For You's
+  Best, a rescore) still puts the row at its rank; a story the input no
+  longer holds is stepped over. It still waits with the arrivals while
+  `hold` is on. `Held` gains `extra`.
   `lib/useFeedOrder.ts` passes `inOrder` through.
 - `frontend/src/components/Column.tsx`: the ⋯ popover's "Hide if older
   than" select is replaced by "Show stories from", a 4-way group of 44px
-  buttons (`button[data-window]`, `aria-pressed`), not on Saved. An empty
+  buttons (`button[data-window]`, `aria-pressed`). Saved has no ⋯ at all
+  (it has no read state, sort or window, so its popover would be empty).
+  An empty
   category tab (`cat:` keys) at 1, 2 or 7 days reads "Nothing in 1 day ·
   Show 7 days", "Nothing in 2 days · Show 7 days" or "Nothing in 7 days ·
   Show all" (`EMPTY_WINDOW_LINES`, `[data-window-empty]`); the offer
   (`button[data-show-wider]`) writes the next window through the same
-  setter as the control. A feed's own trouble (auto-disabled, last
+  setter as the control (a button keyed by the window). At 7 days the
+  line waits for the tab's 7-day fetch to answer (`windowAnswered`, from
+  App's `widerStatus`): until then, and after a failure, an empty tab
+  draws an empty 44px row (`[data-window-pending]`) and claims nothing.
+  A feed's own trouble (auto-disabled, last
   error, never fetched) still says so first; the line comes before "no
   entries match the current filters", since the window is the filter.
   At All the slice-19 messages stand.
@@ -151,11 +162,25 @@ days". Saved lists every save. On this day reads "On this day".
 
 ## Deviations from the spec
 
-- **The stored shape.** The spec says new writes set `window` and drop
-  `maxAgeHours`. `TabPrefs` (what Column reads and writes) therefore has
-  `window` and no `maxAgeHours`; `windowOf` reads the legacy field from
-  the stored row. `ColumnPrefsValue` keeps both as optional so rows older
-  builds wrote still type as what they are.
+- **The stored shape (owner to confirm).** The spec says new writes
+  set `window` and drop `maxAgeHours`. Dropped, a stale bundle (a
+  desktop tab left open on an older build) undoes a window: its
+  `prefsFor` keeps a row as it is only when the row's `maxAgeHours` is
+  null, so a row without the field is rebuilt there as `{sort,
+  minScore, maxAgeHours: null}`, and its next change of sort writes
+  that, without `window`; this build then reads 2 days. The Risks note
+  ("a stale bundle that still writes maxAgeHours can't shrink a tab")
+  assumed rows that hold both. So new writes keep `maxAgeHours` as null
+  next to `window`: the older build returns such a row as it is, its
+  writes spread it, `window` included, and an explicit `window` still
+  wins over any number it writes. Null is what every row already holds
+  (it was the old control's All), and `windowOf` reads it as nothing
+  when `window` is there. If the owner keeps "drop `maxAgeHours`", the
+  fix is to write `{sort, minScore, window}` again (`TabPrefs` and
+  `prefsFor`'s identity check) and correct the Risks note to say a
+  stale bundle's change of sort puts that tab back to 2 days.
+  `ColumnPrefsValue` keeps both fields optional so rows older builds
+  wrote still type as what they are.
 - **"Touched since the switch"** is read as: the tab's scroller is off
   its top, or a story was opened since the tab came on screen at that
   window. An answer that changes nothing (the same ids as held) never
@@ -163,8 +188,18 @@ days". Saved lists every save. On this day reads "On this day".
   already held isn't bumped by the refetch.
 - **`partitionTab` changed** (PR3b's lib) for "sorted into unseen or
   Earlier by the tab's sort, never appended out of order": the `inOrder`
-  predicate above. The arrivals' rule is untouched (they still append,
-  and still wait on `hold`).
+  predicate above, placed by the stories' places in the tab's order now,
+  and `Snapshot.arrived`. The arrivals' rule is untouched (they still
+  append, and still wait on `hold`).
+- **Saved has no ⋯.** Its popover held only "Hide if older than" on
+  main; with the window not on Saved (D5) it would be empty. A later
+  unit that gives Saved a row of its own brings the ⋯ back.
+- **The quiet line at 7 days waits for the 7-day answer.** The spec
+  names only the 2-day line; at 7 days "Nothing in 7 days" is said only
+  once the tab's 7-day fetch has answered, and nothing is said after a
+  failed one (the banner says why). An answer stays good across tab
+  switches, as `extraByTab`'s rows do; a failure after an answer leaves
+  it answered (the rows held are that answer's).
 - **Desktop For You.** The row shows the top 6 and loses its count line
   ("50 entries" over 6 cards would read wrong). It draws the 2-day For
   You only: For You's window (set from the phone's ⋯) widens the phone's
@@ -206,11 +241,15 @@ days". Saved lists every save. On this day reads "On this day".
 - **Unit:** `window.test.ts` (new): an explicit window (with and without
   `maxAgeHours` next to it); legacy 1, 4 and 24; null, missing and
   anything else; a row through `filter_presets`; `prefsFor` writes set
-  `window` and drop `maxAgeHours`; `windowHours`, `isWider`,
+  `window` with `maxAgeHours` null; a stale bundle's change of sort (its
+  `prefsFor` rule, inlined) keeps the window; `windowHours`, `isWider`,
   `widerWindow`; `inWindow` at each edge. `sorting.test.ts` follows the
   new shape. `feedOrder.test.ts`: `inOrder` places a wider tab's rows at
   their place (unseen and Earlier) with arrivals still at the end, and
-  waits with them on `hold`; `keepIdsFor` takes `extra`.
+  waits with them on `hold`; it still does once the tab's order has
+  moved since the snapshot (the top two swapped, a story dropped to the
+  bottom or risen from it), arrivals staying the tail; `keepIdsFor`
+  takes `extra`.
 - **pytest:** `test_historical_sources_match_brief`;
   `test_empty_state_offers_a_wider_window`.
 - **`flow-tab-window-7d` and the snapshot reset.** On Newest a wider
@@ -219,15 +258,20 @@ days". Saved lists every save. On this day reads "On this day".
   snapshot before the answer lands. `flow-tab-window-7d` keeps the
   spec's steps (order after away and back, and on a cold load);
   `flow-tab-window-in-order` adds the Best case that tells the three
-  apart: the untouched first answer (reset), and an answer that lands
-  after a story was opened (no reset, the row placed in order, the read
-  story left where it is).
+  apart: the untouched first answer (reset: a story seen elsewhere while
+  the answer was on its way goes under Earlier, which only a new
+  snapshot does), and an answer that lands after a story was opened (no
+  reset, the row placed in order, the read story left where it is).
 - **Flows** (`frontend/scripts/iphone-audit/README.md` has each in
   full): `flow-window-default`, `flow-tab-window-7d`,
   `flow-tab-window-in-order`, `flow-badge-in-window`, `flow-paused-hidden`,
-  `flow-paused-hidden-desktop` (1280), `flow-quiet-tab-kept`.
-  `flow-saved-by-id` stays green with the window on.
-- **Smoke:** `column-popover` at 390 and 320 checks the window control.
+  `flow-paused-hidden-desktop` (1280), `flow-quiet-tab-kept`; from the
+  review, `flow-foryou-window-rerank`, `flow-quiet-tab-pending`,
+  `flow-filter-window` and `flow-saved-ignores-window` (Saved lists
+  saves older than 2 days). `flow-saved-by-id` stays green with the
+  window on.
+- **Smoke:** `column-popover` at 390 and 320 checks the window control,
+  and that Saved has no ⋯.
 
 ## Verification
 
@@ -276,6 +320,101 @@ flow or test run, then restored and rebuilt):
 
 WebKit results come only from CI.
 
+## Review fixes (second commit)
+
+Nine confirmed findings; all applied.
+
+1. **A wider row placed far from its rank once the tab's order moved**
+   (major, `lib/feedOrder.ts`). `place()` took the first drop in the
+   snapshot's positions for the start of the arrivals, so a top-two swap
+   in For You's ranking (or a rescore on a Best tab) put the next
+   answer's rank-9 row second. The snapshot now records its arrivals
+   (`Snapshot.arrived`, always each group's tail), and an `inOrder` row
+   goes among the other stories at the place with the fewest of them on
+   the wrong side by their places in the tab's order now (the lowest
+   such place on a tie), before the arrivals. Unit test: the top two
+   swapped then 99 at rank 9 (1..8, 99, 9, 10); a story dropped to the
+   bottom; one risen from it; arrivals staying the tail. Flow:
+   `flow-foryou-window-rerank` (For You at 7 days; a poll's answer swaps
+   the top two and brings 506 at rank 9: it goes between 502 and 604).
+2. and 4. **"Nothing in 7 days · Show all" while the 7-day fetch is on
+   its way, and after it fails** (minor and major, the same defect,
+   `Column.tsx` / `App.tsx`). App keeps `widerStatus` (state, `key|window`
+   → answered or failed): answered on the first answer for that scope
+   (changed or not), failed on an error before any answer. Column gets
+   `windowAnswered` (1 and 2 days always; 7 days and All once answered)
+   and compares it in its memo. `EmptyColumnMessage` draws the window
+   line only then; before, and after a failure, an empty 44px row
+   (`[data-window-pending]`), no claim and no button, the banner saying
+   why a fetch failed. The offer button is keyed by the window, so a
+   press can't carry over to a new offer. Flow: `flow-quiet-tab-pending`
+   (the 7-day answer held, then 503: no line either way; the next poll's
+   answer brings 604).
+3. **A stale bundle's change of sort put a tab back to 2 days** (minor,
+   `lib/sorting.ts`). Applied as option A, writing `maxAgeHours: null`
+   next to `window`, which departs from the spec's "drop `maxAgeHours`":
+   see "The stored shape (owner to confirm)" under Deviations, with the
+   way back if the owner prefers the spec's wording. `window.test.ts`
+   inlines the older build's `prefsFor` rule and proves a sort change
+   (and its "Hide if older than") there keeps the window here;
+   `flow-tab-window-7d` checks the PUT carries `maxAgeHours: null`.
+5. **Saved's ⋯ opened an empty popover** (major, `Column.tsx`). The ⋯
+   and its popover are gated on `!isSaved`; the inner Saved checks went
+   (they could no longer be true). `column-popover` (390, 320),
+   `flow-window-default`, `flow-sort-best` and `flow-badge-cap` assert
+   Saved has no `[data-column-action="prefs"]`.
+6. **Nothing tested that Saved ignores the window** (major, flows).
+   `flow-saved-ignores-window`: saves of 605 (10 days) and 505 (2.8
+   days) next to 103 show in save order, fetched by id.
+7. **The reset step passed for the wrong reason** (minor, flows).
+   `flow-tab-window-in-order` now holds the 7-day answer while 602 is
+   marked seen in the store and a poll's resync brings the mark (602
+   stays above the marker: polls never reset); released, the untouched
+   first answer starts the snapshot over and 602 goes under Earlier
+   (601, 604, 603). Without the reset it reads 601, 602, 604, 603. The
+   All step now expects 601, 605, 604, 603.
+8. **Nothing checked the filter path's window parameters** (minor,
+   flows; App.tsx unchanged). `flow-filter-window`: the filter on
+   darknet_diaries asks `?source=darknet_diaries&limit=200&max_age_hours=48&per_source_cap=25&active_only=true`
+   and shows 401, 402 (not 405); ⋯ → 7 days asks the same at 168 hours
+   and 405 joins.
+9. **README "of 9"** (minor). `flow-tabs-reorder` reads "of 10" now
+   that CATEGORY_40 has a tab.
+
+Verification of the fixes (database `popping_test_f2`, preview on
+127.0.0.1:4174):
+
+- `npm run lint`: 0 errors (the 4 warnings main has). `npm run build`:
+  ok. `git diff --exit-code package.json package-lock.json`: clean.
+- Unit tests: 249 pass, 0 fail.
+- Backend pytest (full): 1753 passed, 13 failed, exactly the DNS-only
+  baseline.
+- Strict smoke, every state and flow: the first run found one failure,
+  `flow-sort-best` (it opened Saved's ⋯, which is gone); fixed in the
+  flow (it now asserts there is none), and the second full run (every
+  state and flow) had 0 failures, 0 warnings.
+- The touched and new flows (`flow-sort-best`, `flow-badge-cap`,
+  `flow-window-default`, `flow-tab-window-7d`, `flow-tab-window-in-order`,
+  `flow-foryou-window-rerank`, `flow-quiet-tab-pending`,
+  `flow-quiet-tab-kept`, `flow-filter-window`, `flow-saved-ignores-window`,
+  `column-popover`, `flow-badge-in-window`, `flow-tabs-reorder`,
+  `flow-saved-by-id`, `flow-paused-hidden`): 5 runs in a row, 0 failures.
+
+Mutation checks for the fixes (each line broken, `npm run build`, the
+flows run, then restored from a copy and rebuilt):
+
+| Broken | Run | Failed with |
+|---|---|---|
+| `feedOrder.ts` as in the first commit (first-drop placement) | `flow-foryou-window-rerank` | FY-RERANK: 101,506,301,102,… (506 second) |
+| the same | `feedOrder.test.ts` | the moved-order case fails |
+| Saved cut to its window (`tabWindow = prefs.window`) | `flow-saved-ignores-window` (`flow-saved-by-id` stays green) | SAVED-WINDOW: Saved shows 103 |
+| `windowAnsweredFor` always true | `flow-quiet-tab-pending` | QUIET-PENDING: "Nothing in 7 day…" while the answer is out |
+| a failed fetch marked answered | `flow-quiet-tab-pending` | QUIET-PENDING: after the fetch failed, "Nothing in 7 days" |
+| Saved's ⋯ ungated | `column-popover` (390, 320), `flow-window-default` | Saved has a ⋯ |
+| the untouched first answer never resets | `flow-tab-window-in-order` (`flow-tab-window-7d` stays green) | WINDOW-ORDER: 601,602,604,603 |
+| the filter path without the window | `flow-filter-window` | FILTER-WINDOW: the request was `?source=darknet_diaries&limit=200` |
+| `sorting.ts` as in the first commit (no `maxAgeHours: null`) | `window.test.ts`; `flow-tab-window-7d` | 2 fail; WINDOW-7D: the row written without `maxAgeHours` |
+
 ## Open items for later units
 
 - **PR5a** rewrites Card.tsx: keep the `isHistorical(sourceName)` branch
@@ -288,7 +427,10 @@ WebKit results come only from CI.
   refresh (`refreshTick`); a check-now that calls `refresh` gets that for
   free.
 - **PR7b** rewrites the empty states: keep `EMPTY_WINDOW_LINES` and the
-  `window` / `onShowWider` props of `EmptyColumnMessage`.
+  `window` / `windowAnswered` / `onShowWider` props of
+  `EmptyColumnMessage` (no window claim until the wider fetch answers).
+- A later unit that gives Saved a ⋯ row of its own (for example "Clear
+  all saves") relaxes Column's `!isSaved` gate on the ⋯.
 - **PR8a** (custom tabs): a custom tab widens the way the filter column
   does here (`entries({source, limit: 200, maxAgeHours, perSourceCap,
   activeOnly})`).
